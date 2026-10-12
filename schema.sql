@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS article_scenarios (
     reviewer_2_reason  TEXT,
     kappa_resolved     BOOLEAN DEFAULT FALSE,
     kappa_final_status VARCHAR(20),
-    assigned_at        TIMESTAMP,
+    assigned_at        TIMESTAMP DEFAULT now(),  -- date du lien (nouveauté des alertes)
     CONSTRAINT article_scenarios_pkey PRIMARY KEY (scenario_id, document_id)
 );
 
@@ -198,10 +198,21 @@ CREATE TABLE IF NOT EXISTS document_search (
                 REFERENCES literature_document (id) ON DELETE CASCADE,
     tsv         TSVECTOR,
     stale       BOOLEAN NOT NULL DEFAULT TRUE,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tsv_version SMALLINT DEFAULT 2
 );
+ALTER TABLE document_search ADD COLUMN IF NOT EXISTS tsv_version SMALLINT;
+ALTER TABLE document_search ALTER COLUMN tsv_version SET DEFAULT 2;
 CREATE INDEX IF NOT EXISTS ix_document_search_tsv ON document_search USING gin (tsv);
 CREATE INDEX IF NOT EXISTS ix_document_search_stale ON document_search (document_id) WHERE stale;
+CREATE INDEX IF NOT EXISTS ix_document_search_outdated_v2 ON document_search (document_id) WHERE tsv_version IS DISTINCT FROM 2;
+
+-- La ponctuation qui sépare deux mots (lexical_search.SEPARATOR_PATTERN), du côté du
+-- texte comme du côté des termes : A(H5N1), A/H5N1 et 2.3.4.4b s'y découpent pareil.
+CREATE OR REPLACE FUNCTION literev_separate(p_text TEXT) RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT btrim(regexp_replace(coalesce(p_text, ''), '[\]\[!"#$%&''()+,./:;<=>?@\\^`{|}~\s]+', ' ', 'g'))
+$$;
 
 CREATE OR REPLACE FUNCTION literev_document_tsv(p_id BIGINT) RETURNS TSVECTOR
 LANGUAGE plpgsql VOLATILE AS $$
@@ -209,7 +220,7 @@ DECLARE
     v_head TSVECTOR;
     v_body TSVECTOR;
 BEGIN
-    SELECT to_tsvector('english', coalesce(title, '') || ' ' || coalesce(abstract, ''))
+    SELECT to_tsvector('english', literev_separate(coalesce(title, '') || ' ' || coalesce(abstract, '')))
       INTO v_head
       FROM literature_document
      WHERE id = p_id;
@@ -217,7 +228,7 @@ BEGIN
         RETURN NULL;
     END IF;
     BEGIN
-        SELECT to_tsvector('english', string_agg(content, ' ' ORDER BY chunk_index, id))
+        SELECT to_tsvector('english', literev_separate(string_agg(content, ' ' ORDER BY chunk_index, id)))
           INTO v_body
           FROM document_chunk
          WHERE document_id = p_id
@@ -232,10 +243,11 @@ $$;
 CREATE OR REPLACE FUNCTION literev_document_search_doc_trg() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
-    INSERT INTO document_search (document_id, tsv, stale, updated_at)
-    VALUES (NEW.id, literev_document_tsv(NEW.id), FALSE, now())
+    INSERT INTO document_search (document_id, tsv, stale, updated_at, tsv_version)
+    VALUES (NEW.id, literev_document_tsv(NEW.id), FALSE, now(), 2)
     ON CONFLICT (document_id) DO UPDATE
-        SET tsv = EXCLUDED.tsv, stale = FALSE, updated_at = now();
+        SET tsv = EXCLUDED.tsv, stale = FALSE, updated_at = now(),
+            tsv_version = EXCLUDED.tsv_version;
     RETURN NULL;
 END
 $$;

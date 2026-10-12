@@ -44,6 +44,7 @@ KEY=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^WRITE_API_KEY=//p')
 |--------|------|------|---------|
 | GET | `/health` | open | liveness (`{"status":"ok"}`) |
 | GET | `/sources/health?query=cardiac%20arrest&timeout=12` | open | per-source live probe (status, latency, count) - diagnose slow/broken sources |
+| GET | `/search/limits` | open | the per-source caps this server applies (standard, exhaustive, relevance-ranked passes), as the search screen states them |
 | GET | `/corpus/stats` | open | global corpus counts |
 | GET | `/corpus/fulltext-stats` | open | full-text vs abstract-only breakdown |
 | GET | `/enrichment/status` | open | PICO / metadata / full-text backfill progress |
@@ -57,15 +58,16 @@ curl -s "$BASE/sources/health" | jq .
 ## Build a corpus
 
 The corpus of a scenario = the boolean query over (local library ∪ live sources), capped at
-`LIVE_MAX_PER_SOURCE` (default 2000) per source, within the `POPULATE_FEDERATION_BUDGET` time
-budget. This is the full federation (12 fetchers / 13 sources).
+`LIVE_MAX_PER_SOURCE` (default 2000) per source in a standard search, or every record each
+database matches (up to 20000 per database) in an exhaustive one, within the
+`POPULATE_FEDERATION_BUDGET` time budget. This is the full federation (12 fetchers / 13 sources).
 
 | Method | Path | Auth | Key params |
 |--------|------|------|-----------|
-| POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default 100000 → clamped to `LIVE_MAX_PER_SOURCE`), `include_live` (default true) |
+| POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `include_live` (default true), `exhaustive` (true/false, recorded on the scenario; absent = the recorded mode, standard by default; the search screen sends true by default), `exclude_preprints` |
 | GET | `/user-scenarios/{id}/populate/status` | open | `{status, phase, ingested, sources, rerank_status}` - poll until `status=done` |
 | POST | `/scenarios/{id}/rebuild-corpus` | ✅ | re-run boolean membership on the existing library (no live fetch) |
-| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default 500) - full pipeline (populate → fulltext → embed) |
+| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `exhaustive` (recorded on the scenario, used when the corpus is still to be built) - full pipeline (populate → fulltext → embed) |
 | GET | `/user-scenarios/{id}/pipeline/status` | open | pipeline phase/progress |
 
 ```bash
@@ -120,8 +122,8 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 
 | Method | Path | Auth | Key params |
 |--------|------|------|-----------|
-| GET | `/living-review/status` | open | scheduler state |
-| POST | `/living-review/run?scenario_id=all&days=30&dry_run=false` | ✅ | run living review (async) |
+| GET | `/living-review/status` | open | last report, and `run`: running · done · error · interrupted |
+| POST | `/living-review/run?scenario_id=all&dry_run=false` | ✅ | run living review (detached; `days` optional, applies to every scenario run, otherwise each preset keeps its own window) |
 | POST | `/alerts/run-digests?dry_run=false` | ✅ | send all due email digests |
 | POST | `/alerts/send-digest` | ✅ | send one subscription's digest |
 | GET | `/alerts/subscriptions` | open | list subscriptions |
@@ -146,7 +148,7 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 |-----|---------|--------|
 | `WRITE_API_KEY` | - | admin key (required) |
 | `LIVE_MAX_PER_SOURCE` | 2000 | max docs fetched **per source** during populate |
-| `POPULATE_FEDERATION_BUDGET` | 180 | seconds the live federation runs before slow sources are cut off |
+| `POPULATE_FEDERATION_BUDGET` | 600 | seconds the live federation runs before slow sources are cut off |
 | `NCBI_API_KEY` / `SEMANTIC_SCHOLAR_API_KEY` / `CORE_API_KEY` | - | raise per-source rate limits / enable CORE |
 | `OPENAI_API_KEY` | - | embeddings + LLM extraction |
 | `RAG_MIN_SIMILARITY` | 0.18 | RAG passage-match floor |

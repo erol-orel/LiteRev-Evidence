@@ -50,7 +50,7 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
 
 MIN_STUDIES = 3
 _MAX_GROUPS = 120
-_MAX_PAIRS_PER_GROUP = 6
+_MAX_PAIRS_PER_GROUP = 15     # LISTED per group in the served page; every pair is computed and counted
 _MAX_PAIRS = 40
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,7 +343,7 @@ def pooled_comparisons(rows: list[dict[str, Any]], order: dict[tuple, int], min_
             common = labels[a].keys() & labels[b].keys()
             if len(common) >= max(min_studies, 2):
                 pairs.append((len(common), a, b))
-        for k, a, b in sorted(pairs, reverse=True)[:_MAX_PAIRS_PER_GROUP]:
+        for k, a, b in sorted(pairs, reverse=True):
             first, second = sorted((a, b), key=lambda lab: (order.get((sheet, g, lab), 10 ** 6), lab))
             studies, written = [], []
             for aid in sorted(labels[a].keys() & labels[b].keys()):
@@ -408,14 +408,14 @@ def collect_rows(scenario_id: str, reviewed_only: bool = False, verified_only: b
 
 
 def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_only: bool = True,
-                     split_disease: bool = True, min_studies: int = MIN_STUDIES) -> dict[str, Any]:
+                     split_disease: bool = True, min_studies: int = MIN_STUDIES, full: bool = False) -> dict[str, Any]:
     rows, excl, index = collect_rows(scenario_id, reviewed_only, verified_only)
     order = {(n["sheet"], n["l1"], n["l2"]): i for i, n in enumerate(index.nodes) if n.get("l2")}
     _groups, dropped = build_groups(rows, split_disease)
     _all_pooled = pooled_groups(rows, min_studies, split_disease)
     _all_comps = pooled_comparisons(rows, order, min_studies, split_disease)
-    pooled, pooled_total = _all_pooled[:_MAX_GROUPS], len(_all_pooled)
-    comps, comps_total = _all_comps[:_MAX_PAIRS], len(_all_comps)
+    pooled, pooled_total = (_all_pooled if full else _all_pooled[:_MAX_GROUPS]), len(_all_pooled)
+    (comps, over_group), comps_total = ((_all_comps, 0) if full else _listed_comparisons(_all_comps)), len(_all_comps)
     # Compté sur TOUT ce qui existe, pas sur la page servie : c'est la ligne que le
     # panneau affiche, et elle disait 120 pour 306.
     _too_few = sum(1 for g in _all_pooled if g.get("reason") == "too_few_studies")
@@ -436,6 +436,7 @@ def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_onl
         "comparisons_total": comps_total,
         "comparisons_returned": len(comps),
         "comparisons_truncated": comps_total > len(comps),
+        "comparisons_over_group_cap": over_group, "full": bool(full),
         "caps": {"groups": _MAX_GROUPS, "comparisons": _MAX_PAIRS,
                  "pairs_per_group": _MAX_PAIRS_PER_GROUP},
     }
@@ -443,12 +444,104 @@ def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_onl
 
 @app.get("/user-scenarios/{scenario_id}/extraction/pooled")
 def get_pooled_estimates(scenario_id: str, reviewed_only: bool = Query(False), verified_only: bool = Query(True),
-                         split_disease: bool = Query(True), min_studies: int = Query(MIN_STUDIES, ge=2, le=20)) -> dict[str, Any]:
+                         split_disease: bool = Query(True), min_studies: int = Query(MIN_STUDIES, ge=2, le=20),
+                         full: bool = Query(False)) -> dict[str, Any]:
     """Pooled proportions and odds ratios over the whole relevant corpus. See the module note
     for what is pooled, what is left out, and how to read it."""
     _get_user_scenario_or_404(scenario_id)
     try:
-        return pooled_estimates(scenario_id, reviewed_only, verified_only, split_disease, min_studies)
+        return pooled_estimates(scenario_id, reviewed_only, verified_only, split_disease, min_studies, full)
     except Exception as e:                                       # noqa: BLE001
         logger.warning(f"pooled_estimates {scenario_id}: {e}")
         raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What is listed, and everything as tables (the CSV download, the Excel export)
+# ─────────────────────────────────────────────────────────────────────────────
+def _listed_comparisons(comps: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The comparisons a served page lists: the `_MAX_PAIRS_PER_GROUP` with the most papers in
+    each group (one group with many labels, occupation has 55 possible pairs, does not fill the
+    page), then the first `_MAX_PAIRS`; and how many were passed over for their group's cap.
+    Every pair is computed and counted all the same: the cap was 6, applied before anything was
+    counted, so the seventh odds ratio of a group was never computed."""
+    per_group: dict[tuple, int] = {}
+    listed, over = [], 0
+    for c in comps:                                   # already ordered by papers, most first
+        key = (c["sheet"], c["group"], c["disease"])
+        if per_group.get(key, 0) >= _MAX_PAIRS_PER_GROUP:
+            over += 1
+            continue
+        per_group[key] = per_group.get(key, 0) + 1
+        listed.append(c)
+    return listed[:_MAX_PAIRS], over
+
+
+POOLED_LABEL_HEADER = ["Sheet", "Group", "Label", "Codebook label", "Disease", "Studies", "Cases", "People",
+                       "Pooled proportion", "95% CI low", "95% CI high", "95% PI low", "95% PI high",
+                       "I2 (%)", "tau2", "Disagreement", "Pooled", "Studies (first author year: cases/people)"]
+COMPARISON_HEADER = ["Sheet", "Group", "Disease", "Label A", "Label B", "Papers", "Odds ratio (A against B)",
+                     "95% CI low", "95% CI high", "95% PI low", "95% PI high", "I2 (%)", "tau2", "Disagreement",
+                     "Studies (first author year: A cases/people vs B cases/people)"]
+
+
+def _who(s: dict[str, Any]) -> str:
+    return f"{s.get('first_author') or '?'} {s.get('year') or ''}".strip()
+
+
+def pooled_label_rows(groups: list[dict[str, Any]]) -> list[list[Any]]:
+    """One row per label, pooled or not (`Pooled` = N: fewer studies than asked)."""
+    out = []
+    for g in groups:
+        p, h = g.get("pooled") or {}, g.get("heterogeneity") or {}
+        out.append([g["sheet"], g["group"], g["label"], g.get("label_path"), g.get("disease"), g["k"],
+                    g["events_total"], g["n_total"], p.get("p"), p.get("ci_low"), p.get("ci_high"),
+                    p.get("pi_low"), p.get("pi_high"), h.get("I2"), h.get("tau2"), h.get("band"),
+                    "Y" if g.get("pooled") else "N",
+                    "; ".join(f"{_who(s)}: {s['x']}/{s['n']}" for s in g.get("studies") or [])])
+    return out
+
+
+def comparison_rows(comps: list[dict[str, Any]]) -> list[list[Any]]:
+    """One row per comparison between two labels of a group."""
+    out = []
+    for c in comps:
+        p, h = c.get("pooled") or {}, c.get("heterogeneity") or {}
+        out.append([c["sheet"], c["group"], c.get("disease"), c["a"], c["b"], c["k"], p.get("or"),
+                    p.get("ci_low"), p.get("ci_high"), p.get("pi_low"), p.get("pi_high"), h.get("I2"),
+                    h.get("tau2"), h.get("band"),
+                    "; ".join(f"{_who(s)}: {s.get('x1')}/{s.get('n1')} vs {s.get('x2')}/{s.get('n2')}"
+                              for s in c.get("studies") or [])])
+    return out
+
+
+def pooled_csv(result: dict[str, Any]) -> str:
+    """Every label and every comparison of a `full` result, one long table: `kind` is
+    `proportion` (label B and the odds ratio empty) or `odds_ratio` (cases and people empty)."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["kind", "sheet", "group", "label", "label_b", "codebook_label", "disease", "studies", "cases",
+                "people", "estimate", "ci_low", "ci_high", "pi_low", "pi_high", "I2", "tau2", "disagreement",
+                "pooled", "study_list"])
+    for r in pooled_label_rows(result["pooled"]):
+        w.writerow(["proportion", r[0], r[1], r[2], None, r[3], r[4], *r[5:]])
+    for r in comparison_rows(result["comparisons"]):
+        w.writerow(["odds_ratio", r[0], r[1], r[3], r[4], None, r[2], r[5], None, None, *r[6:14], "Y", r[14]])
+    return buf.getvalue()
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/pooled/export")
+def export_pooled_estimates(scenario_id: str, reviewed_only: bool = Query(False), verified_only: bool = Query(True),
+                            split_disease: bool = Query(True), min_studies: int = Query(MIN_STUDIES, ge=2, le=20)):
+    """EVERY label (pooled or with too few studies) and EVERY comparison as one CSV, with the
+    same filters as the panel. The panel lists a capped page; this is the whole of it."""
+    import re
+
+    from fastapi.responses import Response
+    _get_user_scenario_or_404(scenario_id)
+    res = pooled_estimates(scenario_id, reviewed_only, verified_only, split_disease, min_studies, full=True)
+    return Response(content=pooled_csv(res).encode("utf-8-sig"), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="pooled_{re.sub(r"[^A-Za-z0-9_-]", "_", scenario_id)}.csv"',
+        "X-Labels": str(len(res["pooled"])), "X-Comparisons": str(len(res["comparisons"]))})

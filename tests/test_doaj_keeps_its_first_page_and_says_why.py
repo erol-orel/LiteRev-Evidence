@@ -86,6 +86,7 @@ def federation(monkeypatch):
         calls[str(url).split("?")[0]] += 1
         if "doaj.org" in str(url):
             page = int((kw.get("params") or {}).get("page") or 1)
+            calls[("doaj page", page)] += 1
             if page == 1:
                 return _Resp(200, _doaj_page(100, 0))
             return _Resp(502, body="Bad Gateway")
@@ -97,6 +98,8 @@ def federation(monkeypatch):
 
     monkeypatch.setattr(_real_requests, "get", _fake_get)
     monkeypatch.setattr(_real_requests, "post", _fake_post)
+    # Une page en échec est réessayée (FETCH_RETRY_ATTEMPTS fois) : sans attente ici.
+    monkeypatch.setattr(P, "FETCH_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
     monkeypatch.setattr(S, "_ncbi_get", lambda url, params, timeout=30: _fake_get(url))
     monkeypatch.setattr(P, "_ncbi_get", lambda url, params, timeout=30: _fake_get(url))
 
@@ -171,8 +174,13 @@ def test_the_fetcher_stops_at_the_first_502_and_the_reason_names_the_page(federa
     reason = (figures.get("source_error_reasons") or {}).get("doaj") or ""
     assert "502" in reason and "page 2" in reason and "100" in reason, reason
     assert "doaj.org/api/search/articles/%28" not in reason, "la raison est encore l'URL coupée"
-    # Deux appels, pas un de plus : rien ne tente une troisième page après le 502.
-    assert calls[DOAJ_URL] == 2, dict(calls)
+    # La page 1 une fois, la page 2 réessayée un nombre BORNÉ de fois, et rien ne tente
+    # une troisième page après le 502.
+    from api import pipeline as P
+    assert calls[("doaj page", 1)] == 1, dict(calls)
+    assert calls[("doaj page", 2)] == P.FETCH_RETRY_ATTEMPTS, dict(calls)
+    assert calls[("doaj page", 3)] == 0, dict(calls)
+    assert calls[DOAJ_URL] == 1 + P.FETCH_RETRY_ATTEMPTS, dict(calls)
 
 
 def _ingestion_works() -> bool:

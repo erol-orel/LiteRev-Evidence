@@ -14,10 +14,11 @@ from fastapi import Depends, Query
 from sqlalchemy import text
 
 from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
-from .documents import _normalize_doi, _normalize_title, sanitize_db_text
+from .documents import _normalize_doi, _normalize_title, same_work_doi_match, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_tail_sql)
-from .search import LIVE_MAX_PER_SOURCE, _plain_keywords, _strip_field_tags
+                             has_abstract_sql, relevant_gate_tail_sql)
+from .search import (EXHAUSTIVE_MAX_PER_SOURCE, LIVE_MAX_PER_SOURCE, RANKED_PASS_MAX,
+                     _plain_keywords, _strip_field_tags)
 from llm_usage import model_for as _model
 
 
@@ -88,21 +89,28 @@ def epmc_query(boolean: str) -> str:
 _NCBI_POST_ABOVE = 1800
 
 
-def _ncbi_get(url: str, params: dict, timeout: int = 12):
-    """Requête eutils throttlée (verrou global), avec un petit retry sur 429/erreur.
+def _ncbi_get(url: str, params: dict, timeout: int = 12, use_key: bool = True):
+    """Requête NCBI throttlée (verrou global), avec un petit retry sur 429/erreur.
 
     En GET par défaut, en POST dès que les paramètres encodés dépassent
     `_NCBI_POST_ABOVE` : eutils accepte les mêmes paramètres dans le corps, et c'est la
-    forme que NCBI prescrit pour une requête longue."""
+    forme que NCBI prescrit pour une requête longue.
+
+    Le verrou espace le DÉPART des requêtes, ce que NCBI compte (3 par seconde sans clé,
+    10 avec) ; il n'est plus tenu pendant la requête elle-même, comme l'efetch du populate
+    le faisait déjà. Tenu, il sérialisait tout le trafic NCBI derrière la requête la plus
+    lente : un texte intégral PMC de trente secondes bloquait l'esearch d'une recherche.
+    `use_key=False` : un service NCBI hors eutils (le convertisseur d'identifiants PMC)
+    reçoit les mêmes paramètres qu'avant, sans la clé d'eutils, mais le même espacement."""
     import requests as _req
     import time as _time
     import urllib.parse as _up
     key = os.getenv("NCBI_API_KEY")
-    if key:
+    if key and use_key:
         params = {**params, "api_key": key}
     # Avec une clé API, NCBI autorise 10 req/s (vs 3 sans) : on resserre l'espacement
     # pour réduire la sérialisation du verrou global sur le trio PubMed/PROSPERO/Cochrane.
-    min_interval = 0.11 if key else _NCBI_MIN_INTERVAL
+    min_interval = 0.11 if (key and use_key) else _NCBI_MIN_INTERVAL
     _long = len(_up.urlencode({k: v for k, v in params.items() if v is not None})) > _NCBI_POST_ABOVE
     r = None
     last_exc: Exception | None = None
@@ -111,14 +119,13 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12):
             wait = min_interval - (_time.time() - _NCBI_LAST[0])
             if wait > 0:
                 _time.sleep(wait)
-            try:
-                r = (_req.post(url, data=params, timeout=timeout) if _long
-                     else _req.get(url, params=params, timeout=timeout))
-            except Exception as _e:  # timeout / ConnectionError : transitoire → retry (cf. docstring)
-                last_exc = _e
-                r = None
-            finally:
-                _NCBI_LAST[0] = _time.time()
+            _NCBI_LAST[0] = _time.time()
+        try:
+            r = (_req.post(url, data=params, timeout=timeout) if _long
+                 else _req.get(url, params=params, timeout=timeout))
+        except Exception as _e:  # timeout / ConnectionError : transitoire → retry (cf. docstring)
+            last_exc = _e
+            r = None
         if r is None:
             _time.sleep(0.6 * (attempt + 1))
             continue
@@ -353,6 +360,18 @@ def _live_fetch_pubmed_term(term: str, source_name: str, id_prefix: str, max_res
     return results
 
 
+def _live_dedup_key(result: dict) -> str | None:
+    """La clé de dédup du panneau de recherche en direct : le DOI, sinon le titre normalisé
+    quand il fait au moins 20 caractères, comme la dédup de l'ingestion. None : la notice
+    reste seule. Le titre exact, sans longueur minimale, fondait en une deux « Editorial »
+    ou deux « Correction » sans DOI. PUR/testable."""
+    doi = (result.get("doi") or "").strip().lower()
+    if doi:
+        return "doi:" + doi
+    title = re.sub(r"[^a-z0-9]+", " ", (result.get("title") or "").lower()).strip()
+    return ("ttl:" + title) if len(title) >= 20 else None
+
+
 def _federated_live_search(
     query: str,
     max_per_source: int = 50,
@@ -372,9 +391,9 @@ def _federated_live_search(
     # PubMed RECALL : la requête MeSH générée (pubmed_query) est souvent BEAUCOUP plus
     # étroite que le booléen portable (general_query) - p.ex. 35 vs 306 pour le même
     # booléen collé sur le site PubMed. On interroge PubMed avec l'UNION des deux (même
-    # correctif que le populate) pour retrouver le rappel du site. Repli : booléen seul.
-    if (pubmed_query and general_query and pubmed_query != general_query
-            and len(pubmed_query) + len(general_query) <= 1900):
+    # correctif que le populate) pour retrouver le rappel du site, quelle que soit sa
+    # longueur : `_ncbi_get` l'envoie en POST au-delà de la limite d'URL. Repli : booléen seul.
+    if pubmed_query and general_query and pubmed_query != general_query:
         _pubmed_q = f"({pubmed_query}) OR ({general_query})"
     else:
         _pubmed_q = general_query or pubmed_query
@@ -487,13 +506,9 @@ def _federated_live_search(
 
     # Déduplication par DOI (sinon titre normalisé), suivi des sources
     import re as _re2
-    def _norm_title(t: str) -> str:
-        return _re2.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
     deduped: dict[str, dict] = {}
     for r in all_results:
-        key = ("doi:" + r["doi"].lower()) if r.get("doi") else ("ttl:" + _norm_title(r.get("title", "")))
-        if not key or key in ("ttl:", "doi:"):
-            key = "id:" + str(id(r))
+        key = _live_dedup_key(r) or ("id:" + str(id(r)))
         if key in deduped:
             existing = deduped[key]
             srcs = existing.setdefault("also_in_sources", [])
@@ -673,6 +688,25 @@ def search_live(
         "source_raw_counts": raw_counts,
         "source_status": source_status,
         "ingesting_background": ingesting_background,
+    }
+
+
+@app.get("/search/limits")
+def search_limits() -> dict[str, Any]:
+    """Les plafonds par source qu'applique CE serveur, pour l'écran de recherche.
+
+    L'écran les écrivait en dur (« les 2 000 plus pertinentes », « jusqu'à 20 000 ») alors
+    qu'ils viennent de l'environnement : la production règle LIVE_MAX_PER_SOURCE à
+    100 000, et l'écran annonçait 2 000. Mêmes formules que `_run_user_scenario_populate`
+    pour une recherche lancée de l'écran (sans `max_results`, donc LIVE_MAX_PER_SOURCE) :
+    ce que la carte PRISMA dira après la recherche. Lecture seule, aucune clé requise.
+    """
+    standard = int(LIVE_MAX_PER_SOURCE)
+    return {
+        "standard_per_source": standard,
+        "exhaustive_per_source": max(standard, int(EXHAUSTIVE_MAX_PER_SOURCE)),
+        # Crossref et le passage en texte intégral d'OpenAlex, classés par pertinence.
+        "ranked_per_source": max(1, min(standard, int(RANKED_PASS_MAX))),
     }
 
 
@@ -1055,6 +1089,55 @@ def _parse_openaire(payload: dict) -> list[dict]:
     return out
 
 
+#: Le titre normalisé réunit une notice à une ligne existante quand un DOI au plus est
+#: connu, ou que les deux sont égaux ; jamais quand les deux en portent un, différent.
+#: Paramètres liés : has_tn, tn, has_doi, doi (cf. _ingest_doc_direct).
+_TITLE_MATCH_SQL = ("(:has_tn AND title_norm = :tn AND (NOT :has_doi"
+                    " OR NULLIF(btrim(doi), '') IS NULL"
+                    " OR lower(btrim(doi)) = lower(CAST(:doi AS text))))")
+
+
+def _refresh_title_abstract_chunks(conn, doc_ids) -> list[int]:
+    """Reconstruit le chunk `title_abstract` des documents dont le résumé est arrivé APRÈS
+    lui, dans la transaction de l'appelant.
+
+    Une notice ingérée sans résumé reçoit un chunk fait de son seul titre, vectorisé et
+    scoré tel quel. Quand le résumé arrive (une autre source, le backfill Europe PMC, la
+    dédup qui le recopie d'un doublon), le chunk restait celui du titre : le document
+    gardait un score de titre, que la porte de pertinence lit désormais comme un vrai
+    score. Le chunk est réécrit (titre + résumé), son vecteur effacé pour que le worker
+    le recalcule, et le score de ses liens remis à NULL : « pas encore scoré sur son
+    résumé », que le scoring suivant comble, plutôt qu'un score de titre. Seuls les
+    chunks qui ne contiennent pas le début du résumé sont touchés. Dans un point de
+    sauvegarde : un échec (schéma sans colonne d'embedding) ne défait pas l'appelant.
+    Renvoie les documents dont le chunk a été réécrit."""
+    ids = sorted({int(i) for i in (doc_ids or []) if i is not None})
+    if not ids:
+        return []
+    try:
+        with conn.begin_nested():
+            changed = conn.execute(text(f"""
+                UPDATE document_chunk c
+                   SET content = btrim(coalesce(d.title, '') || E'\\n\\n' || d.abstract),
+                       embedding = NULL
+                  FROM literature_document d
+                 WHERE d.id = c.document_id
+                   AND c.chunk_type = 'title_abstract'
+                   AND d.id = ANY(CAST(:ids AS bigint[]))
+                   AND {has_abstract_sql('d')}
+                   AND strpos(c.content, left(btrim(d.abstract), 60)) = 0
+                RETURNING c.document_id
+            """), {"ids": ids}).scalars().all()
+            changed = sorted({int(x) for x in changed})
+            if changed:
+                conn.execute(text("UPDATE article_scenarios SET similarity_score = NULL "
+                                  "WHERE document_id = ANY(CAST(:ids AS bigint[]))"), {"ids": changed})
+        return changed
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"_refresh_title_abstract_chunks: {_e}")
+        return []
+
+
 def _ingest_doc_direct(
     source: str,
     title: str,
@@ -1104,28 +1187,50 @@ def _ingest_doc_direct(
 
     # Dédup en UN SEUL aller-retour (au lieu de deux SELECT séparés) : par external_id,
     # sinon par DOI, sinon par TITRE normalisé - capte les doublons sans DOI (préprints,
-    # essais) ou dont le DOI diffère selon la source. Titres < 20 car. normalisés ignorés
-    # (faux positifs). Le try/except couvre le cas d'une colonne title_norm absente (migration).
+    # essais). Titres < 20 car. normalisés ignorés (faux positifs). Le try/except couvre
+    # le cas d'une colonne title_norm absente (migration).
+    # Le titre ne réunit JAMAIS deux DOI de revue différents : dix éditions d'un « Avian
+    # influenza situation update » ou deux « Correction » de même libellé sont des travaux
+    # distincts, et la seconde arrivée était repliée sur la première sans laisser de trace.
+    # Un DOI manquant d'un côté, ou le même DOI, réunit encore (cf. _TITLE_MATCH_SQL et
+    # l'index uq_litdoc_title_norm_doi) ; deux DOI du même travail aussi (plus bas).
     _has_tn = bool(title_norm and len(title_norm) >= 20)
+    _match_params = {"ctx": project_context, "eid": external_id,
+                     "tn": title_norm, "has_tn": _has_tn,
+                     "doi": doi, "has_doi": bool(doi)}
     try:
         with engine.connect() as _c:
-            existing = _c.execute(text("""
+            existing = _c.execute(text(f"""
                 SELECT id FROM literature_document
                 WHERE project_context = :ctx AND (
                     external_id = :eid
-                    OR (:has_tn AND title_norm = :tn)
+                    OR {_TITLE_MATCH_SQL}
                     OR (:has_doi AND doi = :doi))
                 ORDER BY (external_id = :eid) DESC, (:has_doi AND doi = :doi) DESC
                 LIMIT 1
-            """), {"ctx": project_context, "eid": external_id,
-                   "tn": title_norm, "has_tn": _has_tn,
-                   "doi": doi, "has_doi": bool(doi)}).scalar()
+            """), _match_params).scalar()
     except Exception:
         with engine.connect() as _c:   # repli : dédup external_id seul (colonne title_norm absente)
             existing = _c.execute(text(
                 "SELECT id FROM literature_document "
                 "WHERE external_id = :eid AND project_context = :ctx LIMIT 1"
             ), {"eid": external_id, "ctx": project_context}).scalar()
+    if not existing and _has_tn and doi:
+        # Même titre long, autre DOI : un autre travail, SAUF si les deux DOI désignent le
+        # même (une version /v2, une figure figshare ou un préprint d'un article publié sous
+        # ce titre ; cf. documents.same_work_doi_match). Sans cela, chaque source qui
+        # renvoie une autre version ajoutait une notice, et l'étude comptait deux fois.
+        try:
+            with engine.connect() as _c:
+                _same_title = _c.execute(text("""
+                    SELECT id, doi FROM literature_document
+                    WHERE project_context = :ctx AND title_norm = :tn
+                      AND NULLIF(btrim(doi), '') IS NOT NULL
+                    ORDER BY id LIMIT 200
+                """), {"ctx": project_context, "tn": title_norm}).all()
+            existing = same_work_doi_match(doi, [(r[0], r[1]) for r in _same_title])
+        except Exception as _se:
+            logger.warning(f"_ingest_doc_direct même travail {doi}: {_se}")
     if existing:
         # ── La notice retrouvée peut être MEILLEURE que celle en base ────────
         # Le document existait, donc on le renvoyait tel quel et on jetait le reste.
@@ -1159,6 +1264,9 @@ def _ingest_doc_direct(
                                 SELECT 1 FROM document_chunk
                                 WHERE document_id = :id AND chunk_type = 'title_abstract')
                         """), {"id": existing, "content": content_text})
+                        # Et s'il existait déjà, construit sur le titre seul, il est
+                        # reconstruit : sinon le score resterait celui du titre.
+                        _refresh_title_abstract_chunks(_uc, [existing])
             except Exception as _ue:
                 logger.warning(f"_ingest_doc_direct enrichissement {existing}: {_ue}")
         return (existing, False)   # dédup pré-SELECT (external_id / titre normalisé / DOI)
@@ -1168,8 +1276,8 @@ def _ingest_doc_direct(
     # l'origine des documents orphelins observés en production.
     with engine.begin() as _c:
         # ON CONFLICT DO NOTHING SANS cible : capte un conflit sur N'IMPORTE quel
-        # index unique - uq_literature_document_doi (DOI) ET uq_litdoc_title_norm
-        # (titre normalisé, len≥20). Ferme la course entre fetchers parallèles qui,
+        # index unique - uq_literature_document_doi (DOI) ET uq_litdoc_title_norm_doi
+        # (titre normalisé len≥20, et DOI). Ferme la course entre fetchers parallèles qui,
         # avant l'index unique sur le titre, pouvaient tous deux passer le pré-SELECT
         # puis INSÉRER deux lignes pour le même article sans DOI (préprint, essai).
         doc_id = _c.execute(text("""
@@ -1194,17 +1302,19 @@ def _ingest_doc_direct(
             # Un INSERT concurrent a gagné la course (conflit DOI ou titre normalisé).
             # On récupère la ligne canonique via les MÊMES clés que le pré-SELECT, au
             # lieu de supposer que le conflit portait sur le DOI (qui peut être NULL).
-            doc_id = _c.execute(text("""
+            # En dernier recours, le même titre quel que soit le DOI : tant que l'ancien
+            # index unique (project_context, title_norm) n'est pas remplacé (migration au
+            # démarrage), c'est lui qui a refusé la ligne, et la notice n'est pas perdue.
+            doc_id = _c.execute(text(f"""
                 SELECT id FROM literature_document
                 WHERE project_context = :ctx AND (
                     external_id = :eid
                     OR (:has_tn AND title_norm = :tn)
                     OR (:has_doi AND doi = :doi))
-                ORDER BY (external_id = :eid) DESC, (:has_doi AND doi = :doi) DESC
+                ORDER BY (external_id = :eid) DESC, (:has_doi AND doi = :doi) DESC,
+                         ({_TITLE_MATCH_SQL}) DESC
                 LIMIT 1
-            """), {"ctx": project_context, "eid": external_id,
-                   "tn": title_norm, "has_tn": _has_tn,
-                   "doi": doi, "has_doi": bool(doi)}).scalar()
+            """), _match_params).scalar()
 
         # INSERT du chunk title_abstract, idempotent : ne crée PAS de second chunk
         # si le document en a déjà un (cas d'un doc atteint via dédup DOI avec un

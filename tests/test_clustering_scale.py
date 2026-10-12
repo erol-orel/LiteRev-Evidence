@@ -68,6 +68,9 @@ def test_clustering_docs_are_capped_to_the_most_relevant(monkeypatch):
                     class _M:
                         def all(self_m):
                             return []
+
+                        def first(self_m):
+                            return {"relevant": 25000, "clusterable": 25000}
                     return _M()
             return _R()
 
@@ -76,5 +79,5 @@ def test_clustering_docs_are_capped_to_the_most_relevant(monkeypatch):
     assert docs == [] and total == 25000
     select_sql = captured["sql"][-1]
     assert "LIMIT :cap" in select_sql and captured["params"]["cap"] == 3000
-    assert "= 'included') DESC" in select_sql and "similarity_score DESC" in select_sql   # relevance, not year
+    assert "= 'included') IS TRUE DESC" in select_sql and "similarity_score DESC" in select_sql   # relevance, not year
     assert main.CLUSTER_MAX_DOCS >= 200

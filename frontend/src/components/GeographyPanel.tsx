@@ -18,6 +18,7 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
   const [error, setError] = React.useState<string | null>(null);
   const [msg, setMsg] = React.useState<string | null>(null);
   const [showUnres, setShowUnres] = React.useState(false);
+  const [showAll, setShowAll] = React.useState(false);   // every country, every region
   const fileRef = React.useRef<HTMLInputElement>(null);
   const keyed = hasApiKey();
 
@@ -48,7 +49,7 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
 
   if (error) return <p className="text-[11px] text-rose-300"><AlertTriangle size={11} className="inline mr-1" />{error}</p>;
   if (!g || g.n_papers === 0) return null;
-  const top = g.countries.slice(0, TOP);
+  const top = showAll ? g.countries : g.countries.slice(0, TOP);
   const max = Math.max(...top.map((c) => c.n_papers), 1);
 
   return (
@@ -76,7 +77,7 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
               </div>
               {c.regions.length > 0 && (
                 <div className="ml-[10.5rem] mt-1 flex flex-wrap gap-1">
-                  {c.regions.slice(0, 10).map((r) => (
+                  {(showAll ? c.regions : c.regions.slice(0, 10)).map((r) => (
                     <span key={r.code} className="rounded bg-white/5 px-1.5 py-px text-[9px] text-white/55" title={r.code}>
                       {r.name} <span className="font-mono text-white/35">{r.code}</span> {r.n_papers}
                     </span>
@@ -85,7 +86,14 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
               )}
             </div>
           ))}
-          {g.countries.length > TOP && <p className="text-[10px] text-white/35">{T("more").replace("{n}", String(g.countries.length - TOP))}</p>}
+          {(g.countries.length > TOP || g.countries.some((c) => c.regions.length > 10)) && (
+            <p className="text-[10px] text-white/35">
+              {!showAll && g.countries.length > TOP && <>{T("more").replace("{n}", String(g.countries.length - TOP))} </>}
+              <button onClick={() => setShowAll((v) => !v)} className="text-brand-300/80 underline hover:text-brand-300">
+                {showAll ? t("lists.showLess") : t("lists.showAll").replace("{n}", String(g.countries.length))}
+              </button>
+            </p>
+          )}
         </div>
       )}
 

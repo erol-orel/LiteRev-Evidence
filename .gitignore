@@ -27,6 +27,12 @@ ENV/
 # Logs
 *.log
 
+# État et rapport de la living review, écrits à la racine en production : `git clean -fd`
+# de deploy.sh les effaçait à chaque déploiement, et /living-review/status repartait de rien.
+living_review_last_run.json
+living_review_run.json
+living_review_run.json.tmp
+
 # Build / packaging
 build/
 dist/

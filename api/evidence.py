@@ -17,7 +17,7 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              screening_status_sql)
 from .gesica import _get_scenario_name
 from .relevance import _evidence_fingerprint, _get_above_threshold_articles
-from llm_usage import json_content as _json_content
+from .pico_map import json_completion
 from llm_usage import model_for as _model
 from llm_usage import reasoning_effort as _reasoning_effort
 
@@ -551,7 +551,7 @@ def get_user_scenario_evidence_brief_pdf(scenario_id: str):
               AND {relevant_gate_tail_sql('d', 'ars', ':thr')}
             -- « Articles les plus pertinents » dans le PDF : trier par qualité donnait une
             -- liste qui n'est pas celle du tri par pertinence de l'application.
-            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') DESC,
+            ORDER BY ({screening_status_sql('d', 'ars')} = 'included') IS TRUE DESC,
                      COALESCE(ars.rerank_score, ars.similarity_score, 0) DESC NULLS LAST,
                      d.quality_score DESC NULLS LAST, d.year DESC NULLS LAST
             LIMIT 100000
@@ -718,7 +718,10 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
             "I": pj.get("intervention", pj.get("I", "")),
             "C": pj.get("comparator", pj.get("C", "")),
             "O": pj.get("outcome", pj.get("O", "")),
+            # Rempli désormais par chaque rédacteur PICO (api/pico_map) : il était lu ici et
+            # toujours vide, puisque aucun ne le demandait au modèle.
             "key_finding": pj.get("key_finding", pj.get("conclusion", "")),
+            "finding_direction": pj.get("finding_direction", ""),
             "abstract": (a.get("abstract") or "")[:1500],
         }
         _ft = (a.get("fulltext") or "").strip()
@@ -736,6 +739,12 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     _digest = corpus_digest(scenario_id, threshold)
     _digest_block = digest_to_prompt(_digest)
     _coverage = digest_coverage_note(_digest, len(context_articles))
+    # Ce que l'extraction structurée a trouvé (sexe, âge, profession, CAP, EPI...), compté
+    # sur TOUS les articles pertinents déjà extraits, avec son dénominateur : l'assistant le
+    # recevait, le brief non. Bloc vide tant que rien n'est extrait.
+    from .extraction import extraction_digest, extraction_to_prompt
+    _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, threshold))
+    _extraction_part = f"\n{_extraction_block}\n" if _extraction_block else ""
 
     # Stats corpus (sur TOUS les articles pertinents : `has_pico` est renseigné pour
     # chaque ligne, `pico_json` seulement pour les 30 du contexte).
@@ -769,16 +778,18 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
 Tu génères des Evidence Briefs complets, rigoureux et structurés.
 Tu dois produire un JSON structuré avec tous les champs demandés.
 Sois précis, factuel, et base-toi exclusivement sur les articles fournis.
+Ce que les études ont trouvé se lit d'abord dans le bloc RESULTATS, compté sur tout le corpus
+pertinent : un article reproduit illustre un résultat, il ne fait pas une tendance.
 Ne pas utiliser de tiret cadratin (em dash). Utiliser des tirets simples (-) si nécessaire.""" + _llm_lang_directive(lang)
 
     user_prompt = f"""Génère un Evidence Brief complet pour le scénario de recherche : "{scenario_name}"
 
 {_digest_block or f"Corpus : {total} articles ({year_range}), {with_pico} avec PICO extrait, {included} validés humainement."}
 Designs d'étude principaux : {', '.join(f'{d} ({n})' for d, n in top_designs)}.
-
+{_extraction_part}
 {_coverage}
 
-Articles reproduits ({len(context_articles)} les mieux établis, pour citer et illustrer) :
+Articles reproduits ({len(context_articles)} les plus proches de la question du scénario, dans l'ordre de pertinence du corpus ; pour citer et illustrer, pas pour conclure) :
 {context_str}
 
 RÈGLES GRADE (strict) pour « evidence_level » et « grade_recommendation » :
@@ -852,24 +863,28 @@ Retourne UNIQUEMENT le JSON valide."""
         # une autre. La génération tourne dans un thread de fond avec un statut interrogé
         # par l'interface, donc la latence ne bloque personne.
         client = _OAI(timeout=300.0)
-        response = client.chat.completions.create(
-            model=_model("write"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-            # 3000 coupait le brief EN PLEINE CHAÎNE : les dix-sept champs demandés
-            # ci-dessus, dont quatre de plusieurs paragraphes, font 18 000 caractères de
-            # français, et le JSON tronqué remontait comme « Unterminated string starting
-            # at char 18273 », c'est-à-dire comme un bug d'analyse. Le plafond n'est pas là
-            # pour dimensionner la réponse mais pour borner un emballement : largement
-            # au-dessus d'un brief complet, et borné. 12 000 jetons de sortie coûtent
-            # 1,4 centime ; un brief tronqué coûte le brief.
-            max_tokens=12000,
-            response_format={"type": "json_object"},
-        )
-        brief = _json.loads(_json_content(response, f"evidence brief {scenario_id}"))
+
+        def _ask(messages):
+            return client.chat.completions.create(
+                model=_model("write"),
+                messages=messages,
+                temperature=0.2,
+                # 3000 coupait le brief EN PLEINE CHAÎNE : les dix-sept champs demandés
+                # ci-dessus, dont quatre de plusieurs paragraphes, font 18 000 caractères de
+                # français, et le JSON tronqué remontait comme « Unterminated string starting
+                # at char 18273 », c'est-à-dire comme un bug d'analyse. Le plafond n'est pas là
+                # pour dimensionner la réponse mais pour borner un emballement : largement
+                # au-dessus d'un brief complet, et borné. 12 000 jetons de sortie coûtent
+                # 1,4 centime ; un brief tronqué coûte le brief.
+                max_tokens=12000,
+                response_format={"type": "json_object"},
+            )
+
+        # Coupé malgré tout au plafond : redemandé une fois, plus court, plutôt que perdu.
+        brief = _json.loads(json_completion(
+            _ask, [{"role": "system", "content": system_prompt},
+                   {"role": "user", "content": user_prompt}],
+            f"evidence brief {scenario_id}"))
         # Le niveau global dans la langue du brief (le gabarit le propose en français).
         if brief.get("evidence_level"):
             brief["evidence_level"] = brief_level(brief["evidence_level"], lang)
@@ -882,6 +897,7 @@ Retourne UNIQUEMENT le JSON valide."""
             ceiling=_ceiling_label)
 
         # Ajouter les métadonnées
+        from .scenario_store import threshold_provenance as _thr_provenance  # lazy: provenance du seuil
         brief["_meta"] = {
             "scenario_id": scenario_id,
             "scenario_name": scenario_name,
@@ -889,6 +905,9 @@ Retourne UNIQUEMENT le JSON valide."""
             "articles_used": total,
             "articles_above_threshold": total,
             "threshold": threshold,
+            # Le seuil était-il CHOISI (sinon « par défaut, non choisi »), et combien
+            # d'articles restent hors du sous-ensemble faute de score.
+            **_thr_provenance(scenario_id),
             "human_validated": included,
             "year_range": year_range,
             "study_designs": dict(top_designs),

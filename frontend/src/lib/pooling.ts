@@ -63,19 +63,18 @@ export function mergedSpellings(disease: string | null, spellings: DiseaseSpelli
 }
 
 /** "HPAI H5N1 (5) · H5N1 (3)": each spelling with the number of studies that wrote it. */
-export function spellingsText(spellings: DiseaseSpelling[], sep = " · "): string {
-  return spellings.map((s) => `${s.spelling} (${s.n})`).join(sep);
+export function spellingsText(spellings: DiseaseSpelling[]): string {
+  return spellings.map((s) => `${s.spelling} (${s.n})`).join(" · ");
 }
 
 export function csvOfPooled(groups: PooledGroup[]): string {
   const q = (s: string | null) => `"${(s ?? "").replace(/"/g, '""')}"`;
   const head = ["sheet", "group", "label", "disease", "k", "n_total", "events_total", "pooled_p", "ci_low", "ci_high",
-    "pi_low", "pi_high", "I2", "tau2", "heterogeneity", "disease_as_written"];
+    "pi_low", "pi_high", "I2", "tau2", "heterogeneity"];
   const rows = groups.map((g) => [
     g.sheet, g.group, g.label, g.disease ?? "", g.k, g.n_total, g.events_total,
     g.pooled?.p ?? "", g.pooled?.ci_low ?? "", g.pooled?.ci_high ?? "", g.pooled?.pi_low ?? "", g.pooled?.pi_high ?? "",
     g.heterogeneity?.I2 ?? "", g.heterogeneity?.tau2 ?? "", g.heterogeneity?.band ?? "",
-    spellingsText(g.disease_spellings ?? [], "; "),
   ].map((v) => (typeof v === "string" && v !== "" ? q(v) : v)).join(","));
   return [head.join(","), ...rows].join("\n");
 }

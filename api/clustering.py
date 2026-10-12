@@ -16,7 +16,7 @@ from sqlalchemy import text
 from .core import _norm_lang, app, engine, logger, require_api_key_if_forced
 from .documents import _llm_lang_directive
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_tail_sql, screening_status_sql)
+                             relevance_order_sql, relevant_gate_tail_sql)
 from .gesica import _gesica_title, _get_db_gesica_scenario_or_404, _get_scenario_name
 from llm_usage import model_for as _model
 
@@ -31,6 +31,26 @@ class _NumpyEncoder(json.JSONEncoder):
 
 # ── Tâches de clustering en cours ────────────────────────────────────────────
 _clustering_jobs: dict[str, dict] = {}  # scenario_id -> {"status": "running"|"done"|"error", "result": ...}
+
+
+def _forget_clustering_result(scenario_id: str) -> None:
+    """Oublie le dernier clustering gardé en mémoire pour ce scénario, sauf un calcul en
+    cours. Appelé quand le sous-ensemble pertinent change (reset_corpus_derived_caches) :
+    sans cela, `/clustering` resservait de mémoire ce que la base venait de périmer."""
+    job = _clustering_jobs.get(scenario_id)
+    if job is not None and job.get("status") != "running":
+        _clustering_jobs.pop(scenario_id, None)
+
+
+def _hdbscan_min_cluster_size(n_docs: int) -> int:
+    """La taille minimale d'un thème pour HDBSCAN. PURE.
+
+    C'était `max(3, n // 15)` : sur les 1 043 articles pertinents de HPAI_last, tout thème
+    de moins de 69 articles finissait « non classé », et sur 3 000 articles le seuil
+    montait à 200. Un thème de 30 articles est un thème. Au cinquantième, 1 043 articles
+    font des thèmes à partir de 20, et le plancher de 5 garde HDBSCAN loin du bruit sur
+    un petit corpus."""
+    return max(5, int(n_docs) // 50)
 
 
 def _cluster_core(
@@ -122,7 +142,7 @@ def _cluster_core(
         try:
             import hdbscan as hdbscan_lib
             clusterer = hdbscan_lib.HDBSCAN(
-                min_cluster_size=max(3, len(docs) // 15), min_samples=2,
+                min_cluster_size=_hdbscan_min_cluster_size(len(docs)), min_samples=2,
                 metric="euclidean", cluster_selection_method="eom",
             )
             labels = clusterer.fit_predict(embedding_2d)
@@ -155,30 +175,53 @@ def _cluster_core(
 CLUSTER_MAX_DOCS = max(200, int(os.getenv("CLUSTER_MAX_DOCS", "3000")))
 
 
-def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None) -> tuple[list, int]:
+#: Ce qu'un article doit porter pour être placé sur la carte des thèmes : un résumé.
+#: Le titre seul ne fait pas un point exploitable par TF-IDF ni par UMAP.
+_CLUSTERABLE_SQL = "d.abstract IS NOT NULL AND LENGTH(d.abstract) > 50"
+
+
+def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None,
+                     counts: dict | None = None) -> tuple[list, int]:
     """Documents à clusteriser pour un scénario : le sous-ensemble PERTINENT (≥ seuil
-    sémantique OU inclus manuellement ; jamais les exclus), plafonné aux `cap` plus
-    pertinents (inclus d'abord, puis score décroissant), avec le vecteur du résumé.
-    Renvoie (docs, nombre total de documents éligibles).
+    sémantique OU inclus manuellement ; jamais les exclus) qui porte un résumé, plafonné
+    aux `cap` plus pertinents DANS L'ORDRE DE PERTINENCE de l'application
+    (`relevance_order_sql` : inclus d'abord, puis reranké, puis similarité), avec le
+    vecteur du résumé. Renvoie (docs, nombre total d'articles PERTINENTS).
 
     Sans plafond, 25 000 documents = 25 000 embeddings à parser puis UMAP sur une
     matrice 25 000 × 1536 : 88 s et un pic de 3 Go de RAM - de quoi faire tuer le
     processus API sur le serveur. Les clusters sont visuellement identiques sur les
-    3 000 articles les plus pertinents."""
+    3 000 articles les plus pertinents.
+
+    Trois écarts avec le reste de l'application ont été refermés :
+      - le plafond triait par similarité seule, en ignorant le rerank, alors que sur un
+        corpus thématique le cosinus classe le hors-sujet au-dessus du sujet (cf.
+        scenario_store) : les 3 000 dessinés n'étaient pas les 3 000 plus pertinents ;
+      - un filtre `project_context = 'literev'` écartait des articles que tous les
+        compteurs disent pertinents : « pertinent » veut dire la même chose partout ;
+      - les articles sans résumé exploitable sortaient AUSSI du total, si bien que
+        « 3 000 sur N » sous-estimait le sous-ensemble pertinent. Le total les compte
+        désormais, et `counts` (s'il est fourni) reçoit le détail : `relevant`,
+        `clusterable` (avec un résumé) et `no_abstract` (laissés hors de la carte)."""
     cap = CLUSTER_MAX_DOCS if cap is None else max(5, int(cap))
     _relevant = f"""
         FROM literature_document d
         JOIN article_scenarios asn ON asn.document_id = d.id
         WHERE asn.scenario_id = :sid
-          AND d.project_context = 'literev'
           AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
-          AND d.abstract IS NOT NULL
-          AND LENGTH(d.abstract) > 50
           AND {relevant_gate_tail_sql('d', 'asn', ':thr')}
     """
     with engine.connect() as conn:
-        n_total = int(conn.execute(text(f"SELECT COUNT(*) {_relevant}"),
-                                   {"sid": scenario_id, "thr": threshold}).scalar() or 0)
+        _n = conn.execute(text(f"""
+            SELECT COUNT(*) AS relevant,
+                   COUNT(*) FILTER (WHERE {_CLUSTERABLE_SQL}) AS clusterable
+            {_relevant}
+        """), {"sid": scenario_id, "thr": threshold}).mappings().first() or {}
+        n_total = int(_n.get("relevant") or 0)
+        n_clusterable = int(_n.get("clusterable") or 0)
+        if counts is not None:
+            counts.update({"relevant": n_total, "clusterable": n_clusterable,
+                           "no_abstract": max(0, n_total - n_clusterable)})
         docs = list(conn.execute(text(f"""
             SELECT d.id, d.title, d.abstract, d.year, d.journal,
                    (
@@ -192,8 +235,8 @@ def _clustering_docs(scenario_id: str, threshold: float, cap: int | None = None)
                        LIMIT 1
                    ) AS embedding_str
             {_relevant}
-            ORDER BY ({screening_status_sql('d', 'asn')} = 'included') DESC,
-                     asn.similarity_score DESC NULLS LAST, d.year DESC NULLS LAST, d.id
+              AND {_CLUSTERABLE_SQL}
+            ORDER BY {relevance_order_sql('d', 'asn')}
             LIMIT :cap
         """), {"sid": scenario_id, "thr": threshold, "cap": cap}).mappings().all())
     return docs, n_total
@@ -210,8 +253,9 @@ _VIZ_COLS = {
 }
 
 
-def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
-    """Upsert un JSON de visualisation dans scenario_settings (colonnes de _VIZ_COLS)."""
+def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> bool:
+    """Upsert un JSON de visualisation dans scenario_settings (colonnes de _VIZ_COLS).
+    Renvoie True si la base l'a bien reçu."""
     _jc, _at = _VIZ_COLS[col]
     try:
         with engine.begin() as _c:
@@ -221,8 +265,10 @@ def _save_viz_cache(scenario_id: str, col: str, payload: dict) -> None:
                 ON CONFLICT (scenario_id) DO UPDATE
                 SET {_jc} = CAST(:p AS jsonb), {_at} = NOW(), updated_at = NOW()
             """), {"sid": scenario_id, "p": json.dumps(payload, default=str)})
+        return True
     except Exception as _e:
         logger.warning(f"_save_viz_cache {col} {scenario_id}: {_e}")
+        return False
 
 
 # Durée de vie du cache de visualisation en base. Le cache est REFAIT à chaque
@@ -465,8 +511,26 @@ def _persist_clustering_result(scenario_id: str, result: dict) -> None:
     Une invalidation ne peut pas atteindre ce qu'elle ne connaît pas, et un cache que
     l'invalidation n'atteint pas n'est pas un cache, c'est une seconde vérité. Le cache DB
     est durable, porte son horodatage et se vide avec le reste ; /tmp disparaît de toute
-    façon à chaque déploiement, donc il ne servait même pas de filet."""
-    _save_viz_cache(scenario_id, "clustering", json.loads(json.dumps(result, cls=_NumpyEncoder, default=str)))
+    façon à chaque déploiement, donc il ne servait même pas de filet.
+
+    Renvoie True si la base a reçu le résultat : la copie gardée en mémoire par le job
+    ne sert alors plus que de relais, jamais de seconde vérité (cf. _served_from_memory)."""
+    return _save_viz_cache(scenario_id, "clustering",
+                           json.loads(json.dumps(result, cls=_NumpyEncoder, default=str)))
+
+
+def _served_from_memory(job: dict | None) -> dict | None:
+    """Le résultat d'un job terminé que `/clustering` peut servir quand la base n'a rien.
+
+    Seulement s'il n'a PAS été écrit en base. Un résultat écrit puis absent a été
+    périmé depuis (seuil, découpage, screening, living review) : le resservir de mémoire
+    présentait le corpus d'avant comme l'actuel, jusqu'au redémarrage suivant, alors que
+    toutes les invalidations ne vident que la base. Restent servis de mémoire les
+    résultats que la base n'a jamais reçus : un corpus trop petit, ou une écriture en échec."""
+    if job and job.get("status") == "done" and isinstance(job.get("result"), dict) \
+            and not job.get("persisted"):
+        return job["result"]
+    return None
 
 
 def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str) -> None:
@@ -474,8 +538,9 @@ def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str
     puis mise en cache - la page interroge /clustering/status jusqu'à « done »."""
     try:
         result = _summarize_clusters_in_lang(scenario_id, payload, lang)
-        _persist_clustering_result(scenario_id, result)
-        _clustering_jobs[scenario_id] = {"status": "done", "result": result}
+        _persisted = _persist_clustering_result(scenario_id, result)
+        _clustering_jobs[scenario_id] = {"status": "done", "result": result,
+                                         "persisted": _persisted}
     except Exception as e:
         logger.error(f"Clustering {scenario_id} résumés {lang}: {e}", exc_info=True)
         _clustering_jobs[scenario_id] = {"status": "error", "error": str(e)}
@@ -484,12 +549,18 @@ def _relocalize_clustering_background(scenario_id: str, payload: dict, lang: str
 def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
                             with_summaries: bool = False, openai_key: str | None = None,
                             title: str | None = None, lang: str | None = None,
-                            n_docs_total: int | None = None) -> dict:
+                            n_docs_total: int | None = None,
+                            n_docs_no_abstract: int | None = None) -> dict:
     """Construit le payload de clustering CANONIQUE (un seul format, partagé par le
     pipeline ET le calcul en arrière-plan). `with_summaries` active le résumé LLM
     par cluster, rangé par LANGUE dans clusters[].summaries (`summary` = celui de la
     langue demandée) pour que le cache serve chaque langue sans mélange.
-    Schéma figé : clusters[].representative_doc + embedding_source."""
+    Schéma figé : clusters[].representative_doc + embedding_source.
+
+    `n_docs_total` est le sous-ensemble pertinent ENTIER : ce que la carte ne montre pas
+    est compté dans `n_docs_left_out`, et, quand on le sait, détaillé entre les articles
+    sans résumé (`n_docs_no_abstract`) et ceux que le plafond CLUSTER_MAX_DOCS a laissés
+    (`n_docs_capped`). C'est ce qui rend juste le « N sur M » de l'interface."""
     import numpy as np
     labels = cc["labels"]; embedding_2d = cc["embedding_2d"]; method_used = cc["method"]
     feature_names = cc["feature_names"]; X_dense = cc["X_dense"]; embedding_source = cc["embedding_source"]
@@ -543,12 +614,20 @@ def _build_clusters_payload(scenario_id: str, docs: list, cc: dict, *,
             },
             "points": points,
         })
+    _total = int(n_docs_total) if n_docs_total is not None else len(docs)
+    _left_out = max(0, _total - len(docs))
+    _left = {"n_docs_left_out": _left_out, "cluster_max_docs": CLUSTER_MAX_DOCS}
+    if n_docs_no_abstract is not None:
+        _left["n_docs_no_abstract"] = int(n_docs_no_abstract)
+        _left["n_docs_capped"] = max(0, _left_out - int(n_docs_no_abstract))
     return {
         "scenario_id": scenario_id,
         "n_docs": len(docs),
-        # Documents éligibles au total ; > n_docs quand le clustering a été plafonné
-        # aux CLUSTER_MAX_DOCS plus pertinents (l'interface l'indique).
-        "n_docs_total": int(n_docs_total) if n_docs_total is not None else len(docs),
+        # Articles PERTINENTS au total, ceux sans résumé compris ; > n_docs quand une
+        # partie n'est pas sur la carte (plafond CLUSTER_MAX_DOCS, ou pas de résumé),
+        # ce que l'interface indique.
+        "n_docs_total": _total,
+        **_left,
         "n_clusters": len([c for c in clusters if not c["is_noise"]]),
         "method": method_used,
         "embedding_source": embedding_source,
@@ -577,11 +656,13 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         # RAG. Sinon les topics étaient dilués par les centaines d'articles hors-sujet
         # ramenés par la fédération.
         _thr = _get_scenario_threshold(scenario_id)
-        docs, _n_total = _clustering_docs(scenario_id, _thr)
+        _counts: dict = {}
+        docs, _n_total = _clustering_docs(scenario_id, _thr, counts=_counts)
 
         if len(docs) < 5:
             result = {
-                "scenario_id": scenario_id, "n_docs": len(docs),
+                "scenario_id": scenario_id, "n_docs": len(docs), "n_docs_total": _n_total,
+                "n_docs_no_abstract": _counts.get("no_abstract"),
                 "message_code": "insufficient_corpus",
                 "message": _CLUSTER_MESSAGES["insufficient_corpus"][want],
                 "clusters": [], "from_cache": False, "lang": want,
@@ -607,11 +688,13 @@ def _run_clustering_background(scenario_id: str, force_refresh: bool = False, la
         result = _build_clusters_payload(
             scenario_id, docs, _cc, with_summaries=True, openai_key=openai_key,
             title=(_gesica_title(meta_for_cluster) if meta_for_cluster else None),
-            lang=want, n_docs_total=_n_total,
+            lang=want, n_docs_total=_n_total, n_docs_no_abstract=_counts.get("no_abstract"),
         )
-        # Cache DB (durable) + /tmp (compat) + mémoire.
-        _persist_clustering_result(scenario_id, result)
-        _clustering_jobs[scenario_id] = {"status": "done", "result": result}
+        # Cache DB (durable) + mémoire. La copie en mémoire sait qu'elle est en base :
+        # cf. _served_from_memory.
+        _persisted = _persist_clustering_result(scenario_id, result)
+        _clustering_jobs[scenario_id] = {"status": "done", "result": result,
+                                         "persisted": _persisted}
 
     except Exception as e:
         logger.error(f"Clustering {scenario_id} error: {e}", exc_info=True)
@@ -644,9 +727,7 @@ def get_user_scenario_clustering(scenario_id: str, force_refresh: bool = False,
     if not force_refresh:
         cached = _load_viz_cache(scenario_id, "clustering")
         if not cached:
-            job = _clustering_jobs.get(scenario_id)
-            if job and job.get("status") == "done" and isinstance(job.get("result"), dict):
-                cached = job["result"]
+            cached = _served_from_memory(_clustering_jobs.get(scenario_id))
         if cached:
             if (_clusters_have_lang(cached, want) or not cached.get("clusters")
                     or not os.getenv("OPENAI_API_KEY")):
@@ -695,4 +776,11 @@ def get_user_scenario_clustering_status(scenario_id: str, lang: str | None = Que
                 "message": _CLUSTER_MESSAGES["running"][want]}
     if job["status"] == "error":
         return {"scenario_id": scenario_id, "status": "error", "error": job.get("error", "Erreur inconnue")}
+    if job.get("persisted"):
+        # La base fait foi : vidée depuis, ce résultat décrit un corpus qui n'existe plus.
+        _db = _load_viz_cache(scenario_id, "clustering")
+        if _db:
+            return {**_localize_clusters_payload(_db, want), "status": "done"}
+        return {"scenario_id": scenario_id, "status": "not_started",
+                "message": "Aucun calcul lancé." if want == "fr" else "No computation started."}
     return {**_localize_clusters_payload(job["result"], want), "status": "done"}

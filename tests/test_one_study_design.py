@@ -49,7 +49,7 @@ def _seed(db_conn, rows):
         for doc_id, column, pico in rows:
             cur.execute("INSERT INTO literature_document (id, title, abstract, year, source, "
                         "project_context, quality_score, study_design, pico_json) "
-                        "VALUES (%s,%s,'abstract long enough',2024,'pubmed','literev',0.8,%s,%s)",
+                        "VALUES (%s,%s,'abstract long enough to count as one',2024,'pubmed','literev',0.8,%s,%s)",
                         (doc_id, f"Article {doc_id}", column,
                          json.dumps({"study_design": pico}) if pico is not None else None))
             cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, "

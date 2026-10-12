@@ -44,6 +44,9 @@ from .scenario_store import (
 # refaire.
 SUBSET_REASON_PREFIX = "scope:"
 
+#: L'identifiant que HDBSCAN donne aux articles qu'il n'a rangés dans aucun thème.
+NOISE_CLUSTER = -1
+
 
 # ─── La décision, pure et testable hors base ────────────────────────────────
 def plan_subset(
@@ -67,7 +70,8 @@ def plan_subset(
 
     Une dimension vaut `None` quand la sélection ne s'en sert pas. Pour chaque article et
     chaque dimension employée, le verdict est `in`, `out`, ou `unknown` (l'article est
-    hors de la projection : jamais clusterisé, ou sans concepts extraits).
+    hors de la projection : jamais clusterisé, rangé dans aucun thème (groupe -1, sauf si
+    ce groupe est coché), ou sans concepts extraits).
 
     `combine='all'` garde l'article si TOUTES les dimensions qui savent le juger disent
     `in` ; `combine='any'` s'il y en a au moins une. Dans les deux cas une dimension qui ne
@@ -81,6 +85,7 @@ def plan_subset(
         raise ValueError("unassigned doit valoir 'keep' ou 'exclude'")
 
     verdicts: list[tuple[str, Any]] = []
+    unclustered = 0
     if cluster_of is not None:
         wanted = clusters_wanted or set()
 
@@ -88,8 +93,16 @@ def plan_subset(
             c = cluster_of.get(i)
             if c is None:
                 return "unknown"
+            # Le groupe -1 n'est pas un thème : c'est ce que HDBSCAN n'a PAS su grouper.
+            # Le traiter comme un cluster qu'on n'a pas coché écrivait `excluded` sur
+            # chacun de ses articles (« garder A et B » jetait tout le bruit, qui pèse
+            # lourd sur un petit corpus). Il ne juge donc rien, comme un article au-delà
+            # du plafond, sauf si le relecteur a coché ce groupe en toutes lettres.
+            if c == NOISE_CLUSTER:
+                return "in" if c in wanted else "unknown"
             return "in" if c in wanted else "out"
 
+        unclustered = sum(1 for i in relevant if cluster_of.get(i) == NOISE_CLUSTER)
         verdicts.append(("clusters", _cluster))
     if concept_match is not None:
         known = concept_known if concept_known is not None else set(concept_match)
@@ -170,6 +183,9 @@ def plan_subset(
         "keep": len(keep),
         "exclude": len(drop),
         "undecided": len(undecided),
+        # Combien d'articles pertinents la projection n'a pas groupés (le groupe -1) :
+        # l'aperçu doit pouvoir dire quelle part de « non jugés » vient de là.
+        "unclustered": unclustered,
         "by_dimension": tally,
         "combine": combine,
         "unassigned": unassigned,
@@ -204,19 +220,28 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
         parts.append("niveaux de preuve " + ", ".join(levels))
     joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
-    at = f" (seuil {float(threshold):.4g})" if threshold is not None else ""
-    return f"{SUBSET_REASON_PREFIX} hors de {joined}{tail}{at}"[:480]
+    # Le seuil EN TÊTE : le motif est coupé à 480 caractères, et une longue sélection
+    # (vingt concepts, dix clusters) emportait le « (seuil X) » final avec elle. La
+    # frontière de la sélection disparaissait alors de l'état du découpage et de la
+    # courbe du seuil, qui la relisent ici.
+    at = f"(seuil {float(threshold):.4g}) " if threshold is not None else ""
+    return f"{SUBSET_REASON_PREFIX} {at}hors de {joined}{tail}"[:480]
 
 
 # Le seuil relu dans le motif. Un motif reste du texte libre (un relecteur peut écrire le
 # sien), donc l'absence de correspondance n'est pas une erreur : on ne sait simplement pas
-# à quel seuil ce découpage a été posé, et on le dit plutôt que d'inventer.
-_SCOPE_THRESHOLD_RE = re.compile(r"\(seuil\s+([0-9]*\.?[0-9]+)\)\s*$")
+# à quel seuil ce découpage a été posé, et on le dit plutôt que d'inventer. Il est écrit
+# en tête depuis que la coupe à 480 caractères pouvait l'emporter ; les motifs écrits
+# avant, qui le portent à la fin, se relisent toujours.
+_SCOPE_THRESHOLD_RE = re.compile(
+    r"^" + re.escape(SUBSET_REASON_PREFIX) + r"\s*\(seuil\s+([0-9]*\.?[0-9]+)\)")
+_SCOPE_THRESHOLD_OLD_RE = re.compile(r"\(seuil\s+([0-9]*\.?[0-9]+)\)\s*$")
 
 
 def scope_threshold_of(reason: str | None) -> float | None:
     """Le seuil auquel ce découpage a été appliqué, relu dans son motif. Pur."""
-    m = _SCOPE_THRESHOLD_RE.search(reason or "")
+    m = (_SCOPE_THRESHOLD_RE.search(reason or "")
+         or _SCOPE_THRESHOLD_OLD_RE.search(reason or ""))
     if not m:
         return None
     try:
@@ -360,55 +385,56 @@ def _design_membership(scenario_id: str, threshold: float) -> tuple[dict[int, st
     return design_of, level_of, meta
 
 
-def _concept_membership(scenario_id: str, concepts: list[str], mode: str) -> tuple[set[int], set[int], dict]:
+def _concept_membership(scenario_id: str, concepts: list[str], mode: str,
+                        concept_filter: dict[str, Any] | None = None) -> tuple[set[int], set[int], dict]:
     """(articles correspondants, articles JUGEABLES, méta).
 
     Jugeables = ceux dont les concepts ont été extraits. Les autres sont `unknown` : la
-    carte ne dit pas qu'ils sont hors sujet, elle ne dit rien d'eux."""
-    from .knowledge_graph import _build_concept_graph, _concept_rows
+    carte ne dit pas qu'ils sont hors sujet, elle ne dit rien d'eux.
 
-    wanted: list[tuple[str, str]] = []
-    for part in concepts:
-        part = (part or "").strip()
-        if not part:
-            continue
-        if ":" not in part:
-            raise HTTPException(status_code=400,
-                                detail=f"« {part} » doit s'écrire type:label (ex. pathogen:dengue virus).")
-        t, lab = part.split(":", 1)
-        wanted.append((t.strip().lower(), lab.strip()))
-    if not wanted:
+    La sélection se résout sur l'index COMPLET des concepts (api/knowledge_graph.py),
+    jamais sur la carte dessinée : ses soixante noeuds et ses quatorze concepts par type
+    sont des coupes d'affichage, et un « garder la carte composée » qui en héritait
+    excluait les articles de tous les concepts que l'écran ne montrait pas. Deux formes :
+    `concepts` (liste explicite, union ou intersection selon `mode`), ou `concept_filter`
+    ({exclude_types, min_count, exclude}), la carte telle que l'utilisateur l'a composée."""
+    from .knowledge_graph import _concept_rows, parse_concept_refs, select_concepts
+
+    cf = concept_filter if isinstance(concept_filter, dict) else None
+    try:
+        wanted = parse_concept_refs(list(concepts or []))
+        removed = parse_concept_refs(list((cf or {}).get("exclude") or []))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not wanted and cf is None:
         raise HTTPException(status_code=400, detail="Aucun concept demandé.")
+    try:
+        floor = max(1, int((cf or {}).get("min_count") or 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="concept_filter.min_count doit être un entier.")
 
     rows, n_total = _concept_rows(scenario_id)
     known = {int(r["id"]) for r in rows if r.get("concepts_json")}
-    graph = _build_concept_graph(rows, n_total=n_total, full_articles=True)
-    by_key = {(str(n["type"]).lower(), str((n.get("label") or {}).get("en") or "").strip().lower()): n
-              for n in graph.get("nodes") or []}
-    sets: list[set[int]] = []
-    labels: list[str] = []
-    missing: list[str] = []
-    for t, lab in wanted:
-        node = by_key.get((t, lab.lower()))
-        if node is None:
-            missing.append(f"{t}:{lab}")
-            continue
-        sets.append({int(i) for i in (node.get("articles") or [])})
-        labels.append(str((node.get("label") or {}).get("en") or lab))
-    if missing:
+    sel = select_concepts(rows, concepts=wanted or None, mode=mode,
+                          exclude_types={str(t) for t in ((cf or {}).get("exclude_types") or [])},
+                          min_count=floor, exclude=removed)
+    if sel["missing"]:
         raise HTTPException(status_code=404,
-                            detail=f"Concept(s) absent(s) de la carte : {', '.join(missing)}. "
+                            detail=f"Concept(s) absent(s) des articles pertinents : {', '.join(sel['missing'])}. "
                                    f"Les libellés sont ceux de la carte (anglais canonique).")
-    match = set.union(*sets) if mode == "any" else set.intersection(*sets)
-    meta = {"labels": labels, "concept_mode": mode,
+    # Le motif nomme les concepts gardés ; pour une carte composée, la règle qui la définit.
+    labels = sel["labels"] if wanted else [f"de la carte composée : {sel['description']}"]
+    meta = {"labels": labels, "concept_mode": mode if wanted else "any",
+            "composed": not wanted, "n_concepts": sel["n_concepts"],
             "n_with_concepts": len(known), "n_rows": len(rows)}
-    return match, known, meta
+    return sel["ids"], known, meta
 
 
 # ─── Le plan complet, tel que les trois endpoints le partagent ──────────────
 def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     clusters = payload.get("clusters")
     concepts = payload.get("concepts")
+    concept_filter = payload.get("concept_filter")
     designs = payload.get("designs")
     levels = payload.get("levels")
     combine = str(payload.get("combine") or "all")
@@ -416,10 +442,10 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     concept_mode = str(payload.get("concept_mode") or "any")
     if concept_mode not in ("any", "all"):
         raise HTTPException(status_code=422, detail="concept_mode doit valoir 'any' ou 'all'")
-    if not clusters and not concepts and not designs and not levels:
+    if not clusters and not concepts and not concept_filter and not designs and not levels:
         raise HTTPException(status_code=422,
-                            detail="Donnez au moins `clusters`, `concepts`, `designs` ou `levels` : "
-                                   "sans dimension de sélection il n'y a rien à découper.")
+                            detail="Donnez au moins `clusters`, `concepts`, `concept_filter`, `designs` "
+                                   "ou `levels` : sans dimension de sélection il n'y a rien à découper.")
 
     threshold = _get_scenario_threshold(scenario_id)
     relevant = _relevant_ids(scenario_id, threshold)
@@ -442,10 +468,12 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     concept_match = concept_known = None
     concept_labels: list[str] = []
-    if concepts:
+    if concepts or concept_filter:
         if isinstance(concepts, str):
             concepts = [p for p in concepts.split("|") if p.strip()]
-        concept_match, concept_known, kmeta = _concept_membership(scenario_id, list(concepts), concept_mode)
+        concept_match, concept_known, kmeta = _concept_membership(
+            scenario_id, list(concepts or []), concept_mode,
+            concept_filter if not concepts else None)
         concept_labels = kmeta["labels"]
         meta["concepts"] = kmeta
 
@@ -558,9 +586,16 @@ def apply_scenario_subset(scenario_id: str, payload: dict[str, Any],
         raise HTTPException(status_code=422,
                             detail="Cette sélection ne laisserait aucun article. Un corpus vide "
                                    "n'est pas un découpage : élargissez la sélection.")
-    reason = str(payload.get("reason") or plan["reason"])[:480]
+    reason = str(payload.get("reason") or plan["reason"])
     if not reason.startswith(SUBSET_REASON_PREFIX):
         reason = f"{SUBSET_REASON_PREFIX} {reason}"
+    # Un motif écrit par l'appelant porte lui aussi la frontière, en tête comme les
+    # autres : sans elle, ce découpage disparaissait de `judged_above_threshold`.
+    if scope_threshold_of(reason) is None:
+        reason = (f"{SUBSET_REASON_PREFIX} (seuil {float(plan['meta']['threshold']):.4g}) "
+                  + reason[len(SUBSET_REASON_PREFIX):].lstrip())
+    # Coupé APRÈS la mise en forme : le seuil est en tête, la coupe ne peut plus l'emporter.
+    reason = reason[:480]
     with engine.begin() as conn:
         # L'état ANTÉRIEUR est conservé avant d'être recouvert, et seulement s'il ne
         # l'est pas déjà : deux découpages successifs ne doivent pas faire oublier ce

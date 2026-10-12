@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
-                             _get_user_scenario_or_404, relevant_gate_sql,
+                             _get_user_scenario_or_404, has_abstract_sql, relevant_gate_sql,
                              relevant_gate_tail_sql, screening_status_sql)
 from .search import _load_prisma_identification, _reconcile_prisma_identification
 from .double_blind import _write_ars_screening
@@ -153,14 +153,9 @@ def get_user_scenario_prisma(
     """
     row = _get_user_scenario_or_404(scenario_id)
 
-    # Effective threshold (param > saved setting > default 0.45)
-    with engine.connect() as conn:
-        ss = conn.execute(text(
-            "SELECT similarity_threshold FROM scenario_settings WHERE scenario_id=:sid"
-        ), {"sid": scenario_id}).first()
-    eff_threshold = threshold if threshold is not None else (
-        float(ss[0]) if ss and ss[0] is not None else 0.45
-    )
+    # Seuil effectif : le paramètre, sinon le seuil EN VIGUEUR du scénario, par la lecture
+    # commune (un seuil jamais choisi vaut le seuil de départ, pas un 0.45 recopié ici).
+    eff_threshold = threshold if threshold is not None else _get_scenario_threshold(scenario_id)
     # Le second seuil de la porte de pertinence (score du cross-encoder). Il façonne
     # l'ensemble de preuves exactement comme le premier, mais n'était servi nulle part.
     rerank_threshold = float(_get_scenario_rerank_threshold(scenario_id) or 0.0)
@@ -189,20 +184,23 @@ def get_user_scenario_prisma(
                 -- sur le sous-ensemble NON dupliqué - cohérent avec toutes les autres
                 -- surfaces "pertinentes" (evidence-brief, RAG, cartes). L'identification
                 -- ci-dessus (total/by_source/duplicates) reste sur le corpus ENTIER.
-                -- semantic split at effective threshold
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS above_threshold,
-                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr THEN 1 ELSE 0 END) AS below_threshold,
+                -- semantic split at effective threshold, over the records that HAVE an
+                -- abstract: a record without one is never pre-selected by its score (it
+                -- only reads the title) and has its own line, screened by title by hand.
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) >= :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS above_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND COALESCE(ars.similarity_score, 0) <  :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS below_threshold,
+                SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND NOT {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS no_abstract,
                 -- manual curation
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included' THEN 1 ELSE 0 END) AS manually_included,
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded' THEN 1 ELSE 0 END) AS manually_excluded,
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND ({screening_status_sql('d', 'ars')} IS NULL OR {screening_status_sql('d', 'ars')} = 'pending')
                          THEN 1 ELSE 0 END) AS pending,
-                -- manually included but below threshold (override)
+                -- manually included but not pre-selected (below threshold, or no abstract)
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'included'
-                           AND COALESCE(ars.similarity_score, 0) < :thr THEN 1 ELSE 0 END) AS manually_rescued,
-                -- manually excluded above threshold (veto)
+                           AND (COALESCE(ars.similarity_score, 0) < :thr OR NOT {has_abstract_sql('d')}) THEN 1 ELSE 0 END) AS manually_rescued,
+                -- manually excluded although pre-selected (veto)
                 SUM(CASE WHEN (d.is_duplicate IS NULL OR d.is_duplicate = FALSE) AND {screening_status_sql('d', 'ars')} = 'excluded'
-                           AND COALESCE(ars.similarity_score, 0) >= :thr THEN 1 ELSE 0 END) AS manually_vetoed,
+                           AND COALESCE(ars.similarity_score, 0) >= :thr AND {has_abstract_sql('d')} THEN 1 ELSE 0 END) AS manually_vetoed,
                 -- full text - RESTREINT à l'ensemble de preuves (≥ seuil OU inclus
                 -- manuellement, hors exclus), pas au corpus entier : sinon le "X of Y"
                 -- du PRISMA pouvait dépasser Y (le fameux "5 of 4").
@@ -236,6 +234,7 @@ def get_user_scenario_prisma(
     unique          = max(0, total - duplicates)   # après retrait des doublons
     above           = int(stats["above_threshold"] or 0)
     below           = int(stats["below_threshold"] or 0)
+    no_abstract     = int(stats["no_abstract"] or 0)    # gardées, à juger sur le titre
     man_included    = int(stats["manually_included"] or 0)
     man_excluded    = int(stats["manually_excluded"] or 0)
     pending         = int(stats["pending"] or 0)
@@ -258,17 +257,34 @@ def get_user_scenario_prisma(
     excluded_by_reason: list[dict[str, Any]] = []
     try:
         with engine.connect() as conn:
+            # Les douze motifs les plus fréquents, et, dans la MÊME instruction, le total
+            # et le nombre de motifs distincts : la liste s'arrêtait au douzième sans
+            # ligne pour le reste, et ses chiffres sommaient moins que le total des
+            # exclus affiché juste au-dessus.
             _reasons = conn.execute(text(f"""
-                SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
-                       COUNT(*) AS n
-                FROM article_scenarios ars
-                JOIN literature_document d ON d.id = ars.document_id
-                WHERE ars.scenario_id = :sid
-                  AND d.is_duplicate IS NOT TRUE
-                  AND {screening_status_sql('d', 'ars')} = 'excluded'
-                GROUP BY 1 ORDER BY n DESC LIMIT 12
+                SELECT reason, n, SUM(n) OVER () AS total, COUNT(*) OVER () AS n_reasons
+                FROM (
+                    SELECT COALESCE(NULLIF(TRIM(ars.screening_reason), ''), '(sans motif)') AS reason,
+                           COUNT(*) AS n
+                    FROM article_scenarios ars
+                    JOIN literature_document d ON d.id = ars.document_id
+                    WHERE ars.scenario_id = :sid
+                      AND d.is_duplicate IS NOT TRUE
+                      AND {screening_status_sql('d', 'ars')} = 'excluded'
+                    GROUP BY 1
+                ) r
+                ORDER BY n DESC, reason LIMIT 12
             """), {"sid": scenario_id}).mappings().all()
         excluded_by_reason = [{"reason": r["reason"], "articles": int(r["n"])} for r in _reasons]
+        if _reasons:
+            _rest = int(_reasons[0]["total"] or 0) - sum(r["articles"] for r in excluded_by_reason)
+            _rest_reasons = int(_reasons[0]["n_reasons"] or 0) - len(excluded_by_reason)
+            if _rest > 0:
+                # Une ligne « autres motifs » pour que la liste somme au total. `other`
+                # et `reasons` laissent l'interface la dire dans sa langue.
+                excluded_by_reason.append({
+                    "reason": f"(autres motifs : {_rest_reasons})", "articles": _rest,
+                    "other": True, "reasons": _rest_reasons})
     except Exception as _e_reasons:
         logger.warning(f"prisma exclusion reasons {scenario_id}: {_e_reasons}")
 
@@ -329,6 +345,13 @@ def get_user_scenario_prisma(
             "removed_after_search": int(_rec.get("removed_after_search") or 0),
             "records_screened_at_search": int(_rec.get("records_screened_at_search") or 0),
             "records_screened": unique,
+            # Dont sans résumé, gardées et à juger sur le titre : compté sur le corpus tel
+            # qu'il est (un résumé comblé plus tard en sort de lui-même), comme `unique`.
+            "kept_no_abstract": no_abstract,
+            # Les facettes OU qu'aucune base n'a reçues, et la borne de la correspondance
+            # locale quand elle a mordu : ce que la recherche a enregistré.
+            "facets_skipped": [str(f) for f in (_figures.get("facets_skipped") or [])],
+            "local_match_capped": bool(_figures.get("local_match_capped")),
             "embedded": embedded,
             "figures_from": "search_run",
             # « populate » = une recherche a interrogé les sources ; « rebuild » = la
@@ -432,6 +455,7 @@ def get_user_scenario_prisma(
             "removed_after_search": 0,
             "records_screened_at_search": unique,
             "records_screened": unique,
+            "kept_no_abstract": no_abstract,
             "embedded": embedded,
             "figures_from": "corpus",
         }
@@ -444,6 +468,9 @@ def get_user_scenario_prisma(
             "threshold": eff_threshold,
             "above_threshold": above,
             "below_threshold": below,
+            # Ni au-dessus ni en dessous : sans résumé, à juger sur le titre à la main.
+            # above + below + no_abstract = passés au screening.
+            "no_abstract": no_abstract,
             "method": "cosine similarity (text-embedding-3-small)",
             # 0 = pas de second seuil. Quand il est posé, `below_rerank_threshold` dit
             # combien d'articles au-dessus du seuil de similarité il retire.
@@ -624,6 +651,9 @@ def screen_user_scenario_article(
     # autres : de leur brief, de leurs extractions, de leurs exports et de leurs
     # compteurs, sans qu'un écran de ces revues ne le dise. Deux scénarios de production
     # partagent une requête sur la grippe aviaire et se déplaçaient ainsi l'un l'autre.
+    #
+    # Une décision qui change le statut périme aussi les cartes (thèmes, graphe, concepts)
+    # dans la même transaction : `_write_ars_screening` s'en charge pour tous ses appelants.
     with engine.begin() as conn:
         _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
     return {"id": article_id, "status": status, "updated": True, "scope": "scenario"}
@@ -634,9 +664,13 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
     """Extraction PICO à la demande pour UN article d'un scénario utilisateur.
 
     Implémentation réelle (les endpoints GESICA `.../pico/extract` délèguent ici).
-    Utilise le texte intégral si disponible (meilleure qualité), sinon le résumé ;
-    max_tokens=800 (400 tronquait le JSON verbeux) et remplissage tolérant des clés.
+    Le prompt, le texte lu et la normalisation sont ceux de tous les rédacteurs PICO
+    (api/pico_map) : le résumé, plus les méthodes et les résultats du texte intégral quand
+    il existe, et le résultat principal de l'article (`key_finding`, `finding_direction`).
+    Le texte intégral remplaçait le résumé, et seuls ses 14 000 premiers caractères (en-tête,
+    introduction) étaient lus.
     """
+    from .pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks, pico_source_text
     _get_user_scenario_or_404(scenario_id)
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
@@ -653,54 +687,20 @@ def extract_user_scenario_article_pico(scenario_id: str, article_id: int, _: Non
         raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
     title = row["title"] or ""
     abstract = row["abstract"] or ""
-    body_text, body_label, pico_source = abstract[:3000], "Abstract", "abstract"
     with engine.connect() as _ftc:
-        _ft = _ftc.execute(text("""
-            SELECT string_agg(content, chr(10) || chr(10) ORDER BY chunk_index) AS ft
-            FROM document_chunk
-            WHERE document_id = :id AND chunk_type = 'fulltext_section'
-        """), {"id": article_id}).scalar()
-    if _ft and len(_ft) > len(abstract):
-        body_text, body_label, pico_source = _ft[:14000], "Full text", "fulltext"
-    if not body_text or len(body_text.strip()) < 30:
+        chunks = pico_fulltext_chunks(_ftc, article_id)
+    if len(abstract.strip()) < 30 and pico_source_text(title, abstract, chunks)[1] != "fulltext":
         raise HTTPException(status_code=422, detail="Article sans texte exploitable pour l'extraction PICO")
-    system_prompt = (
-        "You are a systematic review expert. "
-        "Extract PICO elements and return ONLY valid JSON:\n"
-        '{"P":"Population","I":"Intervention","C":"Comparator or Not specified",'
-        '"O":"Outcome(s)","study_design":"RCT|Cohort|Systematic review|etc",'
-        '"pico_confidence":0.0-1.0,"pico_notes":""}\n'
-        "Be concise (max 2 sentences per field). Return ONLY the JSON."
-    )
     try:
         from llm_usage import MeteredOpenAI as _OAI
         from datetime import datetime, timezone
         _client = _OAI(api_key=openai_key, timeout=90.0)
-        resp = _client.chat.completions.create(
-            model=_model("bulk"),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Title: {title}\n\n{body_label}: {body_text}"},
-            ],
-            temperature=0,
-            seed=42,
-            max_tokens=800,
-            response_format={"type": "json_object"},
-        )
-        pico = json.loads(resp.choices[0].message.content)
+        pico, pico_source = extract_pico(_client, title, abstract, chunks,
+                                         label=f"PICO article {article_id}")
+    except PicoUnreadable as e:
+        raise HTTPException(status_code=502, detail=f"Réponse PICO invalide: {str(e)[:200]}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Échec de l'extraction PICO: {str(e)[:200]}")
-    if not isinstance(pico, dict):
-        raise HTTPException(status_code=502, detail="Réponse PICO invalide (JSON attendu)")
-    for _k in ("P", "I", "C", "O"):
-        pico.setdefault(_k, "")
-    pico.setdefault("study_design", "non précisé")
-    try:
-        pico["pico_confidence"] = float(pico.get("pico_confidence", 0.3))
-    except (TypeError, ValueError):
-        pico["pico_confidence"] = 0.3
-    pico["pico_notes"] = pico.get("pico_notes", "")
-    pico["pico_source"] = pico_source
     with engine.begin() as conn:
         conn.execute(text("""
             UPDATE literature_document

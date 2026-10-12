@@ -36,7 +36,8 @@ from sqlalchemy import text
 
 from .core import _norm_lang, app, engine, logger
 from .scenario_store import (_get_scenario_rerank_threshold, _get_scenario_threshold,
-                             _get_user_scenario_or_404)
+                             _get_user_scenario_or_404, relevant_gate_sql,
+                             screening_status_sql, threshold_provenance)
 from .study_design import level_label
 
 #: `[12]` or `[12, 34]`: what the brief's prompt asks the model to place in its prose. A
@@ -103,6 +104,9 @@ _REPORT_STRINGS = {
                      "citer."),
         "rerank": (" et, quand il a été calculé, dont le score de reclassement (cross-encoder) "
                    "atteint {r}"),
+        "threshold_default": "par défaut, non choisi",
+        "unscored": ("Sans score de similarité : {n} (hors du sous-ensemble pertinent tant "
+                     "qu'ils ne sont pas scorés, sauf inclusion à la main)"),
         "warning": ("> **Avertissement** : le calcul des agrégats a échoué, les totaux "
                     "ci-dessus ne décrivent pas le corpus complet."),
         "years": "Années : {a} à {b}",
@@ -153,6 +157,13 @@ _REPORT_STRINGS = {
                        "texte suivis d'un `?` et ne correspondent à aucun article du corpus."),
         "no_authors": "[auteurs non renseignés]",
         "no_title": "[titre non renseigné]",
+        "status_excluded": "*(désormais exclu au screening)*",
+        "status_below_threshold": "*(désormais sous le seuil de pertinence)*",
+        "status_duplicate": "*(désormais marqué comme doublon)*",
+        "not_relevant": ("> **Références sorties du sous-ensemble pertinent** ({n}) : {refs}. Le "
+                         "brief les citait quand il a été généré ; elles appartiennent toujours "
+                         "au corpus du scénario mais ne font plus partie des articles que les "
+                         "analyses lisent."),
     },
     "en": {
         "generated": "*Generated on {date}*",
@@ -167,6 +178,9 @@ _REPORT_STRINGS = {
                      "sampling. The articles reproduced in full in the generator's prompt serve "
                      "only for quotation."),
         "rerank": " and, where it was computed, whose reranking (cross-encoder) score reaches {r}",
+        "threshold_default": "default, not chosen",
+        "unscored": ("Without a similarity score: {n} (outside the relevant set until scored, "
+                     "unless included by hand)"),
         "warning": ("> **Warning**: the aggregation failed; the totals above do not describe "
                     "the complete corpus."),
         "years": "Years: {a} to {b}",
@@ -214,6 +228,13 @@ _REPORT_STRINGS = {
                        "followed by `?` and match no article in the corpus."),
         "no_authors": "[authors not recorded]",
         "no_title": "[title not recorded]",
+        "status_excluded": "*(now excluded at screening)*",
+        "status_below_threshold": "*(now below the relevance threshold)*",
+        "status_duplicate": "*(now marked as a duplicate)*",
+        "not_relevant": ("> **References no longer in the relevant subset** ({n}): {refs}. The "
+                         "brief cited them when it was generated; they still belong to the "
+                         "scenario's corpus but are no longer among the articles the analyses "
+                         "read."),
     },
 }
 
@@ -349,6 +370,34 @@ def _cached_brief(scenario_id: str) -> dict | None:
     return brief if brief.get("error") is None else None
 
 
+def _cited_articles(scenario_id: str, ids: list[int], threshold: float) -> dict[int, dict]:
+    """Les articles cités, cherchés dans TOUT le corpus du scénario (chaque article qui
+    lui est lié), avec ce qu'ils sont devenus : `relevance_status` vaut `relevant`,
+    `excluded`, `below_threshold` ou `duplicate`.
+
+    Ils étaient cherchés dans le seul sous-ensemble pertinent ACTUEL : un brief en cache
+    qui citait un article exclu depuis, ou passé sous un seuil relevé, affichait « ne
+    correspond à aucun article du corpus », ce qui était faux, et perdait la référence.
+    Un identifiant qui n'est lié à aucun article du scénario reste, lui, non résolu."""
+    if not ids:
+        return {}
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    status = screening_status_sql("d", "ars")
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT d.id, d.title, d.authors, d.journal, d.year, d.doi, d.pmid,
+                   CASE WHEN {gate} THEN 'relevant'
+                        WHEN d.is_duplicate IS TRUE THEN 'duplicate'
+                        WHEN {status} = 'excluded' THEN 'excluded'
+                        ELSE 'below_threshold' END AS relevance_status
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id AND ars.scenario_id = :sid
+            WHERE d.id = ANY(:ids)
+        """), {"sid": scenario_id, "thr": threshold,
+               "ids": [int(i) for i in ids]}).mappings().all()
+    return {int(r["id"]): dict(r) for r in rows}
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     """A markdown table, with pipes in cell text escaped so a title cannot break it."""
     def _cell(value):
@@ -376,24 +425,39 @@ def _rerank_clause(rerank_threshold: float | None, lang: str | None = "fr") -> s
 def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | None,
                  articles_by_id: dict, scenario_name: str, query: str | None,
                  threshold: float, rerank_threshold: float | None = None,
-                 lang: str | None = "fr") -> dict[str, Any]:
+                 lang: str | None = "fr", threshold_chosen: bool | None = None,
+                 unscored: int | None = None) -> dict[str, Any]:
     """The whole document as markdown, plus what could not be resolved. Pure.
 
     Figures are numbered in the order they appear, as a paper numbers them, so the text
     can refer to "figure 2" and mean it. `lang` is the language of the document around
-    the brief's own prose (French by default, as before)."""
+    the brief's own prose (French by default, as before).
+
+    `threshold_chosen=False` prints the threshold as "default, not chosen": a starting
+    value nobody set must not read as a methods decision. `unscored` is the number of
+    articles left out of the relevant set for want of a score; both are omitted when
+    unknown (None)."""
     from .evidence import brief_level                       # lazy: evidence imports widely
 
     key = _lang_key(lang)
     s = _REPORT_STRINGS[key]
     numbers = {}
     references = []
+    # Les références qui ne sont PLUS pertinentes : un brief en cache peut citer un
+    # article exclu depuis, ou passé sous un seuil relevé. Il reste une référence (le
+    # texte le cite), et la liste dit ce qu'il est devenu au lieu de le perdre.
+    not_relevant: list[str] = []
     for article_id in cited_ids(brief):
         article = articles_by_id.get(article_id)
         if article is None:
             continue                                  # compté comme non résolu plus bas
         numbers[article_id] = len(references) + 1
-        references.append(format_reference(len(references) + 1, article, key))
+        line = format_reference(len(references) + 1, article, key)
+        status = article.get("relevance_status")
+        if status in ("excluded", "below_threshold", "duplicate"):
+            line += " " + s[f"status_{status}"]
+            not_relevant.append(f"[{numbers[article_id]}]")
+        references.append(line)
 
     unresolved: list[int] = []
     lines: list[str] = []
@@ -406,10 +470,11 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
     # ── Méthodes ─────────────────────────────────────────────────────────────
     lines += [s["methods"], ""]
     n_relevant = digest.get("n_articles") or 0
+    _thr_shown = f"{threshold:.2f}" + (f", {s['threshold_default']}" if threshold_chosen is False else "")
     lines += [
         s["query"].format(query=query or s["query_missing"]),
         "",
-        s["relevant"].format(threshold=f"{threshold:.2f}",
+        s["relevant"].format(threshold=_thr_shown,
                              rerank=_rerank_clause(rerank_threshold, key), n=n_relevant),
         "",
     ]
@@ -424,6 +489,8 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
         facts.append(s["with_pico"].format(n=digest["n_with_pico"]))
     if digest.get("n_with_fulltext") is not None:
         facts.append(s["with_fulltext"].format(n=digest["n_with_fulltext"]))
+    if unscored is not None:
+        facts.append(s["unscored"].format(n=unscored))
     if funnel:
         # Clés de `corpus_stats` (api/evidence.py), pas inventées ici.
         for fkey in ("total", "duplicates", "excluded", "pending"):
@@ -521,11 +588,14 @@ def build_report(brief: dict, digest: dict, matrix: dict | None, funnel: dict | 
     else:
         lines += [s["no_refs"]]
     lines += ["", s["refs_note"].format(n=len(references)), ""]
+    if not_relevant:
+        lines += [s["not_relevant"].format(n=len(not_relevant), refs=", ".join(not_relevant)), ""]
     if unresolved:
         lines += [s["unresolved"].format(ids=", ".join(str(u) for u in unresolved)), ""]
 
     return {"markdown": "\n".join(lines).rstrip() + "\n",
             "references": len(references),
+            "references_not_relevant": len(not_relevant),
             "citations_unresolved": unresolved,
             "figures": figure - 1}
 
@@ -544,7 +614,6 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
     from fastapi.responses import PlainTextResponse
 
     from .digest import concept_matrix, corpus_digest
-    from .relevance import _get_above_threshold_articles
 
     threshold = _get_scenario_threshold(scenario_id)
     # Le brief LLM EN CACHE, jamais une génération. Le rapport doit pouvoir être demandé
@@ -583,8 +652,9 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
     except Exception as e:                                   # noqa: BLE001
         logger.info(f"evidence_report funnel {scenario_id}: {e}")
 
-    articles = _get_above_threshold_articles(scenario_id, full_rows=0) or []
-    by_id = {a["id"]: a for a in articles if a.get("id") is not None}
+    # Les références contre le corpus ENTIER du scénario, pas contre le seul sous-ensemble
+    # pertinent du jour : voir `_cited_articles`.
+    by_id = _cited_articles(scenario_id, cited_ids(llm), threshold)
 
     name = scenario_id
     query = None
@@ -599,9 +669,12 @@ def evidence_report(scenario_id: str, download: bool = Query(False),
 
     # La langue du document : celle demandée, sinon celle du brief, sinon le français.
     _lang = _norm_lang(lang) or str((llm.get("_meta") or {}).get("lang") or "") or "fr"
+    # Le seuil était-il choisi, et combien d'articles restent dehors faute de score.
+    _prov = threshold_provenance(scenario_id)
     out = build_report(llm, digest, matrix, funnel, by_id, name, query, threshold,
                        rerank_threshold=_get_scenario_rerank_threshold(scenario_id),
-                       lang=_lang)
+                       lang=_lang, threshold_chosen=_prov["threshold_chosen"],
+                       unscored=_prov["unscored"])
     if download:
         return PlainTextResponse(
             out["markdown"], media_type="text/markdown; charset=utf-8",

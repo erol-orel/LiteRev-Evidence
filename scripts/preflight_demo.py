@@ -194,7 +194,9 @@ class Preflight:
                                  f"source={b.get('source')}, enriching={bool(b.get('enriching'))}")
         if isinstance(cg, dict) and (cg.get("enriching") or (cg.get("n_missing_concepts") or 0) > 0):
             self.add("WARN", f"{sid}: concept map", f"{cg.get('n_missing_concepts')} articles still without LLM concepts"
-                     + (" (normalising now)" if cg.get("enriching") else " (no OpenAI key on the API?)"))
+                     + (" (normalising now)" if cg.get("enriching") else
+                        " (reading the map no longer starts the pass: run the pipeline, or POST "
+                        f"/user-scenarios/{sid}/concept-graph/annotate with the write key)"))
         self.read(f"{sid}: evidence brief", f"/user-scenarios/{sid}/evidence-brief",
                   lambda b: f"{(b.get('corpus_stats') or {}).get('total', '?')} articles in the brief")
         self.artifact(sid, "LLM brief", f"/scenarios/{sid}/evidence-brief/llm?lang={lang}",

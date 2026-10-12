@@ -239,6 +239,28 @@ def test_a_brief_with_no_citations_still_produces_a_document():
     assert out["references"] == 0 and out["citations_unresolved"] == []
 
 
+def test_a_reference_that_left_the_relevant_set_is_kept_and_says_so():
+    """A cached brief can cite an article excluded since, or pushed under a raised
+    threshold. It is still in the scenario's corpus: the reference stays, numbered, with
+    what became of it, instead of a false "matches no article in the corpus"."""
+    articles = {11: {**_ARTICLES[11], "relevance_status": "excluded"},
+                22: {**_ARTICLES[22], "relevance_status": "below_threshold"}}
+    out = build_report(_brief(), _digest(), None, None, articles, "S", None, 0.45)
+    md = out["markdown"]
+    assert "Vaccination reduces severe disease [1]." in md and "[11?]" not in md
+    assert "(désormais exclu au screening)" in md
+    assert "(désormais sous le seuil de pertinence)" in md
+    assert "Références sorties du sous-ensemble pertinent** (2) : [1], [2]" in md
+    assert out["references"] == 2 and out["references_not_relevant"] == 2
+    assert out["citations_unresolved"] == []
+    en = build_report(_brief(), _digest(), None, None, articles, "S", None, 0.45, lang="en")
+    assert "(now excluded at screening)" in en["markdown"]
+    assert "References no longer in the relevant subset** (2)" in en["markdown"]
+    # A relevant reference carries no note.
+    plain = build_report(_brief(), _digest(), None, None, _ARTICLES, "S", None, 0.45)
+    assert plain["references_not_relevant"] == 0 and "désormais" not in plain["markdown"]
+
+
 # ── against a real database ──────────────────────────────────────────────────
 def _seed(db_conn, with_brief=True):
     ensure_document_columns(db_conn.cursor())
@@ -251,7 +273,8 @@ def _seed(db_conn, with_brief=True):
                     "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name", (SID,))
         cur.execute("INSERT INTO literature_document (id, title, abstract, year, journal, "
                     "authors, doi, study_design, source, project_context, quality_score) VALUES "
-                    "(8400,'Seeded trial','a',2022,'Lancet','Smith J','10.1/x','RCT','pubmed','literev',0.9)")
+                    "(8400,'Seeded trial','A seeded abstract, long enough to count.',2022,'Lancet','Smith J',"
+                    "'10.1/x','RCT','pubmed','literev',0.9)")
         cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score) "
                     "VALUES (8400,%s,0.9)", (SID,))
         if with_brief:
@@ -290,6 +313,39 @@ def test_the_endpoint_assembles_the_cached_brief(db_conn):
         assert "A seeded finding [1]." in md, "the citation resolved against the database"
         assert "1. Smith J. Seeded trial. Lancet. 2022. doi:10.1/x [#8400]" in md
         assert got["references"] == 1 and got["citations_unresolved"] == []
+    finally:
+        _cleanup(db_conn)
+
+
+def test_references_resolve_against_the_whole_scenario_corpus(db_conn):
+    """End to end. 8401 was excluded by a reviewer after the brief cited it, 8402 fell
+    under a raised threshold; 8499 belongs to no article of this scenario. The first two
+    are references with a note, the last stays unresolved."""
+    from fastapi.testclient import TestClient
+
+    _seed(db_conn)
+    try:
+        with db_conn.cursor() as cur:
+            for i, title in ((8401, "Excluded trial"), (8402, "Weak cohort")):
+                cur.execute("INSERT INTO literature_document (id, title, abstract, year, journal, "
+                            "authors, pmid, source, project_context) VALUES "
+                            "(%s, %s, 'a', 2021, 'BMJ', 'Roe B', %s, 'pubmed', 'literev')",
+                            (i, title, str(30000000 + i)))
+            cur.execute("INSERT INTO article_scenarios (document_id, scenario_id, similarity_score, "
+                        "screening_status) VALUES "
+                        "(8401, %s, 0.95, 'excluded'), (8402, %s, 0.30, NULL)", (SID, SID))
+            brief = json.dumps({
+                "executive_summary": "Seeded [8400], excluded [8401], weak [8402], nowhere [8499].",
+                "_meta": {"model": "gpt-5.6-luna"}})
+            cur.execute("UPDATE scenario_settings SET evidence_brief_json = CAST(%s AS jsonb) "
+                        "WHERE scenario_id = %s", (brief, SID))
+        got = TestClient(main.app).get(f"/user-scenarios/{SID}/evidence-report").json()
+        md = got["markdown"]
+        assert "Seeded [1], excluded [2], weak [3], nowhere [8499?]." in md
+        assert got["references"] == 3 and got["references_not_relevant"] == 2
+        assert got["citations_unresolved"] == [8499]
+        assert "2. Roe B. Excluded trial. BMJ. 2021. PMID:30008401 [#8401] *(désormais exclu au screening)*" in md
+        assert "Weak cohort. BMJ. 2021. PMID:30008402 [#8402] *(désormais sous le seuil de pertinence)*" in md
     finally:
         _cleanup(db_conn)
 

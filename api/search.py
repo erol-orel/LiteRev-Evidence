@@ -17,8 +17,8 @@ from sqlalchemy import text, bindparam
 import lexical_search as _lex
 
 from .core import app, engine, logger, require_api_key
-from .documents import _strategy_is_degraded
-from .scenario_store import _get_user_scenario_or_404
+from .documents import PREPRINT_DOI_RE, _strategy_is_degraded, same_work_survivors
+from .scenario_store import _get_user_scenario_or_404, has_abstract_sql
 from llm_usage import model_for as _model
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,20 +42,7 @@ from llm_usage import model_for as _model
 # serveur de préprints. La déduplication par titre réunit souvent le préprint et l'article
 # publié sous une seule ligne, qui garde le DOI de la première arrivée et reçoit la revue
 # de la seconde : cette ligne est un article publié, et l'exclusion ne doit pas l'écarter.
-PREPRINT_DOI_RE = (
-    r"^10\.1101/(\d{4}\.\d{2}\.\d{2}\.\d+|\d{6}(v\d+)?$)"       # bioRxiv, medRxiv
-    # Le préfixe que portent les DOI datés de bioRxiv et medRxiv en 2026 (vu sur HPAI_last :
-    # « 10.64898/2026.08.06.26359901 », revue « medRxiv : the preprint server… »).
-    r"|^10\.64898/\d{4}\.\d{2}\.\d{2}\.\d+"
-    r"|^10\.21203/rs\."                                         # Research Square
-    r"|^10\.2139/ssrn\."                                        # SSRN
-    r"|^10\.20944/preprints"                                    # Preprints.org
-    r"|^10\.48550/arxiv\."                                      # arXiv
-    r"|^10\.3123[45]/osf\.io/|^10\.31219/osf\.io/"              # OSF, PsyArXiv, SocArXiv
-    r"|^10\.26434/chemrxiv|^10\.36227/techrxiv|^10\.32942/"     # ChemRxiv, TechRxiv, EcoEvoRxiv
-    r"|^10\.22541/au\.|^10\.2196/preprints\."                   # Authorea, JMIR Preprints
-    r"|^10\.1590/scielopreprints\."                             # SciELO Preprints
-)
+# PREPRINT_DOI_RE : défini dans `documents`, où la dédup par travail le lit aussi.
 PREPRINT_URL_RE = (
     r"(biorxiv\.org|medrxiv\.org|arxiv\.org/|researchsquare\.com|ssrn\.com|preprints\.org"
     r"|chemrxiv\.org|psyarxiv\.com|osf\.io/preprints|authorea\.com"
@@ -144,13 +131,17 @@ def _build_where(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
                 clauses.append(f"{column} = :{key}")
             params[key] = value
 
+    # Une année INCONNUE n'est pas hors de la période : « d.year >= :year_min » est NULL
+    # pour elle, et chaque recherche bornée en années perdait les notices dont la date
+    # n'avait pas été lue (le MedlineDate de PubMed, « 1998 Spring »). Elles restent, et
+    # le corpus les compte à part (scenario_counts : `year_unknown`).
     year_min = filters.get("year_min")
     year_max = filters.get("year_max")
     if year_min not in (None, ""):
-        clauses.append("d.year >= :year_min")
+        clauses.append("(d.year IS NULL OR d.year >= :year_min)")
         params["year_min"] = int(year_min)
     if year_max not in (None, ""):
-        clauses.append("d.year <= :year_max")
+        clauses.append("(d.year IS NULL OR d.year <= :year_max)")
         params["year_max"] = int(year_max)
 
     # Recherche « sans préprints » : la bibliothèque locale n'en apparie plus aucun.
@@ -237,23 +228,71 @@ def _strip_field_tags(query: str) -> str:
     return _tidy_boolean_operators(re.sub(r"\[[^\]]*\]", " ", q))
 
 
-# Conservés dans un terme : lettres (accentuées comprises - « cathéter » doit rester
-# « cathéter », pas « cathter »), chiffres, '_', '-', espaces et '*'. Le reste est du
-# bruit de ponctuation.
-_TERM_JUNK_RE = re.compile(r"[^\w\-* ]")
+class _BooleanTerm(str):
+    """Un terme normalisé, ce que lisent le parseur et les compilateurs locaux, qui garde
+    sa graphie d'origine (`raw`, en minuscules) pour les API qui l'apparient mieux telle
+    quelle : « 2.3.4.4b » est un seul mot pour OpenAlex, quatre une fois découpé. Une
+    sous-classe de `str`, pour que l'arbre garde sa forme et ses comparaisons."""
+    raw: str = ""
+
+
+#: Une ponctuation à ses deux bouts, retirée de la graphie d'origine.
+_EDGE_SEPARATORS_RE = re.compile(rf"^(?:{_lex.SEPARATOR_PATTERN})|(?:{_lex.SEPARATOR_PATTERN})$")
+
+
+def _unicode_punctuation_to_space(s: str) -> str:
+    """Une ponctuation hors ASCII (guillemets courbes ou français, tirets moyens et longs)
+    sépare deux mots, comme la ponctuation ASCII. Une requête collée depuis un traitement
+    de texte arrive avec des guillemets courbes, que le tokeniseur ne prend pas pour des
+    guillemets : ils restaient collés au mot (« “avian »), qui ne correspondait plus à
+    rien. Les lettres accentuées et les chiffres de toute écriture restent."""
+    return "".join(c if (c.isascii() or c.isalnum() or c.isspace()) else " " for c in s)
 
 
 def _clean_boolean_term(raw: str) -> str:
-    """Normalise un terme ou une phrase : minuscules, ponctuation retirée.
+    """Normalise un terme ou une phrase : minuscules, ponctuation changée en espace.
+
+    La ponctuation à l'intérieur d'un terme SÉPARE deux mots, du côté du terme comme du
+    côté du texte (lexical_search.SEPARATOR_PATTERN, la même règle des deux côtés et
+    pour les deux moteurs). Elle était supprimée du terme seul : « 2.3.4.4b » devenait
+    « 2344b », « influenza A(H5N1) » « influenza ah5n1 », « A/H5N1 » « ah5n1 », « PM2.5 »
+    « pm25 », des formes qu'aucun document ne contient, envoyées telles quelles à
+    OpenAlex, DOAJ, CORE et ClinicalTrials.gov. Les lettres accentuées, les chiffres,
+    '_' et '-' restent (« cathéter » reste « cathéter »).
 
     Une '*' FINALE est la troncature PubMed (forecast* = forecast, forecasting,
     forecasts…) : elle est GARDÉE en fin de terme, et chaque compilateur en fait ce
     qu'il sait faire (préfixe en plein texte, sous-chaîne en LIKE, retirée pour arXiv
-    et S2). Toute autre '*' est du bruit."""
-    t = _TERM_JUNK_RE.sub("", raw.lower())
-    trunc = t.rstrip().endswith("*")
-    t = t.replace("*", "").strip()
-    return f"{t}*" if (t and trunc) else t
+    et S2). Toute autre '*' est du bruit. La graphie d'origine voyage avec le terme
+    (`_BooleanTerm.raw`), pour les API (cf. `_api_phrase`)."""
+    low = _unicode_punctuation_to_space((raw or "").lower())
+    t = _lex.separate(low)
+    trunc = t.endswith("*")
+    t = " ".join(t.replace("*", "").split())
+    out = _BooleanTerm(f"{t}*" if (t and trunc) else t)
+    orig = " ".join(_EDGE_SEPARATORS_RE.sub("", " ".join(low.replace("*", "").split())).split())
+    out.raw = (f"{orig}*" if (orig and trunc) else orig) if t else ""
+    return out
+
+
+def _api_phrase(term, keep: str = ".") -> str:
+    """La forme d'un terme pour une API qui reçoit le booléen dans une URL : la graphie
+    d'origine où la ponctuation de `keep` reste quand elle est DANS un mot (le point de
+    « 2.3.4.4b » ou de « pm2.5 », que les moteurs d'OpenAlex, DOAJ, CORE ou arXiv lisent
+    comme un seul mot), et où toute autre ponctuation devient une espace (une parenthèse
+    ou une barre oblique y sépare déjà deux mots, et dans leur syntaxe elles sont des
+    opérateurs). Sans étoile. PUR/testable."""
+    raw = getattr(term, "raw", "") or str(term or "")
+    raw = raw.replace("*", "")
+    kept = set(keep)
+    out = re.sub(_lex.SEPARATOR_PATTERN,
+                 lambda m: m.group(0) if (kept and set(m.group(0)) <= kept) else " ", raw)
+    return " ".join(out.split())
+
+
+def _api_needs_quotes(phrase: str, keep: str = ".") -> bool:
+    """Une phrase, ou un mot qui garde une ponctuation, part entre guillemets."""
+    return " " in phrase or any(c in phrase for c in keep)
 
 
 def _tokenize_boolean(query: str) -> list[tuple[str, str | None]]:
@@ -396,7 +435,8 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
     if typ == "term":
         key = f"bq_{idx[0]}"
         idx[0] += 1
-        params[key] = f"%{ast[1].rstrip('*')}%"       # troncature : déjà une sous-chaîne
+        needle = ast[1].rstrip('*')
+        params[key] = f"%{needle}%"                   # troncature : déjà une sous-chaîne
         # Appartenance PAR DOCUMENT (pas par chunk) : un terme correspond si le
         # titre, le résumé OU N'IMPORTE QUEL chunk du document le contient (EXISTS
         # corrélé sur d.id). Indispensable pour NOT : compiler `NOT terme` en
@@ -404,10 +444,28 @@ def _boolean_ast_to_sql(ast, params: dict, idx: list | None = None) -> str | Non
         # entrer un article exclu dès qu'un AUTRE de ses chunks ne contenait pas le
         # terme (SELECT DISTINCT d.id) - fuite d'articles exclus dans le corpus.
         # Corrige aussi le AND inter-chunks (deux termes dans deux chunks distincts).
-        return (f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
-                f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+        if " " not in needle:
+            return (f"(LOWER(COALESCE(d.title,'')) LIKE :{key}"
+                    f" OR LOWER(COALESCE(d.abstract,'')) LIKE :{key}"
+                    f" OR EXISTS (SELECT 1 FROM document_chunk c2"
+                    f" WHERE c2.document_id = d.id AND LOWER(COALESCE(c2.content,'')) LIKE :{key}))")
+        # Plusieurs mots (une phrase, ou un terme que sa ponctuation sépare : « a h5n1 »
+        # pour A(H5N1) comme pour A/H5N1) : le texte passe par la MÊME règle des
+        # séparateurs que le terme, sinon « a h5n1 » ne trouve pas « A(H5N1) ». Les mots
+        # dans l'ordre sur le texte brut sont une condition nécessaire, que l'index
+        # trigramme sait servir ; la règle des séparateurs ne s'applique qu'à ce qui la passe.
+        pre = f"{key}_w"
+        params[pre] = "%" + "%".join(needle.split()) + "%"
+
+        def _match(expr: str) -> str:
+            return (f"({expr} LIKE :{pre}"
+                    f" AND regexp_replace({expr}, {_lex.SEPARATOR_SQL}, ' ', 'g') LIKE :{key})")
+        in_title = _match("LOWER(COALESCE(d.title,''))")
+        in_abstract = _match("LOWER(COALESCE(d.abstract,''))")
+        in_chunk = _match("LOWER(COALESCE(c2.content,''))")
+        return (f"({in_title} OR {in_abstract}"
                 f" OR EXISTS (SELECT 1 FROM document_chunk c2"
-                f" WHERE c2.document_id = d.id AND LOWER(COALESCE(c2.content,'')) LIKE :{key}))")
+                f" WHERE c2.document_id = d.id AND {in_chunk}))")
     if typ == "not":
         inner = _boolean_ast_to_sql(ast[1], params, idx)
         return f"(NOT {inner})" if inner else None
@@ -439,7 +497,7 @@ def _boolean_to_arxiv(ast) -> str | None:
         return None
     typ = ast[0]
     if typ == "term":
-        return f'all:"{ast[1].rstrip("*")}"'
+        return f'all:"{_api_phrase(ast[1])}"'
     if typ == "not":
         return None
     if typ in ("and", "or"):
@@ -459,8 +517,8 @@ def _boolean_to_s2(ast) -> str | None:
         return None
     typ = ast[0]
     if typ == "term":
-        _t = ast[1].rstrip("*")
-        return f'"{_t}"' if " " in _t else _t
+        _t = _api_phrase(ast[1])
+        return f'"{_t}"' if _api_needs_quotes(_t) else _t
     if typ == "not":
         return None
     if typ in ("and", "or"):
@@ -551,13 +609,15 @@ def _truncate_or_groups(ast, keep: int):
 def _boolean_to_generic(ast, top: bool = True) -> str | None:
     """AST booléen → la syntaxe commune d'OpenAlex, DOAJ, CORE, ClinicalTrials.gov et
     OpenAIRE : AND/OR en toutes lettres, guillemets pour les phrases, parenthèses pour les
-    groupes, pas d'étoile. None sur un NOT (la requête réduite n'en porte pas). PUR/testable."""
+    groupes, pas d'étoile. Un terme garde le point qui est DANS un mot (« 2.3.4.4b »,
+    « pm2.5 », entre guillemets), et sa ponctuation devient sinon une espace (cf.
+    `_api_phrase`). None sur un NOT (la requête réduite n'en porte pas). PUR/testable."""
     if ast is None:
         return None
     typ = ast[0]
     if typ == "term":
-        _t = " ".join(str(ast[1]).rstrip("*").split())
-        return f'"{_t}"' if " " in _t else _t
+        _t = _api_phrase(ast[1])
+        return f'"{_t}"' if _api_needs_quotes(_t) else _t
     if typ == "not":
         inner = _boolean_to_generic(ast[1], top=False)
         return f"NOT {inner}" if inner else None
@@ -606,13 +666,30 @@ DOAJ_MAX_QUERY_CHARS = 700
 
 def _count_operators(rendered: str) -> int:
     """Les opérateurs d'une requête rendue. Les termes sont en minuscules (tokenisation),
-    donc un « AND » ou un « OR » en capitales entouré d'espaces ne vient que des
-    compilateurs."""
-    return rendered.count(" AND ") + rendered.count(" OR ")
+    donc un « AND », un « OR » ou un « NOT » en capitales ne vient que des compilateurs.
+    Le NOT compte aussi : la requête réduite n'en porte jamais, mais un morceau du booléen
+    découpé (`_split_boolean`) garde ses exclusions, et OpenAIRE les compte."""
+    return rendered.count(" AND ") + rendered.count(" OR ") + len(re.findall(r"\bNOT ", rendered))
+
+
+#: La limite d'URL des API qui reçoivent le booléen dans un GET (OpenAlex,
+#: ClinicalTrials.gov, arXiv, OpenAIRE), mesurée sur la requête ENCODÉE et non en
+#: caractères : les guillemets, les parenthèses et les deux-points y prennent trois
+#: octets chacun, et c'est l'URL encodée que les serveurs et les proxys refusent. La
+#: même marge que le passage d'eutils en POST (sources._NCBI_POST_ABOVE) : sous les
+#: 2 000 caractères d'URL où les requêtes cessent d'être sûres, une fois l'adresse et
+#: les autres paramètres comptés.
+URL_QUERY_MAX_ENCODED = 1800
+
+
+def _url_encoded_len(query: str) -> int:
+    """La longueur d'une requête une fois encodée dans une URL (comme `requests` le fait)."""
+    import urllib.parse as _up
+    return len(_up.quote_plus(query or ""))
 
 
 def _shorten_boolean(portable: str, limit: int = 1200, render=None,
-                     max_operators: int | None = None) -> str:
+                     max_operators: int | None = None, measure=None) -> str:
     """La requête RÉDUITE : le même booléen, sans exclusions, chaque bloc OU tronqué à ses
     premiers termes jusqu'à tenir sous `limit` caractères (et, si `max_operators` est
     donné, sous ce nombre d'opérateurs : OpenAIRE n'en accepte que quatre). "" si rien
@@ -626,8 +703,10 @@ def _shorten_boolean(portable: str, limit: int = 1200, render=None,
     s'excluent (« h5n1 » ET « h7n9 »). Le ET entre les concepts est ce qui dit de quoi
     parle la revue : il est gardé ; c'est la largeur des synonymes qui est sacrifiée.
     `render` est le compilateur de la cible (générique par défaut, arXiv sinon), parce que
-    la longueur se mesure dans la syntaxe envoyée. PUR/testable."""
+    la longueur se mesure dans la syntaxe envoyée ; `measure` la mesure (en caractères par
+    défaut, `_url_encoded_len` pour une limite d'URL). PUR/testable."""
     render = render or _boolean_to_generic
+    measure = measure or len
     try:
         ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(portable or "")))
     except Exception:                                    # noqa: BLE001
@@ -636,7 +715,7 @@ def _shorten_boolean(portable: str, limit: int = 1200, render=None,
         return ""
     for keep in range(_or_width(ast), 0, -1):
         out = render(_truncate_or_groups(ast, keep))
-        if not out or len(out) > limit:
+        if not out or measure(out) > limit:
             continue
         if max_operators is not None and _count_operators(out) > max_operators:
             continue
@@ -650,7 +729,8 @@ SPLIT_MAX_PARTS = 16
 
 
 def _split_boolean(portable: str, limit: int, render=None,
-                   max_parts: int = SPLIT_MAX_PARTS) -> list[str]:
+                   max_parts: int = SPLIT_MAX_PARTS, measure=None,
+                   max_operators: int | None = None) -> list[str]:
     """Le booléen ENTIER en plusieurs requêtes courtes dont l'UNION est le booléen.
 
     La requête réduite (`_shorten_boolean`) tient sous la limite en retirant des
@@ -662,8 +742,12 @@ def _split_boolean(portable: str, limit: int, render=None,
     trop long est coupé en deux, sous un ET le plus large de ses blocs OU est coupé en
     deux, et ainsi de suite jusqu'à ce que chaque morceau tienne. Les exclusions restent
     attachées à chaque morceau, donc l'union est exactement le booléen. [] si un terme
-    seul ne tient pas, ou s'il faudrait plus de `max_parts` requêtes. PUR/testable."""
+    seul ne tient pas, ou s'il faudrait plus de `max_parts` requêtes.
+
+    `measure` mesure un morceau (caractères par défaut, `_url_encoded_len` pour une limite
+    d'URL) ; `max_operators` borne en plus ses opérateurs (OpenAIRE : quatre). PUR/testable."""
     render = render or _boolean_to_generic
+    measure = measure or len
     try:
         ast = _positive_boolean(_parse_boolean_ast(_tokenize_boolean(portable or "")), keep_not=True)
     except Exception:                                    # noqa: BLE001
@@ -673,7 +757,8 @@ def _split_boolean(portable: str, limit: int, render=None,
 
     def _fits(node) -> bool:
         out = render(node)
-        return bool(out) and len(out) <= limit
+        return (bool(out) and measure(out) <= limit
+                and (max_operators is None or _count_operators(out) <= max_operators))
 
     def _halves(children: list) -> list:
         mid = len(children) // 2
@@ -716,6 +801,17 @@ def _split_boolean(portable: str, limit: int, render=None,
 # ─────────────────────────────────────────────────────────────────────────────
 # Search (Hybride & Vectorielle pgvector)
 # ─────────────────────────────────────────────────────────────────────────────
+
+#: La borne des correspondances locales lues pour définir un corpus. Un LIMIT sans ORDER
+#: BY : atteinte, la liste serait un sous-ensemble arbitraire. La bibliothèque compte
+#: environ 494 000 documents : la borne est latente, et elle est DITE quand elle mord.
+LOCAL_MATCH_LIMIT = 500_000
+
+
+class _MatchIds(list):
+    """Les identifiants d'une correspondance locale ; `capped` : la borne a été atteinte."""
+    capped: bool = False
+
 
 def _search_local_doc_ids(
     query: str,
@@ -775,6 +871,11 @@ def _search_local_doc_ids(
             )
         any_match_sql = " OR ".join(like_clauses) if like_clauses else "TRUE"
 
+    # Un document SANS résumé correspond lui aussi, sur son titre (et son texte intégral
+    # s'il en a un) : la condition « résumé d'au moins 30 caractères » qui suivait chaque
+    # correspondance écartait de la bibliothèque tout article sans résumé, même dont le
+    # titre portait la requête. Il entre au corpus signalé (scenario_store.has_abstract_sql),
+    # hors du sous-ensemble pertinent tant qu'un relecteur ne l'inclut pas à la main.
     if use_vector:
         params["q_emb"] = str(query_embedding)
         params["threshold"] = threshold
@@ -784,22 +885,20 @@ def _search_local_doc_ids(
             JOIN literature_document d ON d.id = c.document_id
             WHERE c.embedding IS NOT NULL
               AND (1 - (c.embedding <=> CAST(:q_emb AS vector))) > :threshold
-              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
         """)
     elif mode == "boolean" and _fts:
         # Plein texte : un seul balayage d'index GIN sur document_search, puis jointure
-        # par clé primaire pour les filtres (résumé ≥ 30 caractères, doublons, facettes).
-        # Mêmes filtres externes que le chemin LIKE ci-dessous → même définition du
-        # corpus, seule la correspondance des termes change (cf. lexical_search.py).
+        # par clé primaire pour les filtres (doublons, facettes). Mêmes filtres externes
+        # que le chemin LIKE ci-dessous → même définition du corpus, seule la
+        # correspondance des termes change (cf. lexical_search.py).
         sql = text(f"""
             SELECT d.id
             FROM document_search s
             JOIN literature_document d ON d.id = s.document_id
             WHERE ({any_match_sql})
-              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
@@ -819,7 +918,6 @@ def _search_local_doc_ids(
             SELECT d.id
             FROM literature_document d
             WHERE ({any_match_sql})
-              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
@@ -832,7 +930,6 @@ def _search_local_doc_ids(
             FROM document_chunk c
             JOIN literature_document d ON d.id = c.document_id
             WHERE ({any_match_sql})
-              AND d.abstract IS NOT NULL AND length(TRIM(d.abstract)) >= 30
               AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
               {where_sql}
             LIMIT :limit
@@ -841,7 +938,14 @@ def _search_local_doc_ids(
     import time as _time_ls
     _t0 = _time_ls.perf_counter()
     with engine.connect() as conn:
-        ids = conn.execute(sql, params).scalars().all()
+        ids = _MatchIds(conn.execute(sql, params).scalars().all())
+    # Un LIMIT sans ORDER BY : atteint, la liste est un sous-ensemble ARBITRAIRE des
+    # correspondances. Rien ne le disait ; le journal le dit, et la liste le porte
+    # (`capped`) pour que l'appelant le dise dans sa réponse.
+    ids.capped = bool(limit) and len(ids) >= int(limit)
+    if ids.capped:
+        logger.warning(f"lexical search: the limit of {limit} matches was reached - the list "
+                       f"is an arbitrary subset of the matches - {query[:100]!r}")
     if mode == "boolean":
         # Une ligne par recherche, avec le moteur utilisé : c'est ce que l'on cherche
         # dans le journal quand « la recherche locale est lente ».
@@ -865,6 +969,19 @@ try:
 except (TypeError, ValueError):
     LIVE_MAX_PER_SOURCE = 2000
 
+# Le plafond des passages CLASSÉS PAR PERTINENCE : Crossref, qui ne cherche que des
+# mots-clés (2,6 millions de réponses sur la question HPAI, une queue de bruit), et le
+# passage « meilleures correspondances en texte intégral » d'OpenAlex. Il ne suit PAS
+# LIVE_MAX_PER_SOURCE : mis très haut pour lever le plafond d'une recherche standard, ce
+# dernier faisait paginer ces deux passages jusqu'au refus de l'API (400 au-delà de
+# 10 000 résultats paginés par décalage ou par numéro de page), et le passage d'OpenAlex
+# versait au corpus des milliers d'articles qui ne répondent au booléen que dans leur
+# texte intégral. Jamais au-delà de 10 000, la borne de ces API.
+try:
+    RANKED_PASS_MAX = max(1, min(int(os.getenv("RANKED_PASS_MAX", "2000")), 10000))
+except (TypeError, ValueError):
+    RANKED_PASS_MAX = 2000
+
 # Le plafond d'une recherche EXHAUSTIVE, par base appariant le booléen. Ce n'est pas un
 # échantillon : c'est un garde-fou, assez haut pour qu'aucune base ne soit coupée sur une
 # question de revue (Europe PMC rend 13 810 notices sur la question HPAI, toutes
@@ -879,8 +996,9 @@ except (TypeError, ValueError):
 def _boolean_corpus_ids(boolean_query: str, filters: dict) -> list:
     """LA source de vérité de l'appartenance au corpus : les documents de la base
     locale qui correspondent à la requête booléenne. Recherche et corpus utilisent
-    EXACTEMENT ce helper → le compteur de la recherche == la taille du corpus."""
-    return _search_local_doc_ids(boolean_query, "boolean", filters, limit=500_000)
+    EXACTEMENT ce helper → le compteur de la recherche == la taille du corpus.
+    `capped` sur la liste rendue : LOCAL_MATCH_LIMIT a été atteinte."""
+    return _search_local_doc_ids(boolean_query, "boolean", filters, limit=LOCAL_MATCH_LIMIT)
 
 
 def _looks_boolean(text: str) -> bool:
@@ -964,8 +1082,19 @@ def _combined_query_text(query: str | None, sub_queries: Any, combinator: str | 
     return expr
 
 
+#: La longueur au-delà de laquelle une facette OU n'élargit plus le booléen fédéré. Les
+#: sources à limite d'URL reçoivent leur propre forme (réduite, ou découpée en recherche
+#: exhaustive), PubMed reçoit le sien en POST et CORE dans un corps JSON : la borne qui
+#: reste est celle d'Europe PMC et de Semantic Scholar, qui reçoivent le booléen entier
+#: dans un GET. La requête HPAI de production (3 075 caractères) y passe ; 4 000 laisse
+#: une facette s'y ajouter, sous les 8 Ko d'URL que ces serveurs acceptent une fois encodé.
+FACET_WIDEN_MAX_CHARS = 4000
+
+
 def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, combinator: str | None,
-                                 translate=None, max_len: int = 1200, max_pubmed_len: int = 1900) -> tuple[str, str, int]:
+                                 translate=None, max_len: int = FACET_WIDEN_MAX_CHARS,
+                                 max_pubmed_len: int | None = None,
+                                 skipped: list | None = None) -> tuple[str, str, int]:
     """Élargit les requêtes envoyées aux sources LIVE aux facettes UNIES (OU) d'une
     recherche multi-facettes : « (booléen principal) OR (booléen de la facette) ».
 
@@ -976,8 +1105,12 @@ def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, 
     sont un sous-ensemble de ceux de la requête principale, re-matché localement.
     Une facette naturelle est traduite via `translate` (par défaut
     _generate_search_strategy) ; sans traduction utilisable, son texte est utilisé
-    tel quel. Les longueurs sont bornées (limites d'URL des API) : au-delà, on garde la
-    requête principale seule. Renvoie (booléen, requête PubMed, nb de facettes ajoutées)."""
+    tel quel. La longueur du booléen élargi est bornée (`max_len`, celle des sources qui
+    le reçoivent entier dans une URL) ; PubMed ne l'est plus (POST au-delà de la limite
+    d'URL, cf. sources._ncbi_get), sauf `max_pubmed_len` explicite. Une facette qui ne
+    tient pas reste hors de la fédération : son texte est ajouté à `skipped`, que la
+    recherche enregistre et que la carte PRISMA nomme (un avertissement dans le journal
+    ne le disait à personne). Renvoie (booléen, requête PubMed, nb de facettes ajoutées)."""
     clean = _normalize_sub_queries(sub_queries)
     if len(clean) < 2:
         return boolean, pubmed_q, 0
@@ -999,8 +1132,10 @@ def _widen_boolean_for_or_facets(boolean: str, pubmed_q: str, sub_queries: Any, 
             continue
         new_bool = f"({boolean}) OR ({portable})"
         new_pub = f"({pubmed_q}) OR ({fp or portable})" if pubmed_q else (fp or portable)
-        if len(new_bool) > max_len or len(new_pub) > max_pubmed_len:
+        if len(new_bool) > max_len or (max_pubmed_len is not None and len(new_pub) > max_pubmed_len):
             logger.warning(f"facette OU « {facet['text'][:60]} » ignorée pour la fédération live : requête trop longue")
+            if skipped is not None:
+                skipped.append(facet["text"])
             continue
         boolean, pubmed_q, added = new_bool, new_pub, added + 1
     return boolean, pubmed_q, added
@@ -1046,6 +1181,7 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
     (ce sont des ensembles)."""
     clean = _normalize_sub_queries(sub_queries)
     id_sets: list[set] = []
+    capped = False
     for sq in clean:
         if sq["kind"] == "boolean":
             _boolean = sq["text"]
@@ -1059,11 +1195,15 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
             except Exception as _e:
                 logger.warning(f"_multi_query_corpus_ids: traduction naturel→booléen échouée ({_e}) ; repli lexical brut")
                 _boolean = sq["text"]
-        id_sets.append(set(_search_local_doc_ids(_boolean, "boolean", filters, limit=500_000)))
+        _ids = _search_local_doc_ids(_boolean, "boolean", filters, limit=LOCAL_MATCH_LIMIT)
+        capped = capped or bool(getattr(_ids, "capped", False))
+        id_sets.append(set(_ids))
     if not id_sets:
-        return []
+        return _MatchIds()
     # Fold gauche→droite selon l'op PAR facette (défaut = `combinator` global).
-    return list(_fold_facet_sets(id_sets, clean, combinator))
+    out = _MatchIds(_fold_facet_sets(id_sets, clean, combinator))
+    out.capped = capped
+    return out
 
 
 def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False) -> int:
@@ -1125,38 +1265,56 @@ def _dedup_scenario_links(scenario_id: str) -> int:
     laisser de trace. Un relecteur voyait son exclusion revenir en « en attente » après
     une relance de la recherche. On ne remplace jamais une valeur du survivant, on ne
     comble que ses trous, et le choix du canonique ne change pas (même règle que
-    `scripts/_softdedup.py`, donc aucun glissement quand la dédup globale tournera)."""
+    `scripts/_softdedup.py`, donc aucun glissement quand la dédup globale tournera).
+
+    Le titre ne réunit JAMAIS deux DOI de revue différents : deux articles au titre
+    générique (« Avian influenza update », dix éditions) sont deux travaux. Mais la clé
+    est le DOI du TRAVAIL (`documents.same_work_survivors`) : la ponctuation finale, la
+    casse et les versions (/v1, /v2) ne séparent plus, et sous un même titre long un
+    préprint ou une figure déposée sur figshare rejoint la version publiée. Sur la
+    recherche HPAI du 12 octobre, 40 paires d'un même article entraient ainsi deux fois
+    dans le sous-ensemble pertinent, et l'extraction comptait l'étude deux fois. Une
+    notice SANS DOI rejoint le travail de même titre long quand il n'y en a qu'un : c'est
+    la règle de l'ingestion (`_ingest_doc_direct`), un DOI manquant ne sépare pas.
+
+    Le survivant est la version publiée plutôt que le préprint ou le dépôt, puis le plus
+    petit identifiant, comme la dédup globale. Les notices sans résumé ne sortent plus du
+    corpus avant la dédup : quand le survivant n'a pas de
+    résumé et qu'un de ses doublons en a un, le résumé est recopié sur le survivant (on
+    comble un champ vide, on ne remplace rien), et son chunk titre+résumé reconstruit."""
+    from .sources import _refresh_title_abstract_chunks  # lazy: sources is loaded after this module
     _MERGED = ("similarity_score", "rerank_score", "screening_status", "screening_reason",
                "screening_notes", "screened_at", "reviewer_1_status", "reviewer_1_reason",
                "reviewer_2_status", "reviewer_2_reason", "kappa_final_status",
                "cluster_id", "cluster_label")
+    # Le survivant de chaque doublon, calculé une fois en Python (la règle du travail ne
+    # s'écrit pas en SQL), puis servi aux trois instructions comme une table.
+    _RANKED = """
+        ranked AS (
+            SELECT x.document_id, x.keep_id
+            FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) AS x(document_id bigint, keep_id bigint)
+        )
+    """
     try:
+        with engine.connect() as _r:
+            _rows = _r.execute(text("""
+                SELECT a.document_id AS id, d.doi, d.title_norm, d.external_id
+                FROM article_scenarios a
+                JOIN literature_document d ON d.id = a.document_id
+                WHERE a.scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().all()
+        _survivor = same_work_survivors(_rows)
+        if not _survivor:
+            return 0
+        _p = {"sid": scenario_id, "pairs": json.dumps(
+            [{"document_id": d, "keep_id": k} for d, k in sorted(_survivor.items())])}
         with engine.begin() as _c:
             # ── Fusion AVANT suppression ─────────────────────────────────────
             # Un seul donneur par survivant : celui qui porte le plus d'information
             # (une décision de screening d'abord, puis un score de rerank, puis un
             # score de similarité), pour que deux doublons ne se contredisent pas.
             _c.execute(text(f"""
-                WITH keyed AS (
-                    SELECT a.document_id,
-                           COALESCE(
-                             NULLIF(lower(btrim(d.doi)), ''),
-                             NULLIF('ext:' || lower(btrim(
-                                 regexp_replace(d.external_id, '^(pmid|pmcid):', '', 'i')
-                             )), 'ext:'),
-                             CASE WHEN d.title_norm IS NOT NULL
-                                   AND length(d.title_norm) >= 20
-                                  THEN 'tn:' || d.title_norm END,
-                             'id:' || a.document_id::text
-                           ) AS k
-                    FROM article_scenarios a
-                    JOIN literature_document d ON d.id = a.document_id
-                    WHERE a.scenario_id = :sid
-                ),
-                ranked AS (
-                    SELECT document_id, k, MIN(document_id) OVER (PARTITION BY k) AS keep_id
-                    FROM keyed
-                ),
+                WITH {_RANKED},
                 donor AS (
                     SELECT DISTINCT ON (r.keep_id) r.keep_id, a.*
                     FROM ranked r
@@ -1174,38 +1332,36 @@ def _dedup_scenario_links(scenario_id: str) -> int:
                 SET {", ".join(f"{c} = COALESCE(k.{c}, donor.{c})" for c in _MERGED)}
                 FROM donor
                 WHERE k.scenario_id = :sid AND k.document_id = donor.keep_id
-            """), {"sid": scenario_id})
-            n = _c.execute(text("""
-                WITH keyed AS (
-                    SELECT a.document_id,
-                           COALESCE(
-                             NULLIF(lower(btrim(d.doi)), ''),
-                             NULLIF('ext:' || lower(btrim(
-                                 regexp_replace(d.external_id, '^(pmid|pmcid):', '', 'i')
-                             )), 'ext:'),
-                             CASE WHEN d.title_norm IS NOT NULL
-                                   AND length(d.title_norm) >= 20
-                                  THEN 'tn:' || d.title_norm END,
-                             'id:' || a.document_id::text
-                           ) AS k
-                    FROM article_scenarios a
-                    JOIN literature_document d ON d.id = a.document_id
-                    WHERE a.scenario_id = :sid
-                ),
-                ranked AS (
-                    SELECT document_id,
-                           MIN(document_id) OVER (PARTITION BY k) AS keep_id
-                    FROM keyed
+            """), _p)
+            # ── Le résumé d'un doublon comble celui du survivant ─────────────
+            _filled = _c.execute(text(f"""
+                WITH {_RANKED},
+                src AS (
+                    SELECT DISTINCT ON (r.keep_id) r.keep_id, d.abstract
+                    FROM ranked r
+                    JOIN literature_document d ON d.id = r.document_id
+                    WHERE r.document_id <> r.keep_id AND {has_abstract_sql('d')}
+                    ORDER BY r.keep_id, r.document_id
                 )
+                UPDATE literature_document k
+                SET abstract = src.abstract
+                FROM src
+                WHERE k.id = src.keep_id AND NOT {has_abstract_sql('k')}
+                RETURNING k.id
+            """), _p).scalars().all()
+            if _filled:
+                _refresh_title_abstract_chunks(_c, _filled)
+            n = _c.execute(text(f"""
+                WITH {_RANKED}
                 DELETE FROM article_scenarios a
                 USING ranked r
                 WHERE a.scenario_id = :sid
                   AND a.document_id = r.document_id
                   AND r.document_id <> r.keep_id
-            """), {"sid": scenario_id}).rowcount
+            """), _p).rowcount
         if n:
             logger.info(f"Dédup intra-scénario {scenario_id}: {n} lien(s) doublon(s) "
-                        f"supprimé(s) (même DOI/PMID/titre).")
+                        f"supprimé(s) (même travail : DOI, PMID ou titre).")
         return n or 0
     except Exception as _e:
         logger.warning(f"Dédup intra-scénario {scenario_id}: {_e}")
@@ -1293,7 +1449,10 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    preprints_excluded: bool = False,
                                    removed_preprints: int = 0,
                                    preprints_excluded_at_source: list | None = None,
-                                   preprint_sources_not_searched: list | None = None) -> dict[str, Any]:
+                                   preprint_sources_not_searched: list | None = None,
+                                   kept_no_abstract: int = 0,
+                                   facets_skipped: list | None = None,
+                                   local_match_capped: bool = False) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -1308,7 +1467,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     unique_records         : documents distincts derrière ces enregistrements
     duplicate_rows_removed : liens retirés par _dedup_scenario_links (même DOI/PMID/titre
                              sous deux lignes distinctes de la base)
-    corpus_total           : liens restants après nettoyage (sans résumé, doublons)
+    corpus_total           : liens restants après nettoyage (doublons, préprints exclus)
     source_outcomes        : issue de CHAQUE source lancée (cf. SOURCE_OUTCOMES). Une
                              source à zéro n'est pas une source absente : sans ce
                              paramètre, le tableau ne nommait que celles qui avaient
@@ -1346,7 +1505,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              Scholar, endpoint bulk : ordre des identifiants). Au plafond,
                              ce qui est gardé y est un sous-ensemble arbitraire.
     split_queries          : les sources qui ont reçu le booléen entier découpé en
-                             plusieurs requêtes (DOAJ ne pagine pas une requête longue).
+                             plusieurs requêtes dont l'union est le booléen (DOAJ ne pagine
+                             pas une requête longue ; en recherche exhaustive, toute base
+                             que l'URL ou le nombre d'opérateurs limite).
     preprints_excluded     : la recherche exclut les préprints (critère choisi par
                              l'utilisateur). Les serveurs de préprints ne sont alors pas
                              interrogés (`preprint_sources_not_searched`), certaines bases
@@ -1355,11 +1516,21 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              PubMed, « NOT SRC:PPR » pour Europe PMC), et ceux que les
                              autres bases rendent sont retirés avant le screening
                              (`removed_preprints`), sur leur propre ligne.
+    kept_no_abstract       : les notices SANS résumé gardées au corpus. Elles étaient
+                             retirées (`removed_no_abstract`, 2 434 sur HPAI_last) ; elles
+                             sont désormais passées au screening, signalées, à juger sur
+                             leur titre à la main : un sous-compte de `records_screened`,
+                             pas un retrait. `removed_no_abstract` reste servi (0 pour une
+                             recherche nouvelle) pour qui le lit encore.
+    facets_skipped         : les facettes OU qu'aucune base n'a reçues (requête trop
+                             longue) : elles n'apportent que ce que la bibliothèque contient.
+    local_match_capped     : la correspondance locale a atteint sa borne (LOCAL_MATCH_LIMIT) ;
+                             le corpus en est alors un sous-ensemble arbitraire.
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
-    passés au screening. « Autres raisons » ici : pas de résumé, préprint quand la
-    recherche les exclut, ou enregistrement d'une source par mots-clés qui ne correspond
-    pas à la requête booléenne en local."""
+    passés au screening. « Autres raisons » ici : préprint quand la recherche les exclut,
+    ou enregistrement d'une source par mots-clés qui ne correspond pas à la requête
+    booléenne en local."""
     from datetime import datetime as _dt, timezone as _tz
     _raw = {str(k): int(v or 0) for k, v in (records_by_source or {}).items()}
     library = max(0, int(records_from_library or 0) or _raw.pop("db_cache", 0))
@@ -1417,12 +1588,15 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     duplicates = min(identified, across + rows)
     unique_after = identified - duplicates
     corpus = max(0, int(corpus_total or 0))
-    # Retraits AVANT screening, ventilés : sans résumé (règle qualité), hors requête
-    # (enregistrement d'une source par mots-clés qui ne correspond pas au booléen en
-    # local), et le reste (résiduel - p. ex. un document marqué doublon global). Les
-    # deux premiers sont bornés à ce qui reste à expliquer, dans cet ordre, pour que
-    # identifiés − doublons − retraits = passés au screening tienne toujours.
+    # Retraits AVANT screening, ventilés : sans résumé (l'ancienne règle, 0 désormais),
+    # préprints d'une recherche qui les exclut, hors requête (enregistrement d'une source
+    # par mots-clés qui ne correspond pas au booléen en local), et le reste (résiduel -
+    # p. ex. un document marqué doublon global). Chacun est borné à ce qui reste à
+    # expliquer, dans cet ordre, pour que identifiés − doublons − retraits = passés au
+    # screening tienne toujours.
     to_explain = max(0, unique_after - corpus)
+    # Zéro pour une recherche nouvelle (les notices sans résumé sont gardées, cf.
+    # `kept_no_abstract`) ; le paramètre reste pour un appelant qui en retire encore.
     no_abstract = min(to_explain, max(0, int(removed_no_abstract or 0)))
     preprints = min(to_explain - no_abstract, max(0, int(removed_preprints or 0)))
     not_matching = min(to_explain - no_abstract - preprints, max(0, int(removed_not_matching or 0)))
@@ -1492,6 +1666,11 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "removed_other_reasons": other,
         "removed_before_screening": to_explain,
         "records_screened": corpus,
+        # Dont sans résumé : gardées, à juger sur le titre à la main (un sous-compte des
+        # passés au screening, jamais un retrait).
+        "kept_no_abstract": min(corpus, max(0, int(kept_no_abstract or 0))),
+        "facets_skipped": [str(f) for f in (facets_skipped or []) if f],
+        "local_match_capped": bool(local_match_capped),
         # L'exclusion des préprints, quand la recherche la demande : un critère
         # d'éligibilité appliqué par l'outil, à dire comme tel (PRISMA 2020).
         "preprints_excluded": bool(preprints_excluded),
@@ -1579,9 +1758,11 @@ def _load_prisma_identification(scenario_id: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 # MÊME clé d'identité d'article que _dedup_scenario_links (scope scénario), mais en
 # colonnes NUES (sans alias) pour les requêtes globales : DOI › external_id normalisé
-# (préfixe pmid/pmcid retiré, casse ignorée) › titre normalisé ≥ 20 › id. On PARTITIONNE
-# toujours par project_context (un « literev » et un « gesica » de même titre ne sont PAS
-# des doublons - cf. l'index unique partiel uq_litdoc_title_norm sur (project_context,…)).
+# (préfixe pmid/pmcid retiré, casse ignorée) › titre normalisé ≥ 20 › id. Deux DOI
+# différents n'y sont donc jamais réunis ; seule la dédup d'un scénario fait adopter à
+# une notice sans DOI le DOI unique de son titre. On PARTITIONNE toujours par
+# project_context (un « literev » et un « gesica » de même titre ne sont PAS des doublons
+# - cf. l'index unique partiel uq_litdoc_title_norm_doi sur (project_context,…)).
 _DUP_KEY_SQL = """COALESCE(
     NULLIF(lower(btrim(doi)), ''),
     NULLIF('ext:' || lower(btrim(regexp_replace(external_id, '^(pmid|pmcid):', '', 'i'))), 'ext:'),
@@ -1731,7 +1912,9 @@ def _plain_keywords(query: str, max_words: int = 8) -> str:
             for g in groups:
                 if depth >= len(g) or len(words) >= max_words:
                     continue
-                for w in _re.split(r"[\s\*\"()\[\]]+", g[depth]):
+                # La graphie d'origine, ponctuation séparée sauf le point dans un mot
+                # (« 2.3.4.4b » reste un mot-clé, non quatre).
+                for w in _re.split(r"[\s\*\"()\[\]]+", _api_phrase(g[depth])):
                     if len(words) >= max_words:
                         break
                     _add(w, words)
@@ -1815,7 +1998,7 @@ def _generate_search_strategy(query: str) -> dict:
     if not openai_key:
         return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
     try:
-        from llm_usage import MeteredOpenAI as _OAI_ss
+        from llm_usage import LLMTruncated as _LLMTruncated, MeteredOpenAI as _OAI_ss, json_content as _json_content
         _client = _OAI_ss(api_key=openai_key)
         response = _client.chat.completions.create(
             model=_model("bulk"),
@@ -1832,16 +2015,31 @@ def _generate_search_strategy(query: str) -> dict:
                     '"pubmed": "PubMed-optimized query with MeSH terms [MeSH Terms] and field tags [Title/Abstract]",\n'
                     '"explanation": "1-2 sentences explaining the term choices and synonyms (or that the input was already boolean)",\n'
                     '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]]}\n'
-                    "Keep queries practical and not overly long. Use 2-4 concept groups max."
+                    "Keep queries practical and not overly long. Use 2-4 concept groups max. "
+                    "Never write the em dash character; use a comma, a colon or a hyphen."
                 )},
                 {"role": "user", "content": f"Research query: {query}"}
             ],
             temperature=0,
             seed=42,
-            max_tokens=500,
+            # 500 coupait les stratégies riches en synonymes : le JSON s'arrêtait au milieu
+            # d'une chaîne, `json.loads` levait, et la recherche partait en mode dégradé
+            # avec la phrase brute comme booléen (un ET de chacun de ses mots), sans que
+            # rien ne le dise. 1 500 laisse la place ; une coupure qui reste est nommée.
+            max_tokens=1500,
             response_format={"type": "json_object"},
         )
-        _result = json.loads(response.choices[0].message.content)
+        try:
+            _content = _json_content(response, label="search strategy")
+        except _LLMTruncated as _te:
+            # Une réponse coupée n'est pas une réponse plus courte : c'est l'absence de
+            # réponse, et elle se dit comme telle (jamais mise en cache, réessayée).
+            logger.warning(f"_generate_search_strategy: {_te}")
+            return {"general": query, "pubmed": query, "explanation": "", "synonyms": [],
+                    "degraded": True, "truncated": True, "degraded_reason": "truncated",
+                    "reason": ("La stratégie booléenne rédigée par le modèle a été coupée au plafond "
+                               "de tokens : la recherche utilise la requête telle qu'elle a été saisie.")}
+        _result = json.loads(_content)
         # Validité au sens du RESTE du code (_strategy_is_degraded : `general` vide, ou
         # sans opérateur booléen), pas seulement l'absence du drapeau `degraded`. Une
         # traduction qui « réussit » en renvoyant une requête inexploitable était sinon
@@ -1925,10 +2123,13 @@ def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_ke
             except Exception as _e:
                 logger.warning(f"post_search_facets: traduction naturel→booléen échouée ({_e})")
                 boolean = sq["text"]
-        ids = set(_search_local_doc_ids(boolean, "boolean", filters, limit=500_000))
+        _found = _search_local_doc_ids(boolean, "boolean", filters, limit=LOCAL_MATCH_LIMIT)
+        ids = set(_found)
         id_sets.append(ids)
         facets.append({"kind": sq["kind"], "text": sq["text"],
-                       "boolean": boolean, "count": len(ids), "op": sq.get("op")})
+                       "boolean": boolean, "count": len(ids), "op": sq.get("op"),
+                       # La borne atteinte : le compte est un plancher, pas un total.
+                       "capped": bool(getattr(_found, "capped", False))})
     if id_sets:
         union = len(set().union(*id_sets))
         intersection = len(set.intersection(*id_sets))
@@ -1938,4 +2139,5 @@ def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_ke
     else:
         union = intersection = combined = 0
     return {"facets": facets, "union": union, "intersection": intersection,
-            "combined": combined, "combinator": payload.combinator}
+            "combined": combined, "combinator": payload.combinator,
+            "capped": any(f["capped"] for f in facets)}

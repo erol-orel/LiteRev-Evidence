@@ -37,14 +37,23 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
 from .schema_boot import _exec_ddl_isolated
 
 CODEBOOK_SHEETS = ("human_susc", "human_exp", "env", "animal", "vector")
-#: The template's own sheet names, accepted in an imported file.
+#: The template's own sheet names, accepted in an imported file, and the spellings a model
+#: gives the sheets when it does not copy the key exactly (`sheet_key` folds case and spacing).
 _SHEET_ALIASES = {
     "human_cov_susc": "human_susc", "human_cov_exp": "human_exp", "env_cov": "env",
     "animalorreservoir_cov": "animal", "animal_or_reservoir": "animal", "animal": "animal",
     "vector_cov": "vector",
+    "human_susceptibility": "human_susc", "susceptibility": "human_susc",
+    "human_exposure": "human_exp", "exposure": "human_exp",
+    "environment": "env", "environmental": "env",
+    "animals": "animal", "animal_reservoir": "animal", "reservoir": "animal", "animal_host": "animal",
+    "vectors": "vector",
 }
 _MAX_NODES = 5000
-_MAX_SYNONYMS = 40
+#: Synonyms per node. A synonym beyond it is REFUSED (422, with the count), never dropped: the
+#: mapping endpoint used to append the label, cut the list at 40, store it and answer 200, so the
+#: reviewer saw "mapped" while the label stayed unmapped.
+_MAX_SYNONYMS = 200
 
 
 def _ensure_codebook_column() -> None:
@@ -94,6 +103,14 @@ def key_slug(s: Any) -> str:
     "species" (the folding above is for comparing labels, not for naming a node)."""
     t = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", "_", t).strip("_")
+
+
+def sheet_key(raw: Any) -> str | None:
+    """One of the five sheets, from a sheet as it was written ("Human_Susc", "human exposure",
+    "ENV_COV", "ANIMALorRESERVOIR_COV"), or None when it names none of them."""
+    s = key_slug(raw)
+    s = _SHEET_ALIASES.get(s, s)
+    return s if s in CODEBOOK_SHEETS else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,9 +215,8 @@ DEFAULT_NODES: list[dict[str, Any]] = _default_nodes()
 def _clean_node(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("a codebook node must be an object")
-    sheet = str(raw.get("sheet") or "").strip().lower()
-    sheet = _SHEET_ALIASES.get(sheet, sheet)
-    if sheet not in CODEBOOK_SHEETS:
+    sheet = sheet_key(raw.get("sheet"))
+    if sheet is None:
         raise ValueError(f"unknown sheet {raw.get('sheet')!r}; use one of {', '.join(CODEBOOK_SHEETS)}")
     l1, l2, l3 = (key_slug(raw.get(k)) or None for k in ("l1", "l2", "l3"))
     if not l1:
@@ -215,7 +231,11 @@ def _clean_node(raw: Any) -> dict[str, Any]:
         c = clean_label(s_)
         if c and c not in syn and len(c) <= 80:
             syn.append(c)
-    return {"sheet": sheet, "l1": l1, "l2": l2, "l3": l3, "synonyms": syn[:_MAX_SYNONYMS],
+    if len(syn) > _MAX_SYNONYMS:
+        # Refused, not cut: the import kept the first 40 and dropped the rest without a word.
+        raise ValueError(f"{sheet} > {l1}" + (f" > {l2}" if l2 else "") + f" has {len(syn)} distinct "
+                         f"synonyms; the maximum is {_MAX_SYNONYMS}. Split the node or merge synonyms.")
+    return {"sheet": sheet, "l1": l1, "l2": l2, "l3": l3, "synonyms": syn,
             "label_en": (str(raw.get("label_en") or "").strip()[:120] or None),
             "label_fr": (str(raw.get("label_fr") or "").strip()[:120] or None)}
 
@@ -408,9 +428,10 @@ def _store(scenario_id: str, nodes: list[dict[str, Any]] | None) -> None:
         """), {"sid": scenario_id, "j": payload})
 
 
-def unmapped_labels(scenario_id: str, top: int = 50) -> dict[str, Any]:
+def unmapped_labels(scenario_id: str, top: int = 50, offset: int = 0) -> dict[str, Any]:
     """Labels in the relevant corpus that match nothing in the codebook, most frequent first,
-    so a reviewer can map them. Counted over ALL the relevant articles."""
+    so a reviewer can map them. Counted over ALL the relevant articles; `offset` pages
+    through them, so every label can be reached from the screen, not only the first 500."""
     thr = _get_scenario_threshold(scenario_id)
     gate = relevant_gate_sql("d", "ars", ":thr")
     index = get_index(scenario_id)
@@ -438,7 +459,7 @@ def unmapped_labels(scenario_id: str, top: int = 50) -> dict[str, Any]:
                          "l1": n["l1"]})
     miss.sort(key=lambda m: (-m["n_rows"], str(m["covariate"])))
     return {"scenario_id": scenario_id, "rows_mapped": mapped, "rows_unmapped": unmapped,
-            "n_distinct_unmapped": len(miss), "unmapped": miss[:top]}
+            "n_distinct_unmapped": len(miss), "offset": offset, "unmapped": miss[offset:offset + top]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -494,9 +515,10 @@ def reset_codebook(scenario_id: str, _: None = Depends(require_api_key)) -> dict
 
 
 @app.get("/user-scenarios/{scenario_id}/codebook/unmapped")
-def read_unmapped(scenario_id: str, top: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+def read_unmapped(scenario_id: str, top: int = Query(50, ge=1, le=500),
+                  offset: int = Query(0, ge=0)) -> dict[str, Any]:
     _get_user_scenario_or_404(scenario_id)
-    return unmapped_labels(scenario_id, top)
+    return unmapped_labels(scenario_id, top, offset)
 
 
 @app.post("/user-scenarios/{scenario_id}/codebook/synonym")
@@ -504,17 +526,22 @@ def add_synonym(scenario_id: str, payload: dict[str, Any], _: None = Depends(req
     """Map a label as a paper wrote it to a codebook node: adds it as a synonym of
     (sheet, l1, l2). The default codebook is copied into the scenario first."""
     _get_user_scenario_or_404(scenario_id)
-    sheet = _SHEET_ALIASES.get(str(payload.get("sheet") or "").lower(), str(payload.get("sheet") or "").lower())
+    sheet = sheet_key(payload.get("sheet"))
     l1, l2 = key_slug(payload.get("l1")) or None, key_slug(payload.get("l2")) or None
     label = clean_label(payload.get("label"))
-    if sheet not in CODEBOOK_SHEETS or not l1 or not label:
+    if sheet is None or not l1 or not label:
         raise HTTPException(status_code=422, detail="sheet, l1 and label are required")
     cb = get_codebook(scenario_id)
     target = next((n for n in cb["nodes"] if n["sheet"] == sheet and n["l1"] == l1 and n.get("l2") == l2), None)
     if target is None:
         raise HTTPException(status_code=404, detail="no such node in the codebook: add it first")
     if label not in target["synonyms"]:
-        target["synonyms"] = (target["synonyms"] + [label])[:_MAX_SYNONYMS]
+        if len(target["synonyms"]) >= _MAX_SYNONYMS:
+            # Said, not stored: the label used to be appended then cut off, with a 200.
+            raise HTTPException(status_code=422, detail=(
+                f"{sheet} > {l1}" + (f" > {l2}" if l2 else "") + f" already has {_MAX_SYNONYMS} synonyms, "
+                f"the maximum: '{label}' was not added. Split the node, or remove a synonym first."))
+        target["synonyms"] = target["synonyms"] + [label]
     _store(scenario_id, cb["nodes"])
     return {"scenario_id": scenario_id, "source": "custom", "node": {"sheet": sheet, "l1": l1, "l2": l2},
             "synonyms": target["synonyms"]}

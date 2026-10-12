@@ -130,3 +130,63 @@ def test_the_errors_are_the_right_ones(seeded, extracted):
 def test_a_scenario_with_nothing_extracted_has_nothing_to_report(seeded):
     r = _client().get(f"/user-scenarios/{SID}/extraction/report")
     assert r.status_code == 409 and "Nothing is extracted" in r.json()["detail"]
+
+
+# ── Every cut list says how much more there is, and where ───────────────────
+@pytest.fixture()
+def report_corpus(pool_corpus):
+    """Two countries (Germany with a region), one paper read condensed, one from a cut text."""
+    import json
+    with pool_corpus.cursor() as cur:
+        for i, place in ((9711, "Berlin, Germany"), (9712, "Rome, Italy")):
+            cur.execute("UPDATE literature_document SET extraction_json = jsonb_set(extraction_json, '{ref}', %s::jsonb) "
+                        "WHERE id = %s", (json.dumps({"location": place}), i))
+        cur.execute("UPDATE literature_document SET extraction_json = extraction_json || '{\"condensed\": true}'::jsonb "
+                    "WHERE id = 9713")
+        cur.execute("UPDATE literature_document SET extraction_json = extraction_json || "
+                    "'{\"truncated\": true, \"max_chars\": 150000}'::jsonb WHERE id = 9714")
+    return pool_corpus
+
+
+def test_the_report_says_how_much_more_each_cut_list_holds(report_corpus, monkeypatch):
+    for name in ("_COUNTRIES_LISTED", "_REGIONS_LISTED", "_FEW_LISTED", "_COMPARISONS_LISTED"):
+        monkeypatch.setattr(R, name, 0 if name != "_COUNTRIES_LISTED" else 1)
+    md = _get("md").text
+    assert "1 more countries are not listed here" in md and "sheet COUNTRIES" in md
+    assert "1 more regions are not listed here" in md and "| Germany | DE | 1 | 2 | - |" in md
+    assert "more labels with fewer than 3 studies are not listed here" in md and "sheet POOLED" in md
+    assert "1 more comparisons are not listed here" in md and "sheet COMPARISONS" in md
+    # Nothing is said when nothing is cut.
+    monkeypatch.setattr(R, "_COUNTRIES_LISTED", 25)
+    monkeypatch.setattr(R, "_COMPARISONS_LISTED", 40)
+    md = _get("md").text
+    assert "more countries" not in md and "more comparisons" not in md and "male against female" in md
+
+
+def test_the_limits_say_how_many_papers_were_read_condensed_or_cut(report_corpus):
+    md = _get("md").text
+    assert "1 articles held more data than one answer of the model can carry" in md
+    assert "1 articles were read from a text cut at the size limit (150,000 characters per article today)" in md
+    fr = _get("md", "fr").text
+    assert "1 articles ont été lus dans un texte coupé à la taille limite (150 000 caractères" in fr
+    assert "forme condensée" in fr
+    assert chr(0x2014) not in md and chr(0x2014) not in fr
+
+
+def test_the_excel_export_holds_the_full_lists(report_corpus, monkeypatch):
+    openpyxl = pytest.importorskip("openpyxl")
+    from api import pooling as P
+    monkeypatch.setattr(P, "_MAX_PAIRS", 0)
+    monkeypatch.setattr(P, "_MAX_GROUPS", 1)
+    wb = openpyxl.load_workbook(io.BytesIO(_client().get(f"/user-scenarios/{SID}/extraction/export").content))
+    assert {"COUNTRIES", "POOLED", "COMPARISONS"} <= set(wb.sheetnames)
+    full = P.pooled_estimates(SID, full=True)
+    assert wb["POOLED"].max_row - 1 == len(full["pooled"]) == full["groups_total"] > 1
+    assert wb["COMPARISONS"].max_row - 1 == len(full["comparisons"]) == full["comparisons_total"] >= 1
+    pooled_head = [c.value for c in wb["POOLED"][1]]
+    flags = {r[pooled_head.index("Pooled")].value for r in wb["POOLED"].iter_rows(min_row=2)}
+    assert flags == {"Y", "N"}, "the labels with too few studies are listed too"
+    countries = [(r[0].value, r[5].value) for r in wb["COUNTRIES"].iter_rows(min_row=2)]
+    assert ("Germany", None) in countries and ("Germany", "DE3") in countries and ("Italy", None) in countries
+    readme = " ".join(str(r[0].value) for r in wb["README"].iter_rows())
+    assert "COUNTRIES: every country" in readme and "COMPARISONS: every comparison" in readme

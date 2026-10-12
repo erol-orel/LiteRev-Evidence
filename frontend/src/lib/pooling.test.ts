@@ -76,14 +76,6 @@ describe("tone and csv", () => {
     expect(csv[1]).toContain('"say ""hi"""');
     expect(csv[2]).toContain(",,,,,,");
   });
-  it("ends each csv row with the disease as the papers wrote it", () => {
-    const csv = csvOfPooled([group({ disease: "A(H5N1)", disease_spellings: [{ spelling: "HPAI H5N1", n: 5 }, { spelling: "H5N1", n: 3 }] }),
-      group({ disease_spellings: undefined })]).split("\n");
-    expect(csv[0].endsWith(",heterogeneity,disease_as_written")).toBe(true);
-    expect(csv[1]).toContain(',"A(H5N1)",');
-    expect(csv[1].endsWith(',"HPAI H5N1 (5); H5N1 (3)"')).toBe(true);
-    expect(csv[2].endsWith(",")).toBe(true);
-  });
 });
 
 describe("disease spellings", () => {
@@ -103,7 +95,6 @@ describe("disease spellings", () => {
   });
   it("writes each spelling with its number of studies", () => {
     expect(spellingsText(sp)).toBe("HPAI H5N1 (5) · H5N1 (3)");
-    expect(spellingsText(sp, "; ")).toBe("HPAI H5N1 (5); H5N1 (3)");
     expect(spellingsText([])).toBe("");
   });
 });

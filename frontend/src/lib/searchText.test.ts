@@ -5,6 +5,8 @@ import {
   effectiveKind,
   looksBoolean,
   scenarioDisplayName,
+  yearBoundsFilter,
+  yearRangeOf,
   yearSliderBounds,
 } from "./searchText";
 
@@ -103,6 +105,44 @@ describe("yearSliderBounds", () => {
   it("falls back to 1990 without any year", () => {
     expect(yearSliderBounds(null).min).toBe(1990);
     expect(yearSliderBounds([]).min).toBe(1990);
+  });
+});
+
+describe("yearBoundsFilter", () => {
+  const opts = [{ value: 1998 }, { value: 2010 }];
+  const now = new Date().getFullYear();
+
+  it("sends nothing while the slider spans every year", () => {
+    // A bound also drops the articles without a year: an untouched slider must not.
+    expect(yearBoundsFilter([1998, now], opts)).toEqual({});
+  });
+
+  it("sends only the bounds the slider narrowed", () => {
+    expect(yearBoundsFilter([2015, now], opts)).toEqual({ year_min: 2015 });
+    expect(yearBoundsFilter([1998, 2020], opts)).toEqual({ year_max: 2020 });
+    expect(yearBoundsFilter([2015, 2020], opts)).toEqual({ year_min: 2015, year_max: 2020 });
+  });
+});
+
+describe("yearRangeOf", () => {
+  const opts = [{ value: 1998 }];
+  const now = new Date().getFullYear();
+
+  it("puts a replayed search's bounds back on the slider", () => {
+    expect(yearRangeOf({ year_min: 2015, year_max: "2020" }, opts)).toEqual([2015, 2020]);
+    expect(yearRangeOf({ year_min: 2015 }, opts)).toEqual([2015, now]);
+  });
+
+  it("leaves the slider open without bounds, and keeps it inside its own range", () => {
+    expect(yearRangeOf({ projectContext: "literev" }, opts)).toEqual([1998, now]);
+    expect(yearRangeOf(null, opts)).toEqual([1998, now]);
+    expect(yearRangeOf({ year_min: 1900, year_max: now + 5 }, opts)).toEqual([1998, now]);
+    expect(yearRangeOf({ year_min: "", year_max: "abc" }, opts)).toEqual([1998, now]);
+  });
+
+  it("round-trips with yearBoundsFilter", () => {
+    const range: [number, number] = [2012, 2019];
+    expect(yearRangeOf(yearBoundsFilter(range, opts), opts)).toEqual(range);
   });
 });
 

@@ -12,7 +12,7 @@ import type { Detail } from "./ObservationPanel";
 import { ReviewSummaryCard } from "./ReviewSummaryCard";
 import {
   extractionExportUrl, extractionReportUrl, fetchAllExtractionArticles, fetchArticleExtraction, fetchExtractionDigest,
-  fetchExtractionStatus, hasApiKey, startExtraction,
+  fetchExtractionStatus, hasApiKey, reverifyExtractionQuotes, startExtraction,
 } from "../lib/api";
 import type {
   ExtractionArticle, ExtractionArticlesResponse, ExtractionDigest, ExtractionObservation, ExtractionStatus,
@@ -35,6 +35,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
+  const [recheck, setRecheck] = React.useState<{ busy: boolean; text: string | null }>({ busy: false, text: null });
 
   const [filter, setFilter] = React.useState<ExtractionFilter>("all");
   const [search, setSearch] = React.useState("");
@@ -104,16 +105,34 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
     return () => window.clearInterval(id);
   }, [running, scenarioId, reload]);
 
-  const run = async () => {
+  const run = async (retryGivenUp = false) => {
     if (!status) return;
-    if (!window.confirm(T("confirmRun").replace("{n}", String(status.n_pending)))) return;
+    const n = retryGivenUp ? status.n_given_up : status.n_pending;
+    if (!window.confirm(T("confirmRun").replace("{n}", String(n)))) return;
     setNotice(null);
     try {
-      const r = await startExtraction(scenarioId);
+      const r = await startExtraction(scenarioId, retryGivenUp);
       if (r.status === "no_llm") setNotice(T("runNoLlm"));
+      else if (r.status === "paused") setNotice(T("runPaused").replace("{reason}", r.reason ?? ""));
       else setStatus(await fetchExtractionStatus(scenarioId));
     } catch (e) {
       setNotice(`${T("runFailed")} ${(e as Error).message}`);
+    }
+  };
+
+  // The stored quotes checked again against each paper's whole text, with today's check (it
+  // undoes ligatures and words split at a line break): no AI call, nothing else changes.
+  const recheckQuotes = async () => {
+    setRecheck({ busy: true, text: null });
+    try {
+      const r = await reverifyExtractionQuotes(scenarioId);
+      setRecheck({ busy: false, text: T("recheckDone")
+        .replace("{before}", String(r.verified_before)).replace("{after}", String(r.verified_after))
+        .replace("{total}", String(r.n_observations)) });
+      setReviewTick((n) => n + 1);
+      reload().catch(() => undefined);
+    } catch (e) {
+      setRecheck({ busy: false, text: `${T("recheckFailed")} ${(e as Error).message}` });
     }
   };
 
@@ -219,7 +238,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{total}", String(status.job?.total ?? status.n_pending))}
             </span>
           ) : status.n_pending > 0 && hasApiKey() ? (
-            <button onClick={run}
+            <button onClick={() => run()}
               className="flex items-center gap-1.5 rounded-xl border border-brand-500/40 bg-brand-500/15 px-3 py-1.5 text-[11px] font-medium text-brand-300 hover:bg-brand-500/25 transition">
               <Sparkles size={12} />{T("runPending").replace("{n}", String(status.n_pending))}
             </button>
@@ -242,10 +261,43 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
               <Download size={11} />{f === "pdf" ? T("downloadReportPdf") : T("downloadReportWord")}
             </a>
           ))}
+          {extracted > 0 && hasApiKey() && !status.running && (
+            <button onClick={recheckQuotes} disabled={recheck.busy} title={T("recheckHint")}
+              className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:bg-white/10 transition disabled:opacity-50">
+              {recheck.busy ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}{T("recheckQuotes")}
+            </button>
+          )}
         </div>
         {notice && <p className="text-[11px] text-rose-300">{notice}</p>}
+        {recheck.text && <p className="text-[10px] text-white/50">{recheck.text}</p>}
+        {/* A run that stopped early because the provider looked down: no article was charged for it. */}
+        {status.job?.paused && !status.running && (
+          <p className="text-[10px] text-amber-300/80">{T("pausedProvider").replace("{reason}", status.job.paused)}</p>
+        )}
         {status.n_given_up > 0 && (
-          <p className="text-[10px] text-white/40">{T("givenUp").replace("{n}", String(status.n_given_up))}</p>
+          <p className="text-[10px] text-white/40">
+            {T("givenUp").replace("{n}", String(status.n_given_up))}
+            {/* Once the cause of the failures is fixed, they can be tried again. */}
+            {!status.running && hasApiKey() && (
+              <button onClick={() => run(true)} className="ml-2 underline text-brand-300 hover:text-brand-200">
+                {T("retryGivenUp")}
+              </button>
+            )}
+          </p>
+        )}
+        {(status.n_condensed ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">{T("condensedCount").replace("{n}", String(status.n_condensed))}</p>
+        )}
+        {(status.n_truncated ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">
+            {T("truncatedCount").replace("{n}", String(status.n_truncated)).replace("{max}", (status.max_chars ?? 0).toLocaleString())}
+          </p>
+        )}
+        {(status.n_to_reread ?? 0) > 0 && !status.running && (
+          <p className="text-[10px] text-white/40">{T("rereadCount").replace("{n}", String(status.n_to_reread))}</p>
+        )}
+        {(status.n_rows_dropped ?? 0) > 0 && (
+          <p className="text-[10px] text-white/40">{T("rowsDroppedCount").replace("{n}", String(status.n_rows_dropped))}</p>
         )}
       </div>
 
@@ -397,6 +449,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                       {a.source === "abstract" && <span className="rounded-md bg-gold-400/10 border border-gold-400/20 px-1.5 py-0.5 text-gold-400">{T("sourceAbstract")}</span>}
                       {!a.source && <span className="text-white/25">{T("sourceNone")}</span>}
                       {a.text_truncated && <span className="ml-1 text-white/35" title={T("textTruncated")}>…</span>}
+                      {a.condensed && <span className="ml-1 text-gold-300/80" title={T("condensed")}>{T("condensedShort")}</span>}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex flex-wrap gap-1">
@@ -444,6 +497,11 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
           </div>
         )}
         {shown.length === 0 && <div className="text-center py-8 text-xs text-white/35">{T("noMatch")}</div>}
+        {list?.truncated && (
+          <div className="text-center pb-3 text-[10px] text-gold-300">
+            {T("listTruncated").replace("{n}", String(list.articles.length)).replace("{total}", String(list.total))}
+          </div>
+        )}
       </div>
     </div>
   );

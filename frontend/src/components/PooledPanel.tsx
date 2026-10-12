@@ -1,11 +1,10 @@
 import React from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Download, Info } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
-import { fetchPooled } from "../lib/api";
+import { fetchPooled, pooledExportUrl } from "../lib/api";
 import type { DiseaseSpelling, PooledComparison, PooledGroup, PooledResponse, PooledStudy } from "../lib/api";
 import {
-  DISEASE_NOT_STATED, bandTone, csvOfPooled, fmtOr, forestScale, intervalText, mergedSpellings, orDomain, pct, proportionDomain,
-  spellingsText,
+  DISEASE_NOT_STATED, bandTone, fmtOr, forestScale, intervalText, mergedSpellings, orDomain, pct, proportionDomain, spellingsText,
 } from "../lib/pooling";
 
 const W = 360;            // width of the plotting area
@@ -111,6 +110,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
   const [error, setError] = React.useState<string | null>(null);
   const [open, setOpen] = React.useState<string | null>(null);
   const [showSmall, setShowSmall] = React.useState(false);
+  const [allSmall, setAllSmall] = React.useState(false);   // past the first 40 of that list
 
   React.useEffect(() => {
     let alive = true;
@@ -120,14 +120,13 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
     return () => { alive = false; };
   }, [scenarioId, opts, tick]);
 
+  // The file comes from the server, whole: every label (those with too few studies too) and
+  // every comparison. Built from the page in hand, it carried 120 labels and no comparison.
   const download = () => {
-    if (!data) return;
-    const blob = new Blob([csvOfPooled(data.pooled)], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = pooledExportUrl(scenarioId, opts);
     a.download = `pooled_${scenarioId}.csv`;
     a.click();
-    URL.revokeObjectURL(a.href);
   };
 
   const big = (data?.pooled ?? []).filter((g) => g.pooled);
@@ -255,6 +254,14 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
               );
             })}
           </div>
+          {/* La coupe des comparaisons, dite : 40 au plus ici, toutes dans le fichier. */}
+          {data!.comparisons_truncated && (
+            <p className="text-[10px] text-amber-300/70">
+              {T("comparisonsTruncated")
+                .replace("{shown}", String(data!.comparisons_returned ?? data!.comparisons.length))
+                .replace("{total}", String(data!.comparisons_total ?? data!.comparisons.length))}
+            </p>
+          )}
         </div>
       )}
 
@@ -269,12 +276,20 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
           </button>
           {showSmall && (
             <ul className="mt-2 space-y-1 text-[10px] text-white/50">
-              {small.slice(0, 40).map((g) => (
+              {(allSmall ? small : small.slice(0, 40)).map((g) => (
                 <li key={`${g.sheet}|${g.group}|${g.label}|${g.disease}`}>
                   <span className="text-white/70">{name(g)}</span> (<DiseaseName disease={g.disease} spellings={g.disease_spellings} T={T} />):{" "}
                   {g.studies.map((s) => `${studyLabel(s)} ${s.x}/${s.n} (${pct(s.p)})`).join("; ")}
                 </li>
               ))}
+              {small.length > 40 && (
+                <li className="text-white/40">
+                  {T("tooFewShown").replace("{shown}", String(allSmall ? small.length : 40)).replace("{total}", String(small.length))}{" "}
+                  <button onClick={() => setAllSmall((v) => !v)} className="text-brand-300/80 underline hover:text-brand-300">
+                    {allSmall ? t("lists.showLess") : t("lists.showAll").replace("{n}", String(small.length))}
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </div>

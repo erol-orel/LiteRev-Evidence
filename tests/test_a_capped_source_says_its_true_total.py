@@ -168,9 +168,15 @@ def test_the_card_shows_n_of_total_and_the_cap_note():
     for loc in ("fr", "en"):
         txt = (ROOT / "frontend" / "src" / "i18n" / "locales" / f"{loc}.ts").read_text(encoding="utf-8")
         line = next(l for l in txt.splitlines() if "cappedNote:" in l)
-        assert "{sources}" in line and "{cap}" in line, f"{loc}: placeholders"
+        # Pas de plafond unique dans la note : Crossref et OpenAlex (en standard) gardent le
+        # leur, sous le plafond commun, et le pied de la carte donne les deux. Chaque source
+        # plafonnée y est dite « gardés / annoncés ».
+        assert "{sources}" in line and "{cap}" not in line, f"{loc}: placeholders"
         assert "PubMed" in line and "OpenAlex" in line, (
             f"{loc}: la note doit dire quel lot chaque source garde, c'est tout son intérêt")
+        footer = next(l for l in txt.splitlines() if "perSourceCapRanked:" in l)
+        assert "{cap}" in footer and "{rankedCap}" in footer and "Crossref" in footer, footer
+    assert "prisma.perSourceCapRanked" in page and '"{rankedCap}"' in page
 
 
 def test_the_three_capped_sources_are_asked_by_relevance_and_the_note_says_so():

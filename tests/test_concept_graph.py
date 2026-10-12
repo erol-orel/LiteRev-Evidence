@@ -237,3 +237,57 @@ def test_the_map_cache_version_moved_with_the_rule():
     keep seeing the split. It must NOT force a re-extraction: the per-article concepts are
     reused, only the graph is rebuilt."""
     assert main.CONCEPTS_VERSION >= 2
+
+
+# ── The full index: what the export and the narrowing read ───────────────────
+def _wide(n=70, per=2):
+    """`n` outcomes, each cited by `per` articles: more concepts than the map draws."""
+    return [_row(100 + per * k + j, 2024, [_c("outcome", f"outcome {k:02d}")])
+            for k in range(n) for j in range(per)]
+
+
+def test_the_map_says_what_it_does_not_draw():
+    """The map draws 60 nodes out of 70 concepts. The payload says so, and carries per
+    type how many concepts are cited by how many articles, so the screen can state
+    "14 of N" for any minimum the user picks."""
+    g = main._build_concept_graph(_wide(), n_total=140)
+    assert len(g["nodes"]) == 60 and g["max_nodes"] == 60
+    assert g["concepts_total"] == 70 and g["min_count"] == 2          # 30 articles or more: 2
+    assert g["concept_counts"] == {"outcome": {"2": 70}}
+
+
+def test_the_index_carries_every_concept_with_every_article():
+    rows = _wide()
+    index = main.concept_index(rows)
+    assert len(index) == 70
+    entry = index[main.concept_index_key("outcome", "Outcome 69")]
+    assert entry["articles"] == [238, 239] and entry["label"]["en"] == "outcome 69"
+    # The map draws fewer, and the index does not care.
+    drawn = {n["label"]["en"] for n in main._build_concept_graph(rows)["nodes"]}
+    assert len(drawn) == 60 and set(e["label"]["en"] for e in index.values()) > drawn
+
+
+def test_a_concept_is_found_under_any_spelling_the_index_folds():
+    rows = [_row(1, 2024, [_c("outcome", "arterial calcifications")]),
+            _row(2, 2024, [_c("outcome", "Arterial calcification")]),
+            _row(3, 2024, [_c("place", "IT")])]
+    sel = main.select_concepts(rows, concepts=[("outcome", "arterial calcification")])
+    assert sel["ids"] == {1, 2} and sel["missing"] == []
+    assert main.select_concepts(rows, concepts=[("place", "it")])["ids"] == {3}
+    assert main.select_concepts(rows, concepts=[("outcome", "mortality")])["missing"] == ["outcome:mortality"]
+
+
+def test_the_composed_selection_applies_only_the_users_filters():
+    rows = _wide(5) + [_row(900, 2024, [_c("pathogen", "dengue virus")]),
+                       _row(901, 2024, [_c("vector", "Aedes aegypti")]),
+                       _row(902, 2024, [_c("vector", "Aedes aegypti")])]
+    assert main.select_concepts(rows)["ids"] == {int(r["id"]) for r in rows}
+    sel = main.select_concepts(rows, exclude_types={"outcome"}, min_count=2)
+    assert sel["ids"] == {901, 902} and sel["n_concepts"] == 1
+    assert "sans les types outcome" in sel["description"] and "au moins 2" in sel["description"]
+    sel = main.select_concepts(rows, exclude_types={"outcome"}, exclude=[("vector", "aedes aegypti")])
+    assert sel["ids"] == {900}
+    import pytest
+    with pytest.raises(ValueError):
+        main.parse_concept_refs(["no colon here"])
+    assert main.parse_concept_refs([" Pathogen : dengue virus ", ""]) == [("pathogen", "dengue virus")]
