@@ -387,6 +387,25 @@ def test_one_disease_spelt_six_ways_is_one_pool_where_there_were_six(spelt_corpu
     assert merged["disease"] is None and merged["k"] == 15 and len(merged["disease_spellings"]) == 9
 
 
+def test_the_exports_say_which_pool_each_row_went_to(spelt_corpus):
+    import csv
+    import io
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    expected = {i: ("A(H5N1)" if i < 9753 else "A(H9N2)", s) for s, i in SPELT + H9N2}
+    # The flat CSV: the disease as the paper wrote it, and the key it is pooled under.
+    rows = list(csv.DictReader(io.StringIO(c.get(f"/user-scenarios/{SID}/extraction/export?format=csv").text.lstrip(chr(0xFEFF)))))
+    got = {int(r["id"][2:]): (r["disease_key"], r["disease"]) for r in rows if int(r["id"][2:]) in expected}
+    assert got == expected
+    # The dataset (JSONL), one observation per line.
+    lines = [json.loads(x) for x in c.get(f"/user-scenarios/{SID}/extraction/dataset?include_unreviewed=true").text.splitlines()]
+    got = {ln["article"]["id"]: (ln["observation"]["disease_key"], ln["observation"]["disease"])
+           for ln in lines if ln["article"]["id"] in expected}
+    assert got == expected
+    # The seeded papers' rows name no disease, and the key says so.
+    assert {r["disease_key"] for r in rows if not r["disease"]} == {"(not stated)"}
+
+
 def test_unknown_scenario_is_a_404():
     from fastapi.testclient import TestClient
     assert TestClient(main.app).get("/user-scenarios/nope/extraction/pooled").status_code == 404
@@ -436,9 +455,11 @@ def test_the_download_carries_every_label_and_every_comparison(pool_corpus, monk
     assert {row["kind"] for row in rows} == {"proportion", "odds_ratio"}
     male = next(row for row in rows if row["kind"] == "proportion" and row["label"] == "male" and row["disease"] == "A(H5N1)")
     assert male["studies"] == "6" and male["pooled"] == "Y" and float(male["estimate"]) > 0 and "Smith" in male["study_list"]
+    assert male["disease_as_written"] == "HPAI A(H5N1) (6)"
     assert any(row["kind"] == "proportion" and row["pooled"] == "N" for row in rows), "too few studies: in the file too"
     cmp_ = next(row for row in rows if row["kind"] == "odds_ratio")
     assert (cmp_["label"], cmp_["label_b"], cmp_["studies"]) == ("male", "female", "6") and " vs " in cmp_["study_list"]
+    assert cmp_["disease_as_written"] == "HPAI A(H5N1) (6)"
     assert int(r.headers["x-comparisons"]) == sum(1 for row in rows if row["kind"] == "odds_ratio")
     assert _get("/export", min_studies=1).status_code == 422
     from fastapi.testclient import TestClient

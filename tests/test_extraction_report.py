@@ -186,6 +186,11 @@ def test_the_excel_export_holds_the_full_lists(report_corpus, monkeypatch):
     pooled_head = [c.value for c in wb["POOLED"][1]]
     flags = {r[pooled_head.index("Pooled")].value for r in wb["POOLED"].iter_rows(min_row=2)}
     assert flags == {"Y", "N"}, "the labels with too few studies are listed too"
+    # Each pool and each comparison says how the papers behind it wrote its disease.
+    for sheet in ("POOLED", "COMPARISONS"):
+        head = [c.value for c in wb[sheet][1]]
+        assert head[-1] == "Disease as written (studies)"
+        assert any(str(r[-1].value or "").startswith("HPAI A(H5N1) (") for r in wb[sheet].iter_rows(min_row=2)), sheet
     countries = [(r[0].value, r[5].value) for r in wb["COUNTRIES"].iter_rows(min_row=2)]
     assert ("Germany", None) in countries and ("Germany", "DE3") in countries and ("Italy", None) in countries
     readme = " ".join(str(r[0].value) for r in wb["README"].iter_rows())

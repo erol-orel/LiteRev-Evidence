@@ -30,7 +30,7 @@ from fastapi.responses import Response
 
 from .codebook import get_codebook, unmapped_labels
 from .core import app
-from .diseases import NOT_STATED, fold_disease
+from .diseases import NOT_STATED, fold_disease, spellings_text
 from .extraction import extraction_digest, extraction_status
 from .extraction_review import review_summary
 from .geography import geography
@@ -180,7 +180,7 @@ def _as_written(g: dict, S: dict) -> str:
     sp = g.get("disease_spellings") or []
     if not sp or (len(sp) == 1 and fold_disease(sp[0]["spelling"]) == fold_disease(g.get("disease"))):
         return ""
-    return f". {S['as_written']} " + "; ".join(f"{s['spelling']} ({s['n']})" for s in sp)
+    return f". {S['as_written']} {spellings_text(sp)}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

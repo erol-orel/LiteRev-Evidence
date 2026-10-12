@@ -9,7 +9,7 @@ import pathlib
 import pytest
 
 from api import diseases
-from api.diseases import NOT_STATED, disease_key, disease_spellings, fold_disease
+from api.diseases import NOT_STATED, disease_key, disease_spellings, fold_disease, spellings_text
 
 #: The six spellings HPAI_last pooled apart (immune_status > seropositive, sheet human_susc), as
 #: the papers write them and as the panel showed them once folded.
@@ -133,3 +133,5 @@ def test_the_spellings_are_folded_counted_and_shown_as_most_often_written():
                             "influenza a (h5n1)", "Influenza A(H5N1)"])
     assert sp == [{"spelling": "HPAI H5N1", "n": 3}, {"spelling": "Influenza A(H5N1)", "n": 3}, {"spelling": "H5N1", "n": 1}]
     assert disease_spellings([None, ""]) == []
+    # In one table cell, as the exports write them.
+    assert spellings_text(sp) == "HPAI H5N1 (3); Influenza A(H5N1) (3); H5N1 (1)" and spellings_text([]) == ""

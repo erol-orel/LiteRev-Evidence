@@ -43,7 +43,7 @@ from sqlalchemy import text
 
 from .codebook import Index, get_index
 from .core import app, engine, logger
-from .diseases import disease_key, disease_spellings, fold_disease
+from .diseases import disease_key, disease_spellings, fold_disease, spellings_text
 from .extraction_review import load_reviews, overlay_annotated
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql)
@@ -479,10 +479,11 @@ def _listed_comparisons(comps: list[dict[str, Any]]) -> tuple[list[dict[str, Any
 
 POOLED_LABEL_HEADER = ["Sheet", "Group", "Label", "Codebook label", "Disease", "Studies", "Cases", "People",
                        "Pooled proportion", "95% CI low", "95% CI high", "95% PI low", "95% PI high",
-                       "I2 (%)", "tau2", "Disagreement", "Pooled", "Studies (first author year: cases/people)"]
+                       "I2 (%)", "tau2", "Disagreement", "Pooled", "Studies (first author year: cases/people)",
+                       "Disease as written (studies)"]
 COMPARISON_HEADER = ["Sheet", "Group", "Disease", "Label A", "Label B", "Papers", "Odds ratio (A against B)",
                      "95% CI low", "95% CI high", "95% PI low", "95% PI high", "I2 (%)", "tau2", "Disagreement",
-                     "Studies (first author year: A cases/people vs B cases/people)"]
+                     "Studies (first author year: A cases/people vs B cases/people)", "Disease as written (studies)"]
 
 
 def _who(s: dict[str, Any]) -> str:
@@ -498,7 +499,8 @@ def pooled_label_rows(groups: list[dict[str, Any]]) -> list[list[Any]]:
                     g["events_total"], g["n_total"], p.get("p"), p.get("ci_low"), p.get("ci_high"),
                     p.get("pi_low"), p.get("pi_high"), h.get("I2"), h.get("tau2"), h.get("band"),
                     "Y" if g.get("pooled") else "N",
-                    "; ".join(f"{_who(s)}: {s['x']}/{s['n']}" for s in g.get("studies") or [])])
+                    "; ".join(f"{_who(s)}: {s['x']}/{s['n']}" for s in g.get("studies") or []),
+                    spellings_text(g.get("disease_spellings") or [])])
     return out
 
 
@@ -511,7 +513,8 @@ def comparison_rows(comps: list[dict[str, Any]]) -> list[list[Any]]:
                     p.get("ci_low"), p.get("ci_high"), p.get("pi_low"), p.get("pi_high"), h.get("I2"),
                     h.get("tau2"), h.get("band"),
                     "; ".join(f"{_who(s)}: {s.get('x1')}/{s.get('n1')} vs {s.get('x2')}/{s.get('n2')}"
-                              for s in c.get("studies") or [])])
+                              for s in c.get("studies") or []),
+                    spellings_text(c.get("disease_spellings") or [])])
     return out
 
 
@@ -524,11 +527,11 @@ def pooled_csv(result: dict[str, Any]) -> str:
     w = csv.writer(buf)
     w.writerow(["kind", "sheet", "group", "label", "label_b", "codebook_label", "disease", "studies", "cases",
                 "people", "estimate", "ci_low", "ci_high", "pi_low", "pi_high", "I2", "tau2", "disagreement",
-                "pooled", "study_list"])
+                "pooled", "study_list", "disease_as_written"])
     for r in pooled_label_rows(result["pooled"]):
         w.writerow(["proportion", r[0], r[1], r[2], None, r[3], r[4], *r[5:]])
     for r in comparison_rows(result["comparisons"]):
-        w.writerow(["odds_ratio", r[0], r[1], r[3], r[4], None, r[2], r[5], None, None, *r[6:14], "Y", r[14]])
+        w.writerow(["odds_ratio", r[0], r[1], r[3], r[4], None, r[2], r[5], None, None, *r[6:14], "Y", r[14], r[15]])
     return buf.getvalue()
 
 

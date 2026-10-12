@@ -191,3 +191,8 @@ def disease_spellings(raws: Iterable[Any]) -> list[dict[str, Any]]:
     out = [{"spelling": min(c, key=lambda s: (-c[s], s)), "n": sum(c.values())} for c in seen.values()]
     out.sort(key=lambda e: (-e["n"], e["spelling"].lower(), e["spelling"]))
     return out
+
+
+def spellings_text(spellings: Iterable[dict[str, Any]]) -> str:
+    """The spellings of `disease_spellings` in one table cell: "HPAI H5N1 (5); H5N1 (3)"."""
+    return "; ".join(f"{s['spelling']} ({s['n']})" for s in spellings)
