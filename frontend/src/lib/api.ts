@@ -4616,14 +4616,32 @@ export interface SearchStrategy {
   truncated?: boolean;
   degraded_reason?: string;
   reason?: string;
+  /** The query as the user entered it. A Boolean strategy is used exactly as entered:
+   *  `general` and `pubmed` are this text, however long. */
+  entered_query?: string;
+  /** "boolean": a strategy kept as entered; "natural": a sentence translated. */
+  input_kind?: "boolean" | "natural";
+  /** A correction PROPOSED for a query used as entered (unbalanced parentheses or quotes,
+   *  operators that make no sense, a misused field tag...). Never applied by the server:
+   *  the user accepts it, or keeps the query as entered. */
+  proposed_query?: string | null;
+  /** Why, in one or two sentences, in the interface language. */
+  proposal_reason?: string | null;
+  proposal_reasons?: Record<string, string> | null;
+  /** What was found: "unclosed_parenthesis", "unmatched_closing_parenthesis",
+   *  "unpaired_quote", "typographic_quotes", and "model" when the model proposed it. */
+  proposal_issues?: string[];
 }
 
-/** Traduit une requête en langage naturel en stratégie booléenne (LLM). */
+/** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
+ *  quelle une stratégie booléenne saisie et la vérifie : une erreur réelle revient en
+ *  correction PROPOSÉE (`proposed_query`), jamais appliquée. */
 export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
   const r = await safeFetch(`${API_BASE_URL}/search-strategy`, {
     method: 'POST',
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ query }),
+    // La langue de l'interface : celle de l'explication d'une correction proposée.
+    body: JSON.stringify({ query, lang: currentLang() }),
   });
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();

@@ -78,6 +78,8 @@ import {
   type ScenarioCorpus,
 } from "./lib/api";
 import { pollDelay, pollJob, POLL_MAX_ERRORS } from "./lib/poll";
+import { acceptProposal, keepEnteredQuery } from "./lib/queryProposal";
+import { QueryProposal } from "./components/QueryProposal";
 import {
   combinedQueryText,
   effectiveKind,
@@ -2161,6 +2163,21 @@ export default function App() {
   // base du corpus (même requête → compteur == taille du corpus).
   const [booleanStrategy, setBooleanStrategy] = useState<SearchStrategy | null>(null);
   const [translatingQuery, setTranslatingQuery] = useState(false);
+  // Une correction PROPOSÉE pour la requête saisie (parenthèses ou guillemets déséquilibrés,
+  // opérateurs sans sens...) : affichée, et la recherche attend le choix de l'utilisateur.
+  // Rien ne change sans son accord ; « garder ma requête » la lance telle que saisie.
+  const [pendingProposal, setPendingProposal] = useState<SearchStrategy | null>(null);
+  const proposalChoiceRef = useRef<((choice: "accept" | "keep" | "superseded") => void) | null>(null);
+  const askAboutProposal = (strategy: SearchStrategy) =>
+    new Promise<"accept" | "keep" | "superseded">((resolve) => {
+      proposalChoiceRef.current?.("superseded");
+      proposalChoiceRef.current = (choice) => {
+        proposalChoiceRef.current = null;
+        setPendingProposal(null);
+        resolve(choice);
+      };
+      setPendingProposal(strategy);
+    });
   // Panneau de progression pendant la recherche (~30 s avec les APIs en direct) :
   // informe l'utilisateur de l'étape en cours pour qu'il patiente sereinement.
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
@@ -2391,11 +2408,14 @@ export default function App() {
   // Construit la liste de sous-requêtes effective : la requête principale (langage
   // naturel) suivie des sous-requêtes additionnelles non vides. Renvoie null s'il
   // n'y a pas au moins une sous-requête additionnelle → recherche mono-requête.
-  function buildSubQueries(): SubQuery[] | null {
+  // `mainText` : la requête principale réellement utilisée, quand elle n'est plus celle de
+  // l'état (une correction proposée vient d'être acceptée).
+  function buildSubQueries(mainText?: string): SubQuery[] | null {
+    const main = (mainText ?? query).trim();
     const extra = extraQueries
       .map((q) => ({ kind: q.kind, text: q.text.trim(), ...(q.op ? { op: q.op } : {}) }))
       .filter((q) => q.text);
-    if (!extra.length || !query.trim()) return null;
+    if (!extra.length || !main) return null;
     // La requête principale est une FACETTE à part entière : son type est AUTO-DÉTECTÉ
     // (comme les sous-requêtes), et NON imposé par le toggle `mode` (défaut "boolean").
     // Sinon une requête principale en langage naturel était traitée comme un BOOLÉEN
@@ -2404,8 +2424,8 @@ export default function App() {
     const mainKind: SubQuery["kind"] =
       mainKindOverride === "boolean" || mainKindOverride === "natural"
         ? mainKindOverride
-        : (looksBoolean(query.trim()) ? "boolean" : "natural");
-    return [{ kind: mainKind, text: query.trim() }, ...extra];
+        : (looksBoolean(main) ? "boolean" : "natural");
+    return [{ kind: mainKind, text: main }, ...extra];
   }
 
   // Prévisualisation débouncée : dès qu'il y a des sous-requêtes, on affiche le compte
@@ -2429,6 +2449,8 @@ export default function App() {
 
   async function handleSearch() {
     if (!query.trim()) return;
+    // Une correction proposée à la recherche précédente n'attend plus de réponse.
+    proposalChoiceRef.current?.("superseded");
     const mySearch = ++activeSearchRef.current;   // supersède toute recherche précédente
     setLoading(true);
     setError(null);
@@ -2446,18 +2468,35 @@ export default function App() {
       // requête booléenne. C'est CETTE requête qui définit le corpus, donc on la
       // recherche ET on la persiste sur le scénario → le compteur affiché ==
       // la taille du corpus (même requête booléenne des deux côtés).
+      // Une stratégie booléenne saisie est gardée TELLE QUELLE, et vérifiée : la requête
+      // utilisée est celle saisie, ou la correction proposée si l'utilisateur l'accepte.
+      let usedQuery = query.trim();
       let strategy: SearchStrategy | null = null;
       if (mode === "boolean") {
         setSearchPhase('translating');
         setTranslatingQuery(true);
         try {
-          strategy = await fetchSearchStrategy(query.trim());
+          strategy = await fetchSearchStrategy(usedQuery);
           setBooleanStrategy(strategy);
         } catch (e) {
           console.warn("Boolean translation failed, using raw query:", e);
           setBooleanStrategy(null);
         } finally {
           setTranslatingQuery(false);
+        }
+        // Une erreur réelle dans la requête : une correction PROPOSÉE, et la recherche
+        // attend le choix. Jamais de réécriture silencieuse.
+        if (strategy?.proposed_query) {
+          const choice = await askAboutProposal(strategy);
+          if (choice === "superseded" || activeSearchRef.current !== mySearch) return;
+          if (choice === "accept") {
+            strategy = acceptProposal(strategy);
+            usedQuery = strategy.general;
+            setQuery(usedQuery);
+          } else {
+            strategy = keepEnteredQuery(strategy);
+          }
+          setBooleanStrategy(strategy);
         }
       } else {
         setBooleanStrategy(null);
@@ -2468,12 +2507,12 @@ export default function App() {
       // helper booléen). On crée le scénario, on construit le corpus (requête
       // booléenne sur base locale ∪ sources live, dans le mode choisi : exhaustive ou
       // standard), puis on lit le corpus et on l'affiche. Plus de "preview" divergente.
-      const _sub = buildSubQueries();
+      const _sub = buildSubQueries(usedQuery);
       const newScenario = await createUserScenario({
         // Nom par défaut = l'expression COMPLÈTE (facettes + ET/OU), pas seulement
         // la requête principale.
-        name: scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : query),
-        query: query.trim(),
+        name: scenarioDisplayName(_sub ? combinedQueryText(_sub, combinator) : usedQuery),
+        query: usedQuery,
         mode,
         filters: { projectContext, ...(excludePreprints ? { exclude_preprints: true } : {}), ...yearBoundsFilter(yearRange, filterOptions?.year) },
         result_count: 0,
@@ -3439,6 +3478,18 @@ export default function App() {
                     )}
                   </div>
                 )}
+
+                {/* Une correction PROPOSÉE pour la requête saisie : la recherche attend le
+                    choix, et rien ne change sans l'accord de l'utilisateur. */}
+                {pendingProposal?.proposed_query && (
+                  <QueryProposal
+                    entered={pendingProposal.entered_query ?? pendingProposal.general}
+                    proposed={pendingProposal.proposed_query}
+                    reason={pendingProposal.proposal_reason}
+                    onAccept={() => proposalChoiceRef.current?.("accept")}
+                    onKeep={() => proposalChoiceRef.current?.("keep")}
+                  />
+                )}
               </section>
 
               {error && (
@@ -3474,7 +3525,8 @@ export default function App() {
                   .sort((a, b) => (b[1] as number) - (a[1] as number));
                 const fetchedSoFar = srcEntries.reduce((a, [, n]) => a + (n as number), 0);
                 const steps: { label: string; done: boolean; active: boolean; hint?: string }[] = [
-                  { label: t("search.stepTranslate"), done: !translating, active: translating },
+                  { label: t("search.stepTranslate"), done: !translating, active: translating,
+                    hint: pendingProposal ? t("search.proposal.waiting") : undefined },
                   { label: t("search.stepLocal"), done: !translating && rank > 1, active: !translating && rank <= 1 },
                   ...(includeLive ? [{
                     label: t("search.stepLive"),

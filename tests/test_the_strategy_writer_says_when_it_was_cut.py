@@ -53,8 +53,9 @@ def test_a_cut_strategy_is_degraded_with_its_reason(cut_writer):
     assert out["degraded_reason"] == "truncated" and "coupée" in out["reason"]
     assert out["general"] == QUERY, "la recherche part sur la requête telle que saisie"
     assert S._strategy_key(QUERY) not in S._STRATEGY_CACHE, "une coupure ne se met jamais en cache"
-    # Le plafond relevé, et la consigne sur le tiret long gardée dans le prompt.
-    assert cut_writer["max_tokens"] == 1500
+    # Le plafond relevé (1 500, puis 6 000 pour qu'une correction proposée puisse réécrire
+    # une stratégie de 8 000 caractères), et la consigne sur le tiret long gardée.
+    assert cut_writer["max_tokens"] == S.SEARCH_STRATEGY_MAX_TOKENS == 6000
     assert "em dash" in cut_writer["messages"][0]["content"]
 
 

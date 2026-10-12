@@ -44,6 +44,7 @@ from .search import (
     _load_prisma_identification,
     _looks_boolean,
     _normalize_sub_queries,
+    _strategy_to_store,
     excludes_preprints,
 )
 from .alerts import _clean_email, _ensure_alert_subscription
@@ -507,6 +508,10 @@ def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang:
     Pour les recherches récentes (non épinglées, sans dossier), upsert par query+mode
     afin d'éviter l'accumulation de doublons lors des relances de recherche."""
     import uuid
+    # Une correction proposée en attente ne vaut que pour l'écran de recherche : elle n'est
+    # jamais enregistrée avec la stratégie du scénario (le choix a déjà été fait).
+    if payload.search_strategy:
+        payload.search_strategy = _strategy_to_store(payload.search_strategy)
     # La purge des doublons vit ICI désormais, et non plus dans le GET qui liste : une
     # lecture ne doit pas supprimer, et celle-là le faisait sans clé d'API et sans
     # nettoyer les enfants. À la création on a la clé, et on sait qu'une recherche
@@ -633,7 +638,7 @@ def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang:
             with engine.begin() as conn2:
                 conn2.execute(text("""
                     UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
-                """), {"id": sid, "strategy": json.dumps(strategy)})
+                """), {"id": sid, "strategy": json.dumps(_strategy_to_store(strategy))})
         except Exception as _se:
             logger.warning(f"search_strategy generation failed for {sid}: {_se}")
     if not payload.search_strategy:

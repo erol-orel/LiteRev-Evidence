@@ -323,6 +323,15 @@ export const fr = {
     depthStandardHintRanked: "Les notices les plus pertinentes de chaque base, jusqu'à {n} par base ({ranked} pour Crossref et OpenAlex, qui classent par pertinence) : plus rapide",
     strategyTruncated:
       "La stratégie booléenne rédigée par le modèle a été coupée à son plafond : la recherche utilise la requête telle que saisie.",
+    proposal: {
+      title: "Votre requête semble contenir une erreur",
+      entered: "Telle que saisie :",
+      proposed: "Correction proposée :",
+      nothingChanges: "Rien ne change sans votre accord : la recherche attend votre choix.",
+      accept: "Utiliser la requête proposée",
+      keep: "Garder ma requête",
+      waiting: "en attente de votre choix sur la correction proposée",
+    },
     addSubQuery: "Ajouter une sous-requête",
     combineHint: "La requête principale ci-dessus est combinée avec ces sous-requêtes :",
     combinator: "Combiner par",

@@ -67,6 +67,7 @@ from .search import (
     _source_label,
     _split_boolean,
     _store_prisma_identification,
+    _strategy_to_store,
     source_record_keys,
     _strip_field_tags,
     _tokenize_boolean,
@@ -1262,13 +1263,15 @@ def _run_user_scenario_populate(
                 _pubmed_q = _strat.get("pubmed") or _strat["general"]
             else:
                 # Absent ou dégradé (cache empoisonné pendant une panne quota) → régénérer.
+                # Une stratégie saisie reste la requête saisie : une correction proposée
+                # n'est jamais appliquée ici, ni enregistrée (l'écran de recherche la propose).
                 _gen = _generate_search_strategy(query)
                 _boolean = _gen.get("general") or query
                 _pubmed_q = _gen.get("pubmed") or _boolean
                 if not _strategy_is_degraded(_gen, query):
                     with engine.begin() as _sc2:
                         _sc2.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb) WHERE id = :id"),
-                                     {"s": json.dumps(_gen), "id": scenario_id})
+                                     {"s": json.dumps(_strategy_to_store(_gen)), "id": scenario_id})
         except Exception as _be:
             logger.warning(f"Populate {scenario_id} boolean strategy: {_be}")
         # Facettes UNIES (OU) d'une recherche multi-facettes : fédérées AUSSI, en

@@ -323,6 +323,15 @@ export const en: Translations = {
     depthStandardHintRanked: "The most relevant records from each database, up to {n} per database ({ranked} for Crossref and OpenAlex, which rank by relevance): faster",
     strategyTruncated:
       "The Boolean strategy written by the model was cut off at its limit: the search uses the query as typed.",
+    proposal: {
+      title: "Your query seems to contain an error",
+      entered: "As you entered it:",
+      proposed: "Proposed correction:",
+      nothingChanges: "Nothing changes unless you accept: the search waits for your choice.",
+      accept: "Use the proposed query",
+      keep: "Keep my query",
+      waiting: "waiting for your choice on the proposed correction",
+    },
     addSubQuery: "Add a sub-query",
     combineHint: "The main query above is combined with these sub-queries:",
     combinator: "Combine by",

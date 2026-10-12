@@ -10,13 +10,13 @@ import os
 import re
 from typing import Any
 
-from fastapi import Depends
+from fastapi import Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text, bindparam
 
 import lexical_search as _lex
 
-from .core import app, engine, logger, require_api_key
+from .core import _norm_lang, app, engine, logger, require_api_key
 from .documents import PREPRINT_DOI_RE, _strategy_is_degraded, same_work_survivors
 from .scenario_store import _get_user_scenario_or_404, has_abstract_sql, reviewer_decision_sql
 from llm_usage import model_for as _model
@@ -2076,9 +2076,10 @@ def _plain_keywords(query: str, max_words: int = 8) -> str:
 
 
 @app.get("/user-scenarios/{scenario_id}/search-strategy")
-def get_search_strategy(scenario_id: str) -> dict[str, Any]:
+def get_search_strategy(scenario_id: str, lang: str | None = Query(None, max_length=8)) -> dict[str, Any]:
     """Returns the stored search_strategy JSON for this scenario.
-    If not yet generated, generates it now and stores it."""
+    If not yet generated, generates it now and stores it (without a proposed correction:
+    that is offered on the search screen, and the choice belongs to the user)."""
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
     strategy = row.get("search_strategy")
@@ -2086,16 +2087,327 @@ def get_search_strategy(scenario_id: str) -> dict[str, Any]:
     # généré pendant une panne de quota OpenAI → requête brute échoée). On ne
     # persiste QUE les stratégies valides, pour ne pas figer un cache empoisonné.
     if _strategy_is_degraded(strategy, query):
-        strategy = _generate_search_strategy(query)
+        strategy = _strategy_in_lang(_generate_search_strategy(query), lang)
         if not _strategy_is_degraded(strategy, query):
             try:
                 with engine.begin() as conn:
                     conn.execute(text("""
                         UPDATE user_scenarios SET search_strategy = CAST(:strategy AS jsonb) WHERE id = :id
-                    """), {"id": scenario_id, "strategy": json.dumps(strategy)})
+                    """), {"id": scenario_id, "strategy": json.dumps(_strategy_to_store(strategy))})
             except Exception as _e:
                 logger.warning(f"get_search_strategy store error: {_e}")
     return strategy if isinstance(strategy, dict) else {}
+
+
+# ── Une stratégie collée : gardée telle quelle, vérifiée, une correction PROPOSÉE ──────
+# Décision du propriétaire du produit : une stratégie de revue collée passe par le chemin
+# du modèle quelle que soit sa longueur, elle est utilisée TELLE QUE SAISIE, et si elle a
+# une erreur réelle, une correction est PROPOSÉE à l'utilisateur, qui l'accepte ou garde
+# sa requête. Jamais de réécriture silencieuse. Le prompt disait à la fois « préserve le
+# booléen » et « 2 à 4 groupes de concepts au plus, des requêtes pas trop longues » : une
+# stratégie de 3 000 caractères en ressortait raccourcie, sans que rien ne le dise.
+
+#: La plus longue requête que la traduction en stratégie accepte. Une stratégie de revue
+#: systématique écrite pour PubMed fait couramment 3 000 à 8 000 caractères (la requête
+#: HPAI de production en fait 3 075) : la borne de 2 000 la refusait d'un 422.
+SEARCH_STRATEGY_MAX_CHARS = 8000
+#: Le plafond de la réponse du modèle. Une correction proposée réécrit la stratégie ENTIÈRE
+#: (8 000 caractères, de l'ordre de 2 500 tokens), avec son explication ; une traduction,
+#: ses synonymes. 1 500 coupait une correction en son milieu (finish_reason « length »).
+SEARCH_STRATEGY_MAX_TOKENS = 6000
+#: Le plafond du second essai quand le modèle refuse le premier sans dire le sien : la plus
+#: basse des limites de sortie des modèles qu'on peut lui avoir pointés.
+_SEARCH_STRATEGY_FALLBACK_TOKENS = 4096
+#: Les champs d'une correction proposée : servis à l'écran de recherche, jamais enregistrés
+#: sur un scénario (le choix appartient à l'utilisateur, et il le fait une fois).
+_PROPOSAL_KEYS = ("proposed_query", "proposal_reason", "proposal_reasons", "proposal_issues")
+
+_STRATEGY_OPERATOR_RE = re.compile(r"\b(AND|OR|NOT)\b")
+_STRATEGY_FIELD_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z /:\-]{0,40}\]")
+_TYPOGRAPHIC_DOUBLE_QUOTES = "“”„‟«»"
+
+
+def _is_boolean_strategy(query: str) -> bool:
+    """Une stratégie booléenne ÉCRITE : un opérateur en majuscules ou un tag de champ.
+
+    Plus strict que `_looks_boolean`, qui compte aussi des guillemets ou des parenthèses :
+    « influenza (H5N1) in poultry workers » reste une phrase à traduire, et c'est alors le
+    modèle qui en juge. Une stratégie ainsi reconnue est gardée telle que saisie, quoi que
+    le modèle en dise. PUR."""
+    q = query or ""
+    return bool(_STRATEGY_OPERATOR_RE.search(q) or _STRATEGY_FIELD_TAG_RE.search(q))
+
+
+def _balance_parentheses(query: str) -> str:
+    """Les parenthèses de `query` équilibrées au plus prudent : une fermante sans ouvrante
+    est retirée, une ouvrante jamais fermée est fermée à la fin. Les phrases entre
+    guillemets et les tags de champ ne comptent pas, comme pour le tokeniseur. Aucun terme
+    n'est retiré. PUR."""
+    out: list[str] = []
+    depth = 0
+    in_quote = in_tag = False
+    for ch in query or "":
+        if in_quote:
+            in_quote = ch != '"'
+        elif in_tag:
+            in_tag = ch != "]"
+        elif ch == '"':
+            in_quote = True
+        elif ch == "[":
+            in_tag = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                continue                                  # fermante orpheline : retirée
+            depth -= 1
+        out.append(ch)
+    return "".join(out).rstrip() + ")" * depth
+
+
+def _boolean_syntax_check(query: str) -> dict[str, Any]:
+    """Ce qu'un booléen collé a de déséquilibré, dit SANS modèle, et la correction la plus
+    prudente : {issues: [{kind, count}], fixed: str | None}.
+
+    Le tokeniseur et le parseur de la recherche (`_tokenize_boolean`, `_parse_boolean_ast`)
+    sont tolérants, et c'est ce qui rend l'erreur muette : un guillemet orphelin colle au
+    mot voisin, une parenthèse fermante en trop ARRÊTE la lecture et le reste de la requête
+    est ignoré (« (A OR B)) AND C » se lit « A OR B »), une ouvrante jamais fermée garde
+    tout ce qui suit dans son groupe, et des guillemets typographiques (“ ” « », ceux d'un
+    traitement de texte) ne font pas une phrase. Les parenthèses sont lues par CE
+    tokeniseur : le contrôle voit ce que la recherche voit, même quand le modèle passe à
+    côté. PUR."""
+    t = query or ""
+    issues: list[dict[str, Any]] = []
+    n_typo = sum(t.count(c) for c in _TYPOGRAPHIC_DOUBLE_QUOTES)
+    if n_typo:
+        t = re.sub(r"«\s*", '"', t)
+        t = re.sub(r"\s*»", '"', t)
+        t = re.sub("[“”„‟]", '"', t)
+        issues.append({"kind": "typographic_quotes", "count": n_typo})
+    if t.count('"') % 2:
+        # Le tokeniseur apparie les guillemets de gauche à droite : le dernier est
+        # l'orphelin, et la recherche le lit comme s'il n'était pas là.
+        _i = t.rfind('"')
+        t = t[:_i] + t[_i + 1:]
+        issues.append({"kind": "unpaired_quote", "count": 1})
+    depth = closing = 0
+    for kind, _v in _tokenize_boolean(t):
+        if kind == "(":
+            depth += 1
+        elif kind == ")":
+            if depth:
+                depth -= 1
+            else:
+                closing += 1
+    if closing:
+        issues.append({"kind": "unmatched_closing_parenthesis", "count": closing})
+    if depth:
+        issues.append({"kind": "unclosed_parenthesis", "count": depth})
+    if closing or depth:
+        t = _balance_parentheses(t)
+    fixed = t if issues else None
+    # Une correction qui ne laisse rien à chercher n'en est pas une.
+    if fixed is not None and _parse_boolean_ast(_tokenize_boolean(fixed)) is None:
+        fixed = None
+    return {"issues": issues, "fixed": fixed}
+
+
+#: Ce que dit le contrôle sans modèle, dans les deux langues de l'interface.
+_SYNTAX_REASONS: dict[str, dict[str, str]] = {
+    "typographic_quotes": {
+        "en": "Typographic quotes (“ ” « ») do not make a phrase for the search: the proposal "
+              "uses straight quotes.",
+        "fr": "Les guillemets typographiques (“ ” « ») ne font pas une phrase pour la recherche : "
+              "la proposition met des guillemets droits.",
+    },
+    "unpaired_quote": {
+        "en": "A double quote has no partner: the proposal removes the last one, which the "
+              "search ignores anyway.",
+        "fr": "Un guillemet double n'a pas son pendant : la proposition retire le dernier, que la "
+              "recherche ignore de toute façon.",
+    },
+    "unmatched_closing_parenthesis": {
+        "en": "Closing parentheses without an opening one: {n}. The search stops reading at the "
+              "first one and ignores what follows; the proposal removes them.",
+        "fr": "Parenthèses fermantes sans ouvrante : {n}. La recherche s'arrête de lire à la "
+              "première et ignore la suite ; la proposition les retire.",
+    },
+    "unclosed_parenthesis": {
+        "en": "Opening parentheses never closed: {n}. The proposal closes them at the end of "
+              "the query.",
+        "fr": "Parenthèses ouvrantes jamais fermées : {n}. La proposition les ferme à la fin de "
+              "la requête.",
+    },
+}
+_GENERIC_PROPOSAL_REASON = {
+    "en": "The query seems to contain an error: a correction is proposed.",
+    "fr": "La requête semble contenir une erreur : une correction est proposée.",
+}
+
+
+def _syntax_reasons(issues: list[dict[str, Any]]) -> dict[str, str]:
+    return {lang: " ".join(_SYNTAX_REASONS[i["kind"]][lang].replace("{n}", str(i.get("count", 1)))
+                           for i in issues if i.get("kind") in _SYNTAX_REASONS)
+            for lang in ("en", "fr")}
+
+
+def _strategy_terms(query: str) -> int:
+    return sum(1 for kind, _v in _tokenize_boolean(query or "") if kind == "TERM")
+
+
+def _strategy_proposal(entered: str, model_query: object = None, model_reason: object = None) -> dict[str, Any]:
+    """La correction PROPOSÉE d'une requête utilisée telle que saisie, ou {} : celle du
+    modèle quand elle tient, sinon celle du contrôle sans modèle.
+
+    Celle du modèle est écartée quand elle ne change rien (aux espaces près) ou quand elle
+    perd plus d'un quart des termes d'une longue stratégie : une « correction » qui
+    raccourcit une stratégie de revue est la simplification que ce chemin ne fait plus, et
+    elle passerait inaperçue au milieu de 8 000 caractères. Une correction du modèle qui
+    laisse des parenthèses ou des guillemets déséquilibrés est complétée par celle du
+    contrôle. Rien n'est appliqué ici : l'utilisateur accepte, ou garde sa requête."""
+    def _same(a: str, b: str) -> bool:
+        return " ".join(a.split()) == " ".join(b.split())
+
+    def _reasons(raw: object) -> dict[str, str]:
+        if isinstance(raw, dict):
+            got = {k: str(raw.get(k) or "").strip() for k in ("en", "fr")}
+        else:
+            got = {k: str(raw or "").strip() for k in ("en", "fr")}
+        return {k: v for k, v in got.items() if v}
+
+    entered = entered or ""
+    check = _boolean_syntax_check(entered)
+    issues = [i["kind"] for i in check["issues"]]
+    proposal = model_query.strip() if isinstance(model_query, str) else ""
+    if proposal and _same(proposal, entered):
+        proposal = ""
+    if proposal:
+        n0, n1 = _strategy_terms(entered), _strategy_terms(proposal)
+        if n0 >= 12 and n1 < 0.75 * n0:
+            logger.warning(f"_strategy_proposal: correction du modèle écartée, elle perd des termes "
+                           f"({n1} contre {n0} dans la stratégie saisie)")
+            proposal = ""
+    reasons: dict[str, str] = {}
+    if proposal:
+        reasons = _reasons(model_reason)
+        rest = _boolean_syntax_check(proposal)
+        if rest["fixed"]:
+            proposal = rest["fixed"]
+            extra = _syntax_reasons(rest["issues"])
+            reasons = {k: " ".join(x for x in (reasons.get(k, ""), extra[k]) if x) for k in ("en", "fr")}
+        issues = issues + ["model"]
+    elif check["fixed"]:
+        proposal = check["fixed"]
+        reasons = _syntax_reasons(check["issues"])
+    if not proposal or _same(proposal, entered):
+        return {}
+    reasons = {k: (reasons.get(k) or reasons.get("en" if k == "fr" else "fr") or _GENERIC_PROPOSAL_REASON[k])
+               for k in ("en", "fr")}
+    return {"proposed_query": proposal, "proposal_reasons": reasons, "proposal_issues": issues}
+
+
+def _finish_strategy(query: str, result: object, strict: bool) -> dict[str, Any]:
+    """La stratégie servie. Une stratégie booléenne saisie est gardée TELLE QUELLE : `general`
+    et `pubmed` sont la requête saisie, au caractère près, quelle que soit sa longueur ; une
+    phrase est traduite. Une requête utilisée telle que saisie est vérifiée, et sa correction
+    éventuelle est PROPOSÉE (`proposed_query`, sa raison dans les deux langues) sans être
+    appliquée. Calculé à chaque appel, jamais mis en cache : le cache garde la réponse du
+    modèle. PUR (hors journal)."""
+    out = dict(result) if isinstance(result, dict) else {}
+    raw_query, raw_reason = out.get("proposed_query"), out.get("proposal_reason")
+    for k in _PROPOSAL_KEYS:
+        out.pop(k, None)
+    kept = strict or str(out.get("input_kind") or "").strip().lower() == "boolean"
+    if kept:
+        out["general"] = query
+        out["pubmed"] = query
+    out["input_kind"] = "boolean" if kept else "natural"
+    out["entered_query"] = query
+    # Une correction n'a de sens que pour une requête utilisée telle que saisie : une phrase
+    # traduite n'est pas lue, sa traduction l'est. Un repli dégradé utilise la saisie, lui.
+    as_entered = (kept or bool(out.get("degraded"))
+                  or str(out.get("general") or "").strip() == (query or "").strip())
+    proposal = _strategy_proposal(query, raw_query if kept else None, raw_reason) if as_entered else {}
+    out["proposed_query"] = proposal.get("proposed_query")
+    out["proposal_reasons"] = proposal.get("proposal_reasons")
+    out["proposal_issues"] = proposal.get("proposal_issues") or []
+    out["proposal_reason"] = (proposal.get("proposal_reasons") or {}).get("fr")
+    return out
+
+
+def _strategy_in_lang(strategy: object, lang: str | None) -> dict[str, Any]:
+    """La raison de la correction proposée dans la langue de l'interface (français par
+    défaut, comme le reste de l'application). PUR."""
+    out = dict(strategy) if isinstance(strategy, dict) else {}
+    reasons = out.get("proposal_reasons") if isinstance(out.get("proposal_reasons"), dict) else {}
+    if out.get("proposed_query") and reasons:
+        lang_ = _norm_lang(lang) or "fr"
+        out["proposal_reason"] = reasons.get(lang_) or reasons.get("fr") or reasons.get("en")
+    return out
+
+
+def _strategy_to_store(strategy: object) -> dict[str, Any]:
+    """La stratégie telle qu'un scénario l'enregistre : sans correction proposée en
+    attente, qui ne vaut que pour l'écran de recherche. PUR."""
+    out = dict(strategy) if isinstance(strategy, dict) else {}
+    for k in _PROPOSAL_KEYS:
+        out.pop(k, None)
+    return out
+
+
+_RE_CEILING_REFUSED = re.compile(r"\b(max_tokens|max_completion_tokens)\b.{0,80}?"
+                                 r"(too large|at most|maximum|exceed)", re.I | re.S)
+_RE_CEILING_AT_MOST = re.compile(r"(?:at most|maximum(?: value)?(?: is| of)?)\s*(\d{3,6})", re.I)
+
+
+def _ceiling_refused(exc: BaseException) -> int | None:
+    """Le plafond à redemander quand le modèle refuse celui de la requête, ou None si
+    l'erreur est autre. L'API répond « max_tokens is too large: 6000. This model supports at
+    most 4096 completion tokens » : refusée avant toute lecture, la requête ne coûte rien,
+    et `llm_usage` ne répare que les paramètres refusés, pas leurs valeurs. PUR."""
+    msg = str(exc or "")
+    if not _RE_CEILING_REFUSED.search(msg):
+        return None
+    m = _RE_CEILING_AT_MOST.search(msg)
+    n = int(m.group(1)) if m else _SEARCH_STRATEGY_FALLBACK_TOKENS
+    return max(256, min(n, SEARCH_STRATEGY_MAX_TOKENS - 1))
+
+
+_STRATEGY_SYSTEM_PROMPT = (
+    "You are a systematic review librarian. The user gives EITHER a natural-language research "
+    "question OR a Boolean search strategy they wrote (AND/OR/NOT operators, quoted phrases, "
+    "parentheses, field tags such as [tiab] or [Mesh]). Decide which it is, and set "
+    "\"input_kind\" to \"boolean\" or \"natural\".\n"
+    "If it is a BOOLEAN strategy:\n"
+    "- It is used exactly as the user wrote it, however long. Do NOT rewrite, shorten, "
+    "simplify, reorder or translate it, and do not repeat it: leave \"general\" and \"pubmed\" "
+    "empty, and say in \"explanation\" that the strategy was kept as entered.\n"
+    "- CHECK it for real errors only: unbalanced parentheses or double quotes; operators that "
+    "make no sense (an operator doubled, an operator at the start or the end of a group, NOT "
+    "with nothing after it); misspelled or lowercase operators clearly meant as operators "
+    "(ANDD, OT, \"and\" between two parenthesized groups); a group that cannot match anything "
+    "(an empty group, X AND NOT X); a misused PubMed field tag (a tag that does not exist, "
+    "such as [tiabs], or a tag placed on an operator). Style, synonyms, missing concepts and "
+    "breadth are NOT errors.\n"
+    "- If you find at least one real error, put in \"proposed_query\" the WHOLE strategy with "
+    "only those errors corrected and every other character unchanged, and in "
+    "\"proposal_reason\" one or two sentences saying what is wrong and what you changed, in "
+    "English under \"en\" and in French under \"fr\". Otherwise leave both empty.\n"
+    "If it is NATURAL language: translate it into a Boolean query. \"general\" uses AND/OR/NOT "
+    "and quotes for phrases; \"pubmed\" is the PubMed version with MeSH terms [MeSH Terms] and "
+    "field tags [Title/Abstract]. Keep a translation practical: 2 to 4 concept groups. Leave "
+    "\"proposed_query\" and \"proposal_reason\" empty.\n"
+    "Return ONLY valid JSON with these fields:\n"
+    '{"input_kind": "boolean or natural",\n'
+    '"general": "the Boolean query, empty for a Boolean input",\n'
+    '"pubmed": "the PubMed query, empty for a Boolean input",\n'
+    '"explanation": "1-2 sentences on the term choices, or that the strategy was kept as entered",\n'
+    '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]],\n'
+    '"proposed_query": "the corrected strategy, or an empty string",\n'
+    '"proposal_reason": {"en": "1-2 sentences, or empty", "fr": "1-2 phrases, ou vide"}}\n'
+    "Never write the em dash character; use a comma, a colon or a hyphen."
+)
 
 
 # Cache mémoire des traductions naturel→booléen. La fonction est DÉTERMINISTE
@@ -2114,20 +2426,34 @@ def _strategy_key(query: str) -> str:
     return re.sub(r"\s+", " ", (query or "").strip().lower())
 
 
+def _strategy_cache_key(query: str, strict: bool) -> str:
+    """La clé de cache d'une requête. Une phrase : sa forme normalisée (`_strategy_key`).
+    Une stratégie écrite : son texte EXACT, espaces compactés, la casse d'un opérateur y
+    ayant un sens (« and » n'est pas « AND » pour PubMed) et sa vérification ne valant que
+    pour elle. Au-delà de 2 000 caractères, l'empreinte du texte : `query_key` est la clé
+    primaire d'un index btree, dont une entrée ne passe pas ~2 700 octets, et une stratégie
+    de 8 000 caractères n'aurait jamais été enregistrée."""
+    key = ("b:" + re.sub(r"\s+", " ", (query or "").strip())) if strict else _strategy_key(query)
+    if len(key) > 2000:
+        import hashlib
+        key = f"{'b' if strict else 'n'}:sha256:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+    return key
+
+
 def _generate_search_strategy(query: str) -> dict:
-    """
-    Uses GPT-4.1-mini to generate a structured boolean search strategy from a natural language query.
-    Returns a dict with:
-    - general: general boolean query string
-    - pubmed: PubMed-specific with MeSH tags
-    - explanation: brief explanation of term choices
-    - synonyms: list of key synonym groups used
-    Résultats déterministes mis en cache mémoire (voir _STRATEGY_CACHE) ; renvoie une COPIE.
-    """
-    _cache_key = _strategy_key(query)
+    """La stratégie booléenne d'une requête, par le modèle `bulk`. Une phrase est traduite
+    (`general` : booléen ; `pubmed` : MeSH et tags de champ ; `explanation`, `synonyms`).
+    Une stratégie booléenne saisie est gardée TELLE QUELLE, quelle que soit sa longueur, et
+    vérifiée : une erreur réelle donne une correction PROPOSÉE (`proposed_query`,
+    `proposal_reasons`), jamais appliquée (cf. `_finish_strategy`). `entered_query` porte la
+    requête saisie, `input_kind` ce qu'elle était.
+
+    Résultats déterministes mis en cache (mémoire puis base) ; renvoie une COPIE."""
+    _strict = _is_boolean_strategy(query)
+    _cache_key = _strategy_cache_key(query, _strict)
     _cached = _STRATEGY_CACHE.get(_cache_key)
     if _cached is not None:
-        return dict(_cached)
+        return _finish_strategy(query, _cached, _strict)
     # Cache PERSISTANT (DB) : même clé normalisée → MÊME stratégie à travers les
     # requêtes, les redémarrages et les workers. C'est ce qui garantit qu'une même
     # phrase produit toujours le même booléen (fin de « Main 57 vs sous-requête 56 »).
@@ -2138,55 +2464,59 @@ def _generate_search_strategy(query: str) -> dict:
                 {"k": _cache_key}).mappings().first()
         if _srow and isinstance(_srow["strategy"], dict):
             _STRATEGY_CACHE[_cache_key] = dict(_srow["strategy"])
-            return dict(_srow["strategy"])
+            return _finish_strategy(query, _srow["strategy"], _strict)
     except Exception as _ce:
         logger.warning(f"_generate_search_strategy DB cache read: {_ce}")
     openai_key = os.getenv("OPENAI_API_KEY")
     if not openai_key:
-        return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
+        return _finish_strategy(query, {"general": query, "pubmed": query, "explanation": "",
+                                        "synonyms": [], "degraded": True}, _strict)
     try:
         from llm_usage import LLMTruncated as _LLMTruncated, MeteredOpenAI as _OAI_ss, json_content as _json_content
         _client = _OAI_ss(api_key=openai_key)
-        response = _client.chat.completions.create(
-            model=_model("bulk"),
-            messages=[
-                {"role": "system", "content": (
-                    "You are a systematic review librarian. The user may type EITHER a natural-language "
-                    "description OR an already-formed boolean query. First decide which it is:\n"
-                    "- If it is ALREADY a boolean query (it uses AND/OR/NOT operators or quoted phrases "
-                    "with explicit structure), PRESERVE it as-is in 'general' (only fix obvious syntax), and "
-                    "set 'explanation' to note that the query was already boolean and kept unchanged.\n"
-                    "- Otherwise, TRANSLATE the natural-language query into a boolean query.\n"
-                    "Return ONLY valid JSON with these fields:\n"
-                    '{"general": "boolean query using AND/OR/NOT and quotes for phrases",\n'
-                    '"pubmed": "PubMed-optimized query with MeSH terms [MeSH Terms] and field tags [Title/Abstract]",\n'
-                    '"explanation": "1-2 sentences explaining the term choices and synonyms (or that the input was already boolean)",\n'
-                    '"synonyms": [["term1", "synonym1a", "synonym1b"], ["term2", "synonym2a"]]}\n'
-                    "Keep queries practical and not overly long. Use 2-4 concept groups max. "
-                    "Never write the em dash character; use a comma, a colon or a hyphen."
-                )},
-                {"role": "user", "content": f"Research query: {query}"}
-            ],
-            temperature=0,
-            seed=42,
-            # 500 coupait les stratégies riches en synonymes : le JSON s'arrêtait au milieu
-            # d'une chaîne, `json.loads` levait, et la recherche partait en mode dégradé
-            # avec la phrase brute comme booléen (un ET de chacun de ses mots), sans que
-            # rien ne le dise. 1 500 laisse la place ; une coupure qui reste est nommée.
-            max_tokens=1500,
-            response_format={"type": "json_object"},
-        )
+        _messages = [{"role": "system", "content": _STRATEGY_SYSTEM_PROMPT},
+                     {"role": "user", "content": f"Research query: {query}"}]
+
+        def _ask(ceiling: int):
+            return _client.chat.completions.create(
+                model=_model("bulk"),
+                messages=_messages,
+                temperature=0,
+                seed=42,
+                # Une correction réécrit la stratégie entière : cf. SEARCH_STRATEGY_MAX_TOKENS.
+                # Une coupure qui reste est nommée (`_json_content`), jamais servie tronquée.
+                max_tokens=ceiling,
+                response_format={"type": "json_object"},
+            )
+        try:
+            response = _ask(SEARCH_STRATEGY_MAX_TOKENS)
+        except Exception as _ce:
+            # Un modèle dont la limite de sortie est plus basse refuse le plafond : un second
+            # essai à la sienne, plutôt qu'une recherche qui part en mode dégradé.
+            _lower = _ceiling_refused(_ce)
+            if _lower is None:
+                raise
+            logger.warning(f"_generate_search_strategy: plafond de {SEARCH_STRATEGY_MAX_TOKENS} tokens "
+                           f"refusé ({str(_ce)[:160]}) ; nouvel essai à {_lower}")
+            response = _ask(_lower)
         try:
             _content = _json_content(response, label="search strategy")
         except _LLMTruncated as _te:
             # Une réponse coupée n'est pas une réponse plus courte : c'est l'absence de
             # réponse, et elle se dit comme telle (jamais mise en cache, réessayée).
             logger.warning(f"_generate_search_strategy: {_te}")
-            return {"general": query, "pubmed": query, "explanation": "", "synonyms": [],
-                    "degraded": True, "truncated": True, "degraded_reason": "truncated",
-                    "reason": ("La stratégie booléenne rédigée par le modèle a été coupée au plafond "
-                               "de tokens : la recherche utilise la requête telle qu'elle a été saisie.")}
+            return _finish_strategy(query, {
+                "general": query, "pubmed": query, "explanation": "", "synonyms": [],
+                "degraded": True, "truncated": True, "degraded_reason": "truncated",
+                "reason": ("La stratégie booléenne rédigée par le modèle a été coupée au plafond "
+                           "de tokens : la recherche utilise la requête telle qu'elle a été saisie.")},
+                _strict)
         _result = json.loads(_content)
+        # Une stratégie booléenne saisie est la requête, au caractère près : le modèle ne la
+        # recopie pas (il raccourcissait une stratégie longue), le code la remet.
+        if isinstance(_result, dict) and (_strict or str(_result.get("input_kind") or "").strip().lower() == "boolean"):
+            _result["general"] = query
+            _result["pubmed"] = query
         # Validité au sens du RESTE du code (_strategy_is_degraded : `general` vide, ou
         # sans opérateur booléen), pas seulement l'absence du drapeau `degraded`. Une
         # traduction qui « réussit » en renvoyant une requête inexploitable était sinon
@@ -2213,28 +2543,36 @@ def _generate_search_strategy(query: str) -> dict:
             if len(_STRATEGY_CACHE) >= _STRATEGY_CACHE_MAX:
                 _STRATEGY_CACHE.clear()          # borne simple : flush à la capacité
             _STRATEGY_CACHE[_cache_key] = dict(_result)
-        return _result
+        return _finish_strategy(query, _result, _strict)
     except Exception as _e:
         logger.warning(f"_generate_search_strategy failed: {_e}")
-        return {"general": query, "pubmed": query, "explanation": "", "synonyms": [], "degraded": True}
+        return _finish_strategy(query, {"general": query, "pubmed": query, "explanation": "",
+                                        "synonyms": [], "degraded": True}, _strict)
 
 
 class SearchStrategyIn(BaseModel):
     # BORNÉE. Ce texte devient le prompt d'un appel au modèle ET la clé d'une ligne de
     # cache persistée : sans longueur maximale, une chaîne arbitrairement longue
     # coûtait un appel et laissait une ligne, autant de fois qu'on la faisait varier.
-    query: str = Field(..., min_length=1, max_length=2000)
+    # 8 000 et non 2 000 : la longueur d'une stratégie de revue collée telle quelle.
+    query: str = Field(..., min_length=1, max_length=SEARCH_STRATEGY_MAX_CHARS)
+    # La langue de l'interface, celle de l'explication d'une correction proposée.
+    lang: str | None = Field(default=None, max_length=8)
 
 
 @app.post("/search-strategy")
 def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
-    """Traduit une requête en langage naturel en stratégie booléenne (LLM).
+    """Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
+    quelle une stratégie booléenne saisie, en la vérifiant.
 
     Permet à la recherche d'AFFICHER la requête booléenne et de l'utiliser comme
     base du corpus : la même stratégie est ensuite persistée sur le scénario, de
     sorte que le compteur de recherche == la taille du corpus (même requête).
+    Une stratégie saisie qui a une erreur réelle revient avec une correction PROPOSÉE
+    (`proposed_query`, `proposal_reason` dans la langue `lang`) : `general` reste la
+    requête saisie, et c'est l'utilisateur qui accepte la correction ou garde sa requête.
     """
-    return _generate_search_strategy(payload.query)
+    return _strategy_in_lang(_generate_search_strategy(payload.query), payload.lang)
 
 
 class FacetPreviewIn(BaseModel):
