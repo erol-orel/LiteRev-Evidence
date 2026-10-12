@@ -1438,14 +1438,14 @@ def start_user_scenario_pipeline(
         "query": row["query"],
         "max_results": max_results,
         "message": f"Pipeline complet lancé pour '{row['name']}' "
-                   "(ingest → fulltext → embeddings → rerank → PICO → métadonnées → "
+                   "(ingest → embeddings → score sémantique → cross-encoder → texte intégral → PICO → métadonnées → "
                    "clustering → knowledge graph → evidence brief → variables & modèle → "
                    "actions recommandées). "
                    "Suivez la progression via GET /user-scenarios/{id}/pipeline/status.",
         # MÊME liste que STEP_ORDER côté pipeline : elle s'arrêtait à « variables » alors
         # que l'étape « actions » tourne, donc la barre de progression annonçait un
         # scénario terminé pendant que les actions recommandées se généraient encore.
-        "steps": ["ingest", "fulltext", "embed", "rerank", "pico", "metadata",
+        "steps": ["ingest", "embed", "semantic_scoring", "cross_encoder", "fulltext", "pico", "metadata",
                   "clustering", "knowledge_graph", "evidence", "variables", "actions"],
     }
 

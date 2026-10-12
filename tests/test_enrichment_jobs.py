@@ -161,29 +161,29 @@ class _Engine:
         return _Rows(self.rows)
 
 
-def test_the_open_access_batch_says_it_found_links_not_texts(monkeypatch):
-    """It stores an Unpaywall LINK and no text, yet it answered "N full texts retrieved"."""
-    import io
-    import json as _json
+def test_the_full_text_batch_downloads_texts_with_the_pipelines_code(monkeypatch):
+    """It found Unpaywall LINKS and downloaded no text: only the full pipeline could, and
+    over the whole scenario. It now runs the pipeline's own download on the scope asked,
+    and counts texts."""
+    import api.pipeline as P
 
-    import api.enrichment as E
+    asked = {}
 
-    fake = _Engine([{"id": 1, "title": "Open", "doi": "10.1/open", "url": None},
-                    {"id": 2, "title": "Closed", "doi": "10.1/closed", "url": None}])
-    monkeypatch.setattr(E, "engine", fake)
+    def rows(sid, scope, limit=None):
+        asked.update(sid=sid, scope=scope, limit=limit)
+        return [{"id": 1}, {"id": 2}]
 
-    def urlopen(req, timeout=None):                     # Unpaywall, without the network
-        is_open = "10.1/open" in req.full_url
-        body = {"is_oa": True, "best_oa_location": {"url_for_pdf": "https://oa.example/1.pdf"}} \
-            if is_open else {"is_oa": False}
-        return io.BytesIO(_json.dumps(body).encode())
+    def download(rows_, progress=None):
+        progress(1, 2, 0)
+        progress(2, 2, 1)
+        return {"total": 2, "fetched": 1, "failed": 1}
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(P, "rows_without_fulltext", rows)
+    monkeypatch.setattr(P, "download_fulltext", download)
     seen = []
-    out = main.fetch_fulltext_batch(scenario_id=SID, limit=None, scope="all",
+    out = main.fetch_fulltext_batch(scenario_id=SID, limit=None, scope="relevant",
                                     progress=lambda done, total: seen.append((done, total)))
-    assert (out["fetched"], out["not_available"], out["errors"]) == (1, 1, 0)
-    assert out["message"] == "1 liens d'accès ouvert trouvés, 1 non disponibles, 0 erreurs"
-    assert "textes intégraux" not in out["message"]
-    assert fake.writes == [{"url": "https://oa.example/1.pdf", "article_id": 1}]
+    assert asked == {"sid": SID, "scope": "relevant", "limit": None}
+    assert (out["fetched"], out["not_available"], out["errors"], out["total"]) == (1, 1, 0, 2)
+    assert out["message"].startswith("1 textes intégraux téléchargés sur 2 articles sans texte")
     assert seen[-1] == (2, 2)                            # the progress a job reports

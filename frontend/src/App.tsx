@@ -1586,6 +1586,12 @@ function ScenariosView({
           </div>
         )}
 
+        {/* Le pipeline est allé au bout de ce qui ne dépend pas du seuil : le texte intégral,
+            le PICO et les métadonnées attendent qu'on le choisisse, et la carte le dit. */}
+        {isUser && pipelineStatuses[scenario.id]?.overall_status === 'done' && pipelineStatuses[scenario.id]?.waiting_threshold && (
+          <div className="mt-2 pl-12 text-[11px] text-amber-300/90">{t("scenarios.pipelineWaitingThreshold")}</div>
+        )}
+
         {/* Recherche en cours (populate lancé depuis la page Recherche, pas un pipeline) :
             l'état est persisté par le serveur, la carte le montre même après un
             changement de page ou un rechargement. */}

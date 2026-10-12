@@ -57,11 +57,12 @@ from llm_usage import model_for as _model
 #: Bump to make every cached extraction eligible for a new pass.
 EXTRACTION_VERSION = 1
 EXTRACTION_MAX_ARTICLES = _env_int("EXTRACTION_MAX_ARTICLES", 0, 0)
-#: Characters of a paper's text read per article (the title, then the text). 150,000 is about
-#: 37,000 tokens, under a cent per paper at the bulk price, and holds a whole paper in nearly
-#: every case. It was 60,000, minus the chunk overlaps read twice: 149 papers of HPAI_last were
-#: cut, at the end of the paper, where PDF tables and supplementary tables sit.
-EXTRACTION_MAX_CHARS = _env_int("EXTRACTION_MAX_CHARS", 150000, 4000)
+#: Characters of a paper's text read per article (the title, then the text). 300,000 is about
+#: 75,000 tokens, well inside the bulk model's context, and holds a whole paper with its
+#: supplementary tables. It was 60,000, then 150,000: at 150,000 still 24 papers were cut (14 of
+#: HPAI_last, 3 and 7 of the two T2.4 HPAI scenarios), at the end, where PDF tables and
+#: supplementary tables sit. A paper cut under a smaller limit is read again (`_needs_extraction`).
+EXTRACTION_MAX_CHARS = _env_int("EXTRACTION_MAX_CHARS", 300000, 4000)
 #: The limit an extraction was cut at when it does not say (it was made before `max_chars` was
 #: recorded): such a cut paper is read again once the limit is above it.
 _LEGACY_MAX_CHARS = 60000
@@ -72,8 +73,16 @@ _EXTRACTION_WORKERS = _env_int("EXTRACTION_WORKERS", 4, 1)
 _MAX_ATTEMPTS = 3
 _MAX_OBSERVATIONS = 120
 _MIN_ABSTRACT_CHARS = 80
+#: A row's verbatim quote and its description, in characters. They were 300 and 400: a serology
+#: table row or an adjusted odds ratio with its interval and covariates did not fit, and the
+#: quote, cut, no longer held the figures it was meant to prove. Rows extracted before keep
+#: their size (the bound applies to new extractions; none is redone for it).
+_MAX_QUOTE_CHARS = 600
+_MAX_DESCR_CHARS = 800
 #: The answer's ceiling, in tokens. The prompt allows 120 observations with quotes of up to
-#: 300 characters, which needs about 18,000 to 21,000 tokens. At 8,000 a rich paper (a
+#: 300 characters, which needs about 18,000 to 21,000 tokens (quotes may now run to
+#: _MAX_QUOTE_CHARS, but the richest paper of HPAI_last held 72 rows, about 22,000 tokens even
+#: with every quote at the new length; past the ceiling, the condensed answer below applies). At 8,000 a rich paper (a
 #: meta-analysis, a serology table, a KAP survey) had its answer cut mid-JSON, failed
 #: identically at every attempt (temperature 0, fixed seed) and was given up: on HPAI_last no
 #: extracted article held more than 72 rows. Output is billed only as written.
@@ -221,7 +230,8 @@ _EXTRACTION_SYSTEM = (
     "unit, the confidence interval and the statistic name in 'descr'. 'n_cases' is the number "
     "of cases or positives in that group and 'pop_risk' the number of people or animals in it; "
     "give them only when the paper does. 'quote' must be copied exactly from the text, at most "
-    "300 characters, and must contain the figures you report. Scientific names in Latin for "
+    + str(_MAX_QUOTE_CHARS) + " characters, and must contain the figures you report. "
+    "Scientific names in Latin for "
     "animals and vectors. At most " + str(_MAX_OBSERVATIONS) + " observations: keep the most "
     "informative, and always keep every sex, gender, age, occupation, knowledge-attitude-"
     "practice and protective-equipment result. 'coverage' flags are true only when the paper "
@@ -366,14 +376,14 @@ def parse_extraction(raw: Any, source_text: str) -> dict[str, Any]:
         if len(observations) >= _MAX_OBSERVATIONS:
             dropped["over_limit"] += 1
             continue
-        descr = _clean_str(o.get("descr"), 400)
+        descr = _clean_str(o.get("descr"), _MAX_DESCR_CHARS)
         value = _to_number(o.get("value"))
         if value is None and o.get("value") not in (None, ""):
             as_text = _clean_str(o.get("value"), 120)
             if as_text:
                 descr = f"{as_text}. {descr}" if descr else as_text
         kind = (_clean_str(o.get("source_kind"), 12) or "").lower()
-        quote = _clean_str(o.get("quote"), 300)
+        quote = _clean_str(o.get("quote"), _MAX_QUOTE_CHARS)
         observations.append({
             "sheet": sheet,
             "transmission_mode": _clean_str(o.get("transmission_mode"), 80),

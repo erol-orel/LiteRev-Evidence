@@ -276,89 +276,46 @@ def fetch_fulltext_batch(
     progress: Optional[Callable[[int, int], None]] = None,
 ):
     """
-    Cherche un LIEN d'accès ouvert (Unpaywall, par DOI) pour un lot d'articles. Il ne
-    télécharge aucun texte : il range l'adresse dans `oa_url`, que l'étape texte
-    intégral du pipeline lira.
+    Télécharge le texte intégral en ACCÈS OUVERT d'un lot d'articles (PMC et Europe PMC,
+    Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex), le découpe et le range : les
+    fonctions du pipeline complet (`pipeline.download_fulltext`), sur la portée choisie.
 
-    `scope` : `all` pour tout le scénario, `relevant` pour son seul sous-ensemble
-    pertinent.
+    Le lot ne trouvait que des LIENS (Unpaywall) et n'en téléchargeait aucun : seul le
+    pipeline complet savait télécharger, et sur tout le scénario. Le lien d'Unpaywall reste
+    rangé (`oa_url`), même quand son PDF ne se lit pas. Un article qui gagne un texte est
+    relu par la prochaine extraction.
+
+    `scope` : `relevant` pour le sous-ensemble pertinent, `all` pour tout le scénario.
+    Sans scénario : la bibliothèque entière, ce que seul un administrateur demande.
     """
-    import urllib.request
+    from .pipeline import NO_FULLTEXT_CHUNK_SQL, download_fulltext, rows_without_fulltext  # lazy: pipeline imports this module's neighbours
 
     scope = _scope(scope)
-    with engine.connect() as conn:
-        if scenario_id:
-            rows = conn.execute(text(f"""
-                SELECT ld.id, ld.title, ld.doi, ld.url
+    if scenario_id:
+        rows = rows_without_fulltext(scenario_id, scope, limit)
+    else:
+        with engine.connect() as conn:
+            rows = [dict(r) for r in conn.execute(text(f"""
+                SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
                 FROM literature_document ld
-                JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
-                WHERE ld.project_context = 'literev'
-                  AND ({scenario_scope_sql(scope)})
-                  AND (ld.has_fulltext IS NULL OR ld.has_fulltext = false)
-                  AND ld.doi IS NOT NULL
+                WHERE ld.project_context = 'literev' AND {NO_FULLTEXT_CHUNK_SQL}
                 ORDER BY ld.id
                 LIMIT :lim
-            """), {"sid": scenario_id, "lim": limit}).mappings().fetchall()
-        else:
-            rows = conn.execute(text("""
-                SELECT id, title, doi, url
-                FROM literature_document
-                WHERE project_context = 'literev'
-                  AND (has_fulltext IS NULL OR has_fulltext = false)
-                  AND doi IS NOT NULL
-                ORDER BY id
-                LIMIT :lim
-            """), {"lim": limit}).mappings().fetchall()
+            """), {"lim": limit}).mappings().fetchall()]
+    total = len(rows)
 
-    fetched = 0
-    not_available = 0
-    errors = 0
+    def _progress(done: int, _total: int, _failed: int) -> None:
+        if progress:
+            progress(done, total)
 
-    for row in _tracked(rows, progress):
-        article_id = row["id"]
-        doi = row["doi"]
-        if not doi:
-            not_available += 1
-            continue
-        try:
-            # Tenter Unpaywall
-            unpaywall_url = f"https://api.unpaywall.org/v2/{doi}?email=literev@gesica.ch"
-            req = urllib.request.Request(unpaywall_url, headers={"User-Agent": "LiteRev/1.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read())
-            oa_url = None
-            if data.get("is_oa") and data.get("best_oa_location"):
-                oa_url = data["best_oa_location"].get("url_for_pdf") or data["best_oa_location"].get("url")
-            if oa_url:
-                # ── Un LIEN n'est pas un texte ───────────────────────────────
-                # On posait `has_fulltext = true` et on écrasait `url`, sans stocker une
-                # ligne de texte. Le panneau annonçait ensuite « couverture texte
-                # intégral 2 582 sur 9 493 » et un relecteur en concluait que le système
-                # détenait le texte de 2 582 articles ; pour au moins 28 d'entre eux il
-                # ne détenait qu'une adresse. L'extraction, elle, se fiait au même
-                # drapeau pour décider qu'il y avait quelque chose à lire.
-                # Le lien a sa propre colonne, et ne touche plus ni le drapeau ni `url`.
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        UPDATE literature_document
-                        SET oa_url = :url, oa_url_found_at = NOW(),
-                            url = COALESCE(NULLIF(TRIM(COALESCE(url, '')), ''), :url)
-                        WHERE id = :article_id
-                    """), {"url": oa_url, "article_id": article_id})
-                fetched += 1
-            else:
-                not_available += 1
-        except Exception as e:
-            logger.warning(f"Fulltext fetch error article {article_id}: {e}")
-            errors += 1
-
-    # Ce lot trouve des LIENS : il annonçait « N textes intégraux récupérés » pour des
-    # adresses dont aucune ligne de texte n'était stockée.
+    res = download_fulltext(rows, progress=_progress)
     return {
-        "fetched": fetched,
-        "not_available": not_available,
-        "errors": errors,
-        "message": f"{fetched} liens d'accès ouvert trouvés, {not_available} non disponibles, {errors} erreurs",
+        "fetched": res["fetched"],
+        "not_available": res["failed"],
+        "errors": 0,
+        "total": total,
+        "message": f"{res['fetched']} textes intégraux téléchargés sur {total} articles sans texte, "
+                   f"{res['failed']} sans accès ouvert lisible",
     }
 
 
@@ -387,7 +344,9 @@ def _scope_counts_sql() -> str:
     _ft_chunk = ("EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = ld.id"
                  " AND c.chunk_type IN ('fulltext_section', 'full_text'))")
     done_ft = _ft_chunk
-    todo_ft = f"NOT {_ft_chunk} AND ld.doi IS NOT NULL"
+    # Le lot télécharge aussi sans DOI (PMID, PMCID, identifiant OpenAlex) : tout article
+    # sans texte est à faire.
+    todo_ft = f"NOT {_ft_chunk}"
     cols = []
     for scope in SCOPES:
         gate = scenario_scope_sql(scope)
@@ -807,8 +766,8 @@ def start_metadata_batch(scenario_id: Optional[str] = None, limit: int = 0,
 def start_fulltext_batch(scenario_id: Optional[str] = None, limit: int = 0,
                          scope: Optional[str] = None, wait: bool = False,
                          _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Les liens d'accès ouvert (Unpaywall, par DOI), en arrière-plan ; mêmes paramètres
-    que /pico/extract. Aucun texte n'est téléchargé ici : la réponse compte des liens."""
+    """Le texte intégral en accès ouvert, téléchargé et rangé, en arrière-plan ; mêmes
+    paramètres que /pico/extract. La réponse compte des textes, pas des liens."""
     return start_enrichment_batch("fulltext", scenario_id, limit, scope, wait)
 
 

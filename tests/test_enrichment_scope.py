@@ -216,10 +216,11 @@ def test_an_article_that_failed_three_times_is_not_billed_again(seeded, db_conn)
     assert s["pico"]["todo"] == 2
 
 
-def test_full_text_only_counts_what_it_could_fetch(seeded):
-    """No DOI, nothing to try: article 6 is relevant and still not a candidate."""
+def test_full_text_counts_every_article_without_a_text(seeded):
+    """The batch downloads now, and not only by DOI: PMC by PMID, OpenAlex by its id,
+    Semantic Scholar by PMID. Article 6 has no DOI and is a candidate all the same."""
     s = main.get_enrichment_status(scenario_id=SID, scope="relevant")
-    assert s["fulltext"]["todo"] == 2      # 1 and 2 have a DOI, 6 does not
+    assert s["fulltext"]["todo"] == 3      # 1, 2 and 6: none holds a full-text chunk
 
 
 def test_the_scope_follows_the_scenario_threshold(seeded, db_conn):
@@ -278,25 +279,27 @@ def test_a_weak_extraction_is_not_counted_as_coverage_corpus_wide_either(seeded,
 
 # ── the pipeline's own enrichment, as a setting ──────────────────────────────
 
-def test_the_pipeline_enriches_the_whole_scenario_by_default(monkeypatch):
-    """The map half is what the rule "every extraction reads all the relevant
-    articles" rests on: narrowing it is a choice someone makes, never a default."""
+def test_the_pipeline_enriches_the_relevant_subset_by_default(monkeypatch):
+    """Erol's decision of 12 October 2026: the pipeline after a search enriched the whole
+    scenario (17,510 articles for HPAI_last, 1,075 of them relevant). The rule "every
+    extraction reads all the relevant articles" holds: the background PICO covers what a
+    lowered threshold makes relevant, and the panel says what is left on either scope."""
     monkeypatch.delenv("PIPELINE_ENRICH_SCOPE", raising=False)
-    from api.scenario_store import pipeline_enrich_scope
-    assert pipeline_enrich_scope() == "all"
-    assert "similarity_threshold" not in main._enrich_gate()
-
-
-def test_the_pipeline_can_be_held_to_the_relevant_subset(monkeypatch):
-    monkeypatch.setenv("PIPELINE_ENRICH_SCOPE", "relevant")
     from api.scenario_store import pipeline_enrich_scope
     assert pipeline_enrich_scope() == "relevant"
     assert "similarity_threshold" in main._enrich_gate()
 
 
-def test_an_unreadable_setting_keeps_the_whole_scenario(monkeypatch):
-    """A typo in an environment variable must not quietly stop extracting."""
+def test_the_pipeline_can_cover_the_whole_scenario(monkeypatch):
+    monkeypatch.setenv("PIPELINE_ENRICH_SCOPE", "all")
+    from api.scenario_store import pipeline_enrich_scope
+    assert pipeline_enrich_scope() == "all"
+    assert "similarity_threshold" not in main._enrich_gate()
+
+
+def test_an_unreadable_setting_keeps_the_default_scope(monkeypatch):
+    """A typo in an environment variable keeps the default, the relevant subset."""
     for junk in ("", "  ", "RELEVENT", "true", "0"):
         monkeypatch.setenv("PIPELINE_ENRICH_SCOPE", junk)
         from api.scenario_store import pipeline_enrich_scope
-        assert pipeline_enrich_scope() == "all", junk
+        assert pipeline_enrich_scope() == "relevant", junk

@@ -3,8 +3,9 @@ NUTS code.
 
 The resolver is built to be conservative, and these tests pin the ways a naive one goes wrong: a bird
 read as a country, two countries read as one, a region guessed from a name that exists in several
-places, and a code made up where the list does not know the region. The official list is loaded
-from a small CSV in the shape Eurostat publishes."""
+places, a code made up where the list does not know the region, a short name read inside a longer
+one (Mexico in New Mexico, US in Belarus), and a continent given the article's country. The official
+list is loaded from a small CSV in the shape Eurostat publishes."""
 import io
 
 import pytest
@@ -26,12 +27,15 @@ def _r(place, hint=None, index=BUILTIN):
 def test_places_fold_to_plain_ascii_words():
     assert G.fold("Baden-Württemberg, Germany") == "baden wurttemberg germany"
     assert G.fold("Valle d'Aosta") == "valle d aosta" and G.fold(None) == ""
+    assert G.fold("Trinidad & Tobago") == "trinidad and tobago"                              # "&" joins a list, as "and"
+    assert G.fold("Hong Kong; China") == "hong kong and china"                                  # so does ";"
+    assert G.fold("Valle d\u2019Aosta") == G.fold("Valle d'Aosta")                               # a typographic apostrophe
 
 
 def test_every_country_with_a_nuts_code_is_known_and_two_codes_differ_from_iso():
     assert all(iso in G.COUNTRY_NAME for iso in G._NUTS_ISO)
-    assert G.nuts0_of("GR") == "EL" and G.nuts0_of("GB") == "UK" and G.nuts0_of("DE") == "DE"
-    assert G.nuts0_of("VN") is None and G.nuts0_of(None) is None
+    assert G.nuts0_of("GR") == "EL" and G.nuts0_of("GB") == "UK" and G.nuts0_of("DE") == "DE" and G.nuts0_of("TR") == "TR"
+    assert G.nuts0_of("VN") is None and G.nuts0_of("HK") is None and G.nuts0_of(None) is None
     assert G.iso_of_nuts0("EL") == "GR" and G.iso_of_nuts0("UK") == "GB" and G.iso_of_nuts0("FR") == "FR"
 
 
@@ -41,9 +45,30 @@ def test_a_country_is_recognised_in_several_languages():
         assert _r(place)["country"] == iso, place
 
 
-def test_turkey_the_bird_is_never_a_country():
+def test_turkey_the_bird_is_not_turkiye_the_country():
     assert _r("a commercial farm keeping turkeys and ducks")["country"] is None
     assert _r("Turkey")["country"] is None
+    assert _r("Ankara, Türkiye")["country"] == "TR" and _r("Republic of Turkey")["country"] == "TR"
+    # Written as a country, it is one: the 2006 human cases of Dogubeyazit and Van were unresolved.
+    assert _r("Dogubeyazit and Van, Turkey")["country"] == "TR" and _r("Dogubayazit and Van, Eastern Turkey")["country"] == "TR"
+    assert _r("Azerbaijan, Indonesia, Pakistan and Turkey")["several_countries"] is True
+    # Still the bird: first word, a bird word before it, any word after it.
+    for place, iso in (("Turkey farms, Minnesota", "US"), ("commercial Turkey farms, Minnesota", "US"), ("Iowa, Turkey Creek", "US"),
+                       ("wild Turkey, Ohio", "US")):
+        assert _r(place)["country"] == iso, place
+
+
+def test_a_semicolon_lists_places_and_a_typographic_apostrophe_is_an_apostrophe():
+    assert _r("Hong Kong; China")["several_countries"] is True and _r("Hong Kong, China")["country"] == "HK"
+    assert _r("Lao People\u2019s Democratic Republic")["country"] == "LA"
+
+
+def test_the_cities_and_places_named_in_the_hpai_scenarios_resolve():
+    for place, iso in (("Baiyin City", "CN"), ("Yangquan", "CN"), ("Nanchong City", "CN"), ("Zhaoqing", "CN"), ("Yangjiang City", "CN"),
+                       ("Taipei City", "TW"), ("Kowloon", "HK"), ("Inner Niger Delta", "ML"), ("West Azerbaijan Province", "IR"),
+                       ("Jamaica Bay, New York", "US")):
+        assert _r(place)["country"] == iso, place
+    assert _r("Jordan Valley")["reason"] == "multi_country_area" and _r("Bermuda grass pastures")["country"] is None
 
 
 def test_two_countries_are_several_countries_not_a_guess():
@@ -55,6 +80,204 @@ def test_two_countries_are_several_countries_not_a_guess():
 def test_a_word_only_matches_whole_words():
     assert _r("Chadwick")["country"] is None and _r("Marseille")["country"] is None
     assert _r("Poland")["country"] == "PL" and _r("Polandia")["country"] is None
+
+
+# ── Every country, its abbreviations, the places inside one ─────────────────
+#: ISO 3166-1, written out here apart from the table it checks: every code and its common English
+#: name. Three have a safer name here; their usual one is pinned as unresolved further down.
+ISO_3166 = {
+    "AD": "Andorra", "AE": "United Arab Emirates", "AF": "Afghanistan", "AG": "Antigua and Barbuda", "AI": "Anguilla",
+    "AL": "Albania", "AM": "Armenia", "AO": "Angola", "AQ": "Antarctica", "AR": "Argentina", "AS": "American Samoa",
+    "AT": "Austria", "AU": "Australia", "AW": "Aruba", "AX": "Aland Islands", "AZ": "Azerbaijan",
+    "BA": "Bosnia and Herzegovina", "BB": "Barbados", "BD": "Bangladesh", "BE": "Belgium", "BF": "Burkina Faso",
+    "BG": "Bulgaria", "BH": "Bahrain", "BI": "Burundi", "BJ": "Benin", "BL": "St Barts", "BM": "Bermuda", "BN": "Brunei",
+    "BO": "Bolivia", "BQ": "Caribbean Netherlands", "BR": "Brazil", "BS": "Bahamas", "BT": "Bhutan", "BV": "Bouvet Island",
+    "BW": "Botswana", "BY": "Belarus", "BZ": "Belize", "CA": "Canada", "CC": "Cocos (Keeling) Islands",
+    "CD": "Democratic Republic of the Congo", "CF": "Central African Republic", "CG": "Republic of the Congo",
+    "CH": "Switzerland", "CI": "Côte d'Ivoire", "CK": "Cook Islands", "CL": "Chile", "CM": "Cameroon", "CN": "China",
+    "CO": "Colombia", "CR": "Costa Rica", "CU": "Cuba", "CV": "Cabo Verde", "CW": "Curaçao", "CX": "Christmas Island",
+    "CY": "Cyprus", "CZ": "Czechia", "DE": "Germany", "DJ": "Djibouti", "DK": "Denmark", "DM": "Dominica",
+    "DO": "Dominican Republic", "DZ": "Algeria", "EC": "Ecuador", "EE": "Estonia", "EG": "Egypt", "EH": "Western Sahara",
+    "ER": "Eritrea", "ES": "Spain", "ET": "Ethiopia", "FI": "Finland", "FJ": "Fiji", "FK": "Falkland Islands",
+    "FM": "Federated States of Micronesia", "FO": "Faroe Islands", "FR": "France", "GA": "Gabon", "GB": "United Kingdom",
+    "GD": "Grenada", "GE": "Georgia", "GF": "French Guiana", "GG": "Guernsey", "GH": "Ghana", "GI": "Gibraltar",
+    "GL": "Greenland", "GM": "Gambia", "GN": "Guinea", "GP": "Guadeloupe", "GQ": "Equatorial Guinea", "GR": "Greece",
+    "GS": "South Georgia and the South Sandwich Islands", "GT": "Guatemala", "GU": "Guam", "GW": "Guinea-Bissau",
+    "GY": "Guyana", "HK": "Hong Kong", "HM": "Heard Island and McDonald Islands", "HN": "Honduras", "HR": "Croatia",
+    "HT": "Haiti", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland", "IL": "Israel", "IM": "Isle of Man", "IN": "India",
+    "IO": "British Indian Ocean Territory", "IQ": "Iraq", "IR": "Iran", "IS": "Iceland", "IT": "Italy", "JE": "Jersey",
+    "JM": "Jamaica", "JO": "Jordan", "JP": "Japan", "KE": "Kenya", "KG": "Kyrgyzstan", "KH": "Cambodia", "KI": "Kiribati",
+    "KM": "Comoros", "KN": "Saint Kitts and Nevis", "KP": "North Korea", "KR": "South Korea", "KW": "Kuwait",
+    "KY": "Cayman Islands", "KZ": "Kazakhstan", "LA": "Laos", "LB": "Lebanon", "LC": "Saint Lucia", "LI": "Liechtenstein",
+    "LK": "Sri Lanka", "LR": "Liberia", "LS": "Lesotho", "LT": "Lithuania", "LU": "Luxembourg", "LV": "Latvia",
+    "LY": "Libya", "MA": "Morocco", "MC": "Monaco", "MD": "Moldova", "ME": "Montenegro",
+    "MF": "Saint Martin (French part)", "MG": "Madagascar", "MH": "Marshall Islands", "MK": "North Macedonia",
+    "ML": "Mali", "MM": "Myanmar", "MN": "Mongolia", "MO": "Macao", "MP": "Northern Mariana Islands", "MQ": "Martinique",
+    "MR": "Mauritania", "MS": "Montserrat", "MT": "Malta", "MU": "Mauritius", "MV": "Maldives", "MW": "Malawi",
+    "MX": "Mexico", "MY": "Malaysia", "MZ": "Mozambique", "NA": "Namibia", "NC": "New Caledonia", "NE": "Niger",
+    "NF": "Norfolk Island", "NG": "Nigeria", "NI": "Nicaragua", "NL": "Netherlands", "NO": "Norway", "NP": "Nepal",
+    "NR": "Nauru", "NU": "Niue", "NZ": "New Zealand", "OM": "Oman", "PA": "Panama", "PE": "Peru", "PF": "French Polynesia",
+    "PG": "Papua New Guinea", "PH": "Philippines", "PK": "Pakistan", "PL": "Poland", "PM": "Saint Pierre and Miquelon",
+    "PN": "Pitcairn", "PR": "Puerto Rico", "PS": "Palestine", "PT": "Portugal", "PW": "Palau", "PY": "Paraguay",
+    "QA": "Qatar", "RE": "Réunion", "RO": "Romania", "RS": "Serbia", "RU": "Russia", "RW": "Rwanda", "SA": "Saudi Arabia",
+    "SB": "Solomon Islands", "SC": "Seychelles", "SD": "Sudan", "SE": "Sweden", "SG": "Singapore", "SH": "Saint Helena",
+    "SI": "Slovenia", "SJ": "Svalbard and Jan Mayen", "SK": "Slovakia", "SL": "Sierra Leone", "SM": "San Marino",
+    "SN": "Senegal", "SO": "Somalia", "SR": "Suriname", "SS": "South Sudan", "ST": "Sao Tome and Principe",
+    "SV": "El Salvador", "SX": "Sint Maarten", "SY": "Syria", "SZ": "Eswatini", "TC": "Turks and Caicos Islands",
+    "TD": "Chad", "TF": "French Southern Territories", "TG": "Togo", "TH": "Thailand", "TJ": "Tajikistan", "TK": "Tokelau",
+    "TL": "Timor-Leste", "TM": "Turkmenistan", "TN": "Tunisia", "TO": "Tonga", "TR": "Türkiye",
+    "TT": "Trinidad and Tobago", "TV": "Tuvalu", "TW": "Taiwan", "TZ": "Tanzania", "UA": "Ukraine", "UG": "Uganda",
+    "UM": "United States Minor Outlying Islands", "US": "United States", "UY": "Uruguay", "UZ": "Uzbekistan",
+    "VA": "Vatican City", "VC": "Saint Vincent and the Grenadines", "VE": "Venezuela", "VG": "British Virgin Islands",
+    "VI": "US Virgin Islands", "VN": "Vietnam", "VU": "Vanuatu", "WF": "Wallis and Futuna", "WS": "Samoa", "YE": "Yemen",
+    "YT": "Mayotte", "ZA": "South Africa", "ZM": "Zambia", "ZW": "Zimbabwe",
+}
+#: The six NUTS counts inside a member state: France's overseas departments and the Aland Islands.
+COUNTED_IN = {"GP": "FR", "MQ": "FR", "GF": "FR", "RE": "FR", "YT": "FR", "AX": "FI"}
+
+
+def test_every_iso_3166_country_resolves_by_its_common_english_name():
+    assert len(ISO_3166) == 249
+    assert set(G.COUNTRY_NAME) | set(COUNTED_IN) == set(ISO_3166) | {"XK"}          # and Kosovo, the EU's XK
+    assert {iso: parent for iso, (parent, _n) in G._COUNTED_IN.items()} == COUNTED_IN
+    for iso, name in ISO_3166.items():
+        assert _r(name)["country"] == COUNTED_IN.get(iso, iso), name
+    assert _r("Reunion")["nuts0"] == "FR" and _r("Kosovo")["country"] == "XK"
+
+
+def test_names_kept_out_on_purpose_resolve_to_no_country():
+    # Turkey is a bird, Congo alone is two countries, Saint-Barthelemy and Saint-Martin are also villages in
+    # France, and Island, Iceland in German, is any island.
+    for place in ("Turkey", "Congo", "Saint-Barthélemy", "Saint-Martin-de-Seignanx", "Island"):
+        assert _r(place)["country"] is None, place
+    assert _r("Vancouver Island, Canada")["country"] == "CA" and _r("Long Island, New York")["country"] == "US"
+
+
+def test_the_usual_abbreviations_and_other_names():
+    for place, iso in (("U.S.", "US"), ("US", "US"), ("USA", "US"), ("U.S.A.", "US"), ("United States of America", "US"),
+                       ("UK", "GB"), ("U.K.", "GB"), ("UAE", "AE"), ("U.A.E.", "AE"), ("PRC", "CN"), ("P.R. China", "CN"),
+                       ("People's Republic of China", "CN"), ("DRC", "CD"), ("DR Congo", "CD"), ("DPRK", "KP"), ("ROK", "KR"),
+                       ("Korea", "KR"), ("KSA", "SA"), ("PNG", "PG"), ("NZ", "NZ"), ("HKSAR", "HK"), ("Hong Kong SAR", "HK"),
+                       ("Macau", "MO"), ("Lao PDR", "LA"), ("BiH", "BA"), ("Ivory Coast", "CI"), ("Burma", "MM"),
+                       ("East Timor", "TL"), ("Swaziland", "SZ"), ("Cape Verde", "CV"), ("Viet Nam", "VN"),
+                       ("Russian Federation", "RU"), ("Taiwan, Province of China", "TW"), ("Korea, Republic of", "KR"),
+                       ("Korea, Democratic People's Republic of", "KP"), ("Republic of Guinea-Bissau", "GW"),
+                       ("Turks & Caicos", "TC"), ("Wallis & Futuna", "WF")):
+        assert _r(place)["country"] == iso, place
+
+
+def test_the_places_production_left_unresolved_now_resolve():
+    # Scenario HPAI_last: 578 of 1,013 extracted articles resolved, and these places were among the rest.
+    for place, iso in (("Hong Kong", "HK"), ("Taiwan", "TW"), ("United Arab Emirates", "AE"), ("U.S.", "US"), ("US", "US"),
+                       ("Cuba", "CU"), ("Peru", "PE"), ("Mongolia", "MN"), ("Guangzhou", "CN"), ("Ningxia", "CN"),
+                       ("California", "US"), ("Iowa", "US"), ("Colorado", "US"), ("Alaska", "US"), ("Macao", "MO")):
+        r = _r(place)
+        assert (r["country"], r["method"], r["reason"], r["nuts0"], r["level"]) == (iso, "country", None, None, None), place
+
+
+def test_an_abbreviation_only_matches_a_whole_word():
+    # US is not inside Belarus, Cyprus, Russia or Australia, UK not inside Ukraine.
+    for place, iso in (("Belarus", "BY"), ("Cyprus", "CY"), ("Mauritius", "MU"), ("Russia", "RU"), ("Australia", "AU"),
+                       ("Ukraine", "UA"), ("Minsk, Belarus", "BY"), ("Iowa, US", "US"), ("Busan, Korea", "KR")):
+        assert _r(place)["country"] == iso, place
+    for place in ("Columbus", "USDA field station", "avian influenza virus surveillance", "Uskudar", "Brus", "Ukhta"):
+        assert _r(place)["country"] is None, place
+    assert _r("U.S.-Mexico border")["several_countries"] is True
+
+
+US_STATES = ("Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida",
+             "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland",
+             "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire",
+             "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon",
+             "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont",
+             "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming")
+CA_PROVINCES = ("Alberta", "British Columbia", "Manitoba", "New Brunswick", "Newfoundland and Labrador", "Nova Scotia", "Ontario",
+                "Prince Edward Island", "Québec", "Saskatchewan", "Northwest Territories", "Nunavut", "Yukon")
+CN_PROVINCES = ("Anhui", "Beijing", "Chongqing", "Fujian", "Gansu", "Guangdong", "Guangxi", "Guizhou", "Hainan", "Hebei",
+                "Heilongjiang", "Henan", "Hubei", "Hunan", "Inner Mongolia", "Jiangsu", "Jiangxi", "Jilin", "Liaoning", "Ningxia",
+                "Qinghai", "Shaanxi", "Shandong", "Shanghai", "Shanxi", "Sichuan", "Tianjin", "Tibet", "Xinjiang", "Yunnan",
+                "Zhejiang", "Guangzhou", "Shenzhen", "Wuhan", "Nanjing", "Hangzhou", "Xi'an", "Urumqi", "Kunming", "Changsha")
+
+
+def test_a_state_or_a_province_is_its_country():
+    assert len(US_STATES) == 50
+    for state in US_STATES:
+        assert _r(state)["country"] == ("GE" if state == "Georgia" else "US"), state      # Georgia alone: see below
+        assert _r(f"{state}, USA")["country"] == "US", state
+    for province in CA_PROVINCES:
+        assert _r(province)["country"] == "CA" and _r(f"{province}, Canada")["country"] == "CA", province
+    for province in CN_PROVINCES:
+        assert _r(province)["country"] == "CN" and _r(f"{province}, China")["country"] == "CN", province
+    r = _r("Guangzhou, Guangdong, China")
+    assert (r["country"], r["method"], r["nuts1"]) == ("CN", "country", None)                # a country, never a NUTS code
+
+
+def test_a_longer_name_takes_its_words():
+    # The shorter name inside a longer one is not read: no Mexico in New Mexico, no Ireland in Northern Ireland.
+    for place, iso in (("New Mexico", "US"), ("New Jersey", "US"), ("New England", "US"), ("Inner Mongolia, China", "CN"),
+                       ("Belfast, Northern Ireland", "GB"), ("New South Wales, Australia", "AU"), ("Papua New Guinea", "PG"),
+                       ("Guinea-Bissau", "GW"), ("Equatorial Guinea", "GQ"), ("South Sudan", "SS"), ("American Samoa", "AS"),
+                       ("Democratic Republic of the Congo", "CD"), ("Democratic People's Republic of Korea", "KP"),
+                       ("Baja California, Mexico", "MX"), ("Rhode Island", "US"), ("British Columbia", "CA"),
+                       ("Yukon-Kuskokwim Delta, Alaska", "US"), ("Central Macedonia, Greece", "GR"), ("Niger Delta", "NG")):
+        r = _r(place)
+        assert (r["country"], r["several_countries"]) == (iso, False), place
+
+
+def test_georgia_is_the_country_unless_the_place_or_the_article_names_the_us():
+    for place, hint, iso in (("Georgia", None, "GE"), ("Tbilisi, Georgia", None, "GE"), ("Georgia", "DE", "GE"),
+                             ("Atlanta, Georgia, USA", None, "US"), ("Georgia, US", None, "US"), ("Georgia and Alabama", None, "US"),
+                             ("Georgia", "US", "US"), ("Georgia, Caucasus", "US", "GE"), ("South Georgia", None, "GS"),
+                             ("Strait of Georgia, British Columbia", None, "CA"), ("Montana", None, "US"),
+                             ("Montana, Bulgaria", None, "BG"), ("Florida, Uruguay", None, "UY")):
+        assert _r(place, hint)["country"] == iso, (place, hint)
+    # Named with another country, the country stands: two countries, not a state.
+    assert _r("Georgia and Armenia")["several_countries"] is True
+
+
+def test_a_territory_written_with_its_country_is_the_territory():
+    for place, iso in (("Hong Kong, China", "HK"), ("Hong Kong SAR, People's Republic of China", "HK"), ("Kowloon, Hong Kong, PRC", "HK"),
+                       ("Macau, China", "MO"), ("Taiwan, China", "TW"), ("San Juan, Puerto Rico, USA", "PR"),
+                       ("Nuuk, Greenland, Denmark", "GL"), ("Bermuda (UK)", "BM")):
+        assert _r(place)["country"] == iso, place
+    # A list, or another place in between, keeps them two.
+    for place in ("Hong Kong and mainland China", "mainland China, Hong Kong", "China and Hong Kong", "Hong Kong, Guangzhou, China",
+                  "Guangdong and Hong Kong", "Taiwan and China", "Puerto Rico and the United States", "Hong Kong & China"):
+        assert _r(place)["several_countries"] is True, place
+
+
+def test_a_continent_or_a_region_of_several_countries_stays_unresolved_with_its_reason():
+    for place in ("Europe", "Southeast Asia", "global", "worldwide", "Sub-Saharan Africa", "Latin America", "European Union",
+                  "multiple countries", "Middle East", "Gulf of Mexico", "the Wadden Sea"):
+        r = _r(place)
+        assert (r["country"], r["method"], r["reason"], r["several_countries"]) == (None, "unresolved", "multi_country_area", False), place
+        assert _r(place, "DE")["country"] is None, place                     # never the article's own country
+    # Named with a country, the country stands, and a NUTS region still resolves.
+    assert _r("Netherlands, Europe")["country"] == "NL" and _r("Gulf of Mexico, Texas")["country"] == "US"
+    assert _r("Lombardy, southern Europe")["nuts2"] == "ITC4"
+
+
+def test_every_unresolved_place_says_why():
+    for place, hint, reason in (("", None, "no_place"), (None, None, "no_place"), ("Not reported", None, "no_place"),
+                                ("N/A", None, "no_place"), ("Italy and France", None, "several_countries"),
+                                ("Europe", None, "multi_country_area"), ("somewhere rural", None, "not_recognised"),
+                                ("Germany", None, None), ("", "DE", None), ("somewhere rural", "FR", None)):
+        assert _r(place, hint)["reason"] == reason, (place, hint)
+    assert _r("Not reported", "DE")["method"] == "article_country"                         # as an empty place would
+    assert G.UNRESOLVED_REASONS == ("no_place", "several_countries", "multi_country_area", "not_recognised")
+
+
+def test_a_bird_a_breed_or_a_lab_animal_is_not_a_place():
+    for place, iso in (("a guinea fowl farm, Nigeria", "NG"), ("Canada geese, Ohio", "US"), ("Jersey cows, Texas", "US"),
+                       ("Rhode Island Red hens, Kenya", "KE"), ("Maine-et-Loire, France", "FR"), ("Sierra Nevada, Spain", "ES"),
+                       ("Sierra Nevada, California", "US"), ("Reunion, France", "FR")):
+        assert _r(place)["country"] == iso, place
+    for place in ("guinea pigs, laboratory", "a guinea fowl farm", "Canada geese", "Saint-Barthélemy-d'Anjou"):
+        assert _r(place)["country"] is None, place
+
+
+def test_no_name_is_claimed_by_two_tables():
+    assert G._CLAIMED_TWICE == []
 
 
 # ── Regions ─────────────────────────────────────────────────────────────────
@@ -164,8 +387,23 @@ def test_the_geography_counts_every_relevant_extracted_article(nuts_clean):
     assert set(by) == {"DE", "IT"}                                    # not France, not Spain: not relevant
     assert by["DE"]["n_papers"] == 1 and by["DE"]["regions"] == [{"code": "DE1", "n_papers": 1, "name": "Baden-Wuerttemberg"}]
     assert by["IT"]["regions"][0]["code"] == "ITC4" and by["IT"]["nuts0"] == "IT"
-    assert g["unresolved"] == [{"location": "nowhere in particular", "n": 1}]
+    assert g["unresolved"] == [{"location": "nowhere in particular", "n": 1, "reason": "not_recognised"}]
     assert c.get("/user-scenarios/nope/extraction/geography").status_code == 404
+
+
+def test_the_geography_says_why_a_place_does_not_resolve(nuts_clean):
+    c = _client()
+    # "Europe" stays unresolved even though the article's own country is Germany.
+    _set_places(nuts_clean, {9701: ("Hong Kong, China", None), 9702: ("Europe", "DE"), 9703: ("", None)})
+    g = c.get(f"/user-scenarios/{SID}/extraction/geography").json()
+    assert (g["n_papers"], g["n_resolved"], g["n_unresolved"], g["n_several_countries"]) == (3, 1, 2, 0)
+    assert [(x["iso2"], x["name"], x["nuts0"], x["n_papers"]) for x in g["countries"]] == [("HK", "Hong Kong", None, 1)]
+    assert g["unresolved_by_reason"] == {"no_place": 1, "several_countries": 0, "multi_country_area": 1, "not_recognised": 0}
+    assert g["unresolved"] == [{"location": "(no place stated)", "n": 1, "reason": "no_place"},
+                               {"location": "Europe", "n": 1, "reason": "multi_country_area"}]
+    md = c.get(f"/user-scenarios/{SID}/extraction/report", params={"format": "md"}).text
+    assert ("2 articles do not resolve to a single country: no place stated 1, several countries named 0, a continent or a "
+            "region spanning several countries 1, a place the list does not know 0.") in md
 
 
 def test_the_ref_sheet_carries_the_nuts_codes(nuts_clean):

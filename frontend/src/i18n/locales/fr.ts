@@ -256,6 +256,7 @@ export const fr = {
     pipelinePrefix: "Pipeline :",
     pipelineInProgress: "en cours",
     pipelineCountsProvisional: "nombre d'articles provisoire jusqu'à la fin du pipeline",
+    pipelineWaitingThreshold: "En attente du seuil de pertinence : réglez-le, puis relancez le pipeline. Le texte intégral, le PICO et les métadonnées couvrent les articles pertinents.",
     searchRunning: "Recherche en cours…",
     predictiveModel: "Modèle Prédictif",
     openModel: "Prédire / ouvrir le modèle",
@@ -1124,9 +1125,9 @@ export const fr = {
       metadataLabel: "Enrichissement Métadonnées",
       metadataDesc:
         "Complète le type d'étude, la taille d'échantillon, le pays, le risque de biais via LLM.",
-      fulltextLabel: "Liens d'accès ouvert",
+      fulltextLabel: "Textes intégraux en accès ouvert",
       fulltextDesc:
-        "Cherche via Unpaywall (DOI requis) un lien vers la version en accès ouvert de chaque article. Il ne télécharge pas de texte : l'étape texte intégral du pipeline lira ces liens.",
+        "Télécharge le texte en accès ouvert de chaque article qui n'en a pas (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex) et le range. La prochaine extraction relit les articles qui ont gagné un texte.",
       title: "Enrichissement LLM",
       subtitle: "Lancez les enrichissements automatiques sur l'ensemble du corpus",
       subtitleScenario: "Lancez les enrichissements sur ce scénario",
@@ -1142,7 +1143,7 @@ export const fr = {
       cappedBy: "sur {n} en attente, le reste au prochain lancement",
       autoEnrichmentTitle: "Enrichissement automatique actif",
       autoEnrichmentBody:
-        ": Le pipeline lance automatiquement l'extraction PICO et l'enrichissement des métadonnées lors de l'ingestion des articles. Utilisez les boutons ci-dessous uniquement pour compléter les articles qui auraient été manqués ou pour relancer un enrichissement spécifique.",
+        ": Après une recherche, le pipeline télécharge les textes intégraux et lance l'extraction PICO et l'enrichissement des métadonnées sur les articles pertinents, une fois le seuil choisi. Utilisez les boutons ci-dessous pour compléter ce qui manque, ou pour couvrir tout le scénario.",
       batchSizeLabel: "Taille du lot :",
       batchSizeAll: "tous",
       articlesPerRun: "articles par exécution (vide : tout ce qui reste à traiter)",
@@ -1152,7 +1153,7 @@ export const fr = {
       launchLinks: "Lancer ({n} articles, {cap} au plus par exécution)",
       progress: "Sur le serveur : {done} sur {total} traités",
       resultExtracted: "{n} articles enrichis, {skipped} ignorés, {errors} erreurs.",
-      resultLinks: "{n} liens d'accès ouvert trouvés, {na} non disponibles, {errors} erreurs.",
+      resultTexts: "{n} textes intégraux téléchargés, {na} sans version en accès ouvert lisible, {errors} erreurs.",
     },
     seuil: {
       saveFailed: "Le seuil n'a pas été enregistré : réessayez (clé d'API ou réseau).",
@@ -1561,7 +1562,13 @@ export const fr = {
         upload: "Charger le fichier NUTS d'Eurostat (CSV)",
         needsKey: "Charger la liste NUTS demande la clé admin.",
         loaded: "{n} régions chargées dans {c} pays.",
-        unresolved: "{n} articles ne nomment aucun lieu résoluble, ou nomment plusieurs pays",
+        unresolved: "{n} articles ne se résolvent pas en un seul pays",
+        reason: {
+          no_place: "aucun lieu indiqué",
+          several_countries: "plusieurs pays",
+          multi_country_area: "un continent ou une région à cheval sur plusieurs pays",
+          not_recognised: "non reconnu",
+        },
       },
       colReview: "Relecture",
       obsReview: "Relecture",
