@@ -87,6 +87,10 @@ In platform.openai.com:
   can never exceed that project's cap.
 - Belt-and-suspenders already in code: set `PICO_AUTOEXTRACT_ENABLED=0` in
   `/etc/literev-api.env` (+ restart) to hard-stop the background PICO worker instantly.
+- The background PICO worker only summarizes articles relevant to a scenario (above its
+  threshold, or included by hand), not every article a search returned. Until someone
+  chooses a scenario's threshold, the starting 0.45 applies: choose it early on a large
+  corpus.
 
 ---
 

@@ -459,6 +459,47 @@ def _backfill_abstracts_once(limit: int = 50, http_get=None) -> dict[str, int]:
     return stats
 
 
+def background_pico_sql() -> str:
+    """Le lot du PICO automatique : les articles PERTINENTS d'au moins un scénario.
+
+    Le worker extrayait le PICO de TOUT article lié à un scénario, pertinent ou non. Sur
+    HPAI_last : 15 547 PICO écrits pour 1 075 articles pertinents, soit quatorze appels
+    payés pour un qui sert. Le PICO ne sert qu'au sous-ensemble pertinent (digest, brief,
+    extraction) ; la porte est celle de tout le reste (`scenario_scope_sql('relevant')`),
+    avec le seuil de CHAQUE scénario lu dans la requête. Un article qui devient pertinent
+    (seuil abaissé, inclusion à la main) entre au cycle suivant ; un lot explicite
+    (POST /pico/extract, portée « all ») reste possible pour tout le corpus.
+
+    On extrait le PICO des articles sans PICO, PUIS on ré-extrait ceux dont le PICO venait
+    du résumé alors que le texte intégral est désormais disponible (pico_source !=
+    'fulltext'). Les articles jamais traités passent en premier. Pur : aucune connexion."""
+    from .scenario_store import scenario_scope_sql   # lazy: une seule définition de la porte
+    gate = scenario_scope_sql("relevant", doc="literature_document", link="ars", sid="ars.scenario_id")
+    return f"""
+        SELECT id, title, abstract, has_fulltext
+        FROM literature_document
+        WHERE project_context = 'literev'
+          AND abstract IS NOT NULL
+          AND LENGTH(abstract) > 50
+          AND COALESCE(pico_attempts, 0) < :max_attempts  -- borne les échecs déterministes
+          AND EXISTS (
+              SELECT 1 FROM article_scenarios ars
+              WHERE ars.document_id = literature_document.id
+                AND {gate}
+          )
+          AND (
+            pico_json IS NULL
+            OR (
+                has_fulltext IS TRUE
+                AND (pico_json->>'pico_source') IS DISTINCT FROM 'fulltext'
+                AND pico_fulltext_attempted IS NOT TRUE  -- une seule tentative
+            )
+          )
+        ORDER BY (pico_json IS NULL) DESC, id
+        LIMIT :lim
+    """
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     from .scenarios import _pipeline_jobs_lock, _user_scenario_pipeline_jobs  # lazy: scenarios is loaded after this module
@@ -607,7 +648,7 @@ def startup_event() -> None:
     # ── Worker d'enrichissement automatique (embedding + PICO) ──────────────
     # Tourne en permanence en arrière-plan. Chaque cycle :
     #   1. Embède tous les chunks title_abstract/fulltext_section sans embedding
-    #   2. Extrait le PICO pour tous les articles avec abstract mais sans pico_json
+    #   2. Extrait le PICO des articles PERTINENTS d'un scénario (background_pico_sql)
     def _background_enrichment_worker():
         import time as _time
         from llm_usage import MeteredOpenAI as _OAI_bg
@@ -780,36 +821,9 @@ def startup_event() -> None:
 
                 # ── 2. PICO ───────────────────────────────────────────────────
                 with engine.connect() as _conn:
-                    # On extrait le PICO des articles sans PICO, PUIS on ré-extrait
-                    # ceux dont le PICO venait du résumé alors que le texte intégral
-                    # est désormais disponible (pico_source != 'fulltext'). Les
-                    # articles jamais traités passent en premier.
-                    _pico_rows = _conn.execute(text("""
-                        SELECT id, title, abstract, has_fulltext
-                        FROM literature_document
-                        WHERE project_context = 'literev'
-                          AND abstract IS NOT NULL
-                          AND LENGTH(abstract) > 50
-                          AND COALESCE(pico_attempts, 0) < :max_attempts  -- borne les échecs déterministes
-                          -- PICO UNIQUEMENT pour les articles appartenant à un scénario
-                          -- réel (article_scenarios). Le PICO n'est affiché QUE par
-                          -- scénario : extraire les ~milliers de documents orphelins /
-                          -- hors-scénario du corpus était du pur gaspillage de tokens.
-                          AND EXISTS (
-                              SELECT 1 FROM article_scenarios ars
-                              WHERE ars.document_id = literature_document.id
-                          )
-                          AND (
-                            pico_json IS NULL
-                            OR (
-                                has_fulltext IS TRUE
-                                AND (pico_json->>'pico_source') IS DISTINCT FROM 'fulltext'
-                                AND pico_fulltext_attempted IS NOT TRUE  -- une seule tentative
-                            )
-                          )
-                        ORDER BY (pico_json IS NULL) DESC, id
-                        LIMIT :lim
-                    """), {"lim": _PICO_BATCH, "max_attempts": _PICO_MAX_ATTEMPTS}).mappings().fetchall()
+                    _pico_rows = _conn.execute(text(background_pico_sql()), {
+                        "lim": _PICO_BATCH, "max_attempts": _PICO_MAX_ATTEMPTS,
+                    }).mappings().fetchall()
 
                 # Coupe-circuit : PICO_AUTOEXTRACT_ENABLED=0 dans /etc/literev-api.env
                 # (puis restart) met en pause l'extraction PICO automatique sans
