@@ -55,8 +55,8 @@ and the interface says how many articles they draw.
 - `SEMANTIC_SCHOLAR_API_KEY` and `COHERE_API_KEY` are kept in the GitHub
   **environment "production"**, not as repository secrets. The deploy job writes them into
   the canonical file on every deploy, reading the first of their usual names that is set
-  (secret or variable: `S2_API_KEY`, `COHERE_KEY`...), and its log lists the names the
-  environment holds, never a value: read it there when a key seems missing. The manual
-  server command runs in "production-admin" and sees them empty.
+  (secret or variable: `S2_API_KEY`, `COHERE_KEY`...), and its log names the one that
+  held each key, or says none did, never a value: read it there when a key seems missing.
+  The manual server command runs in "production-admin" and sees them empty.
 - Never print, commit or paste a key: check presence, never values. More in
   `docs/ops-runbook.md`, "Keys".

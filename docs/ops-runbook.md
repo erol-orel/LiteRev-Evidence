@@ -389,10 +389,12 @@ GitHub holds the keys that reach the server through a workflow:
   names that is set, as a secret or a variable (`SEMANTIC_SCHOLAR_API_KEY`,
   `SEMANTIC_SCHOLAR_KEY`, `SEMANTICSCHOLAR_API_KEY`, `S2_API_KEY`, `S2_KEY`;
   `COHERE_API_KEY`, `COHERE_KEY`, `CO_API_KEY`). A key the environment does not hold
-  leaves the server's line as it is. The step's log lists the NAMES of the secrets and
-  variables the environment holds, never a value: the deploy of #353 found no
-  `SEMANTIC_SCHOLAR_API_KEY` there although the key had been saved in that environment,
-  and that list is how its real name is read.
+  leaves the server's line as it is. The step's log names the usual name that held each
+  key, or says that none did, never a value: the deploy of #353 found no
+  `SEMANTIC_SCHOLAR_API_KEY` there although the key had been saved in that environment.
+  If none of the usual names holds it, save it again under `SEMANTIC_SCHOLAR_API_KEY`
+  (a run that serialises the whole secrets context to list the names waits for a manual
+  approval, so the step does not).
 - the manual **server command** (`server-command.yml`) runs in the environment
   "production-admin": it sees `NCBI_API_KEY` and the SSH deploy secrets, and NOT the
   production environment's secrets. Its `set-s2-key` therefore finds the Semantic

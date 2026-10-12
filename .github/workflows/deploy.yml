@@ -139,37 +139,37 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          # Every secret and variable of this environment, as JSON, read below for their
-          # NAMES only: the deploy of #353 found no secret called SEMANTIC_SCHOLAR_API_KEY
-          # here although the key was saved in this environment, under a name nobody could
-          # see from outside (the API that lists names is closed to the sessions).
-          ALL_SECRETS: ${{ toJSON(secrets) }}
-          ALL_VARS: ${{ toJSON(vars) }}
+          # The key under each of its usual names, secret or variable: the deploy of #353 found
+          # no secret called SEMANTIC_SCHOLAR_API_KEY here although the key was saved in this
+          # environment, under a name nobody could see from outside (the API that lists names
+          # is closed to the sessions, and a run that serialises the whole secrets context
+          # waits for a manual approval). Only the NAME that held it is printed.
+          K1_SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+          K2_SEMANTIC_SCHOLAR_KEY: ${{ secrets.SEMANTIC_SCHOLAR_KEY }}
+          K3_SEMANTICSCHOLAR_API_KEY: ${{ secrets.SEMANTICSCHOLAR_API_KEY }}
+          K4_S2_API_KEY: ${{ secrets.S2_API_KEY }}
+          K5_S2_KEY: ${{ secrets.S2_KEY }}
+          K6_SEMANTIC_SCHOLAR_API_KEY_VAR: ${{ vars.SEMANTIC_SCHOLAR_API_KEY }}
+          K7_S2_API_KEY_VAR: ${{ vars.S2_API_KEY }}
+          C1_COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          C2_COHERE_KEY: ${{ secrets.COHERE_KEY }}
+          C3_CO_API_KEY: ${{ secrets.CO_API_KEY }}
+          C4_COHERE_API_KEY_VAR: ${{ vars.COHERE_API_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # The names this environment holds (never a value), and the key under the first of
-          # its usual names that is set, secret or variable.
-          eval "$(python3 - <<'PY'
-          import json, os, shlex
-          secrets = json.loads(os.environ.get("ALL_SECRETS") or "{}")
-          variables = json.loads(os.environ.get("ALL_VARS") or "{}")
-          print("echo " + shlex.quote("Secret names here: " + (", ".join(sorted(secrets)) or "none")) + " ;")
-          print("echo " + shlex.quote("Variable names here: " + (", ".join(sorted(variables)) or "none")) + " ;")
-          aliases = {"SEMANTIC_SCHOLAR_API_KEY": ("SEMANTIC_SCHOLAR_API_KEY", "SEMANTIC_SCHOLAR_KEY", "SEMANTICSCHOLAR_API_KEY",
-                                                  "S2_API_KEY", "S2_KEY"),
-                     "COHERE_API_KEY": ("COHERE_API_KEY", "COHERE_KEY", "CO_API_KEY")}
-          for target, names in aliases.items():
-              for n in names:
-                  value = secrets.get(n) or variables.get(n)
-                  if value:
-                      print(f"export {target}={shlex.quote(value)} ;")
-                      print("echo " + shlex.quote(f"{target}: read from {n}") + " ;")
-                      break
-          PY
-          )"
-          unset ALL_SECRETS ALL_VARS
+          # The first usual name that is set, for each key; its NAME is printed, never a value.
+          pick() {
+            local target=$1; shift
+            for n in "$@"; do
+              if [ -n "${!n:-}" ]; then export "$target=${!n}"; echo "$target: read from ${n#*_}"; return; fi
+            done
+            echo "$target: none of its usual names is set in this environment"
+          }
+          pick SEMANTIC_SCHOLAR_API_KEY K1_SEMANTIC_SCHOLAR_API_KEY K2_SEMANTIC_SCHOLAR_KEY K3_SEMANTICSCHOLAR_API_KEY \
+            K4_S2_API_KEY K5_S2_KEY K6_SEMANTIC_SCHOLAR_API_KEY_VAR K7_S2_API_KEY_VAR
+          pick COHERE_API_KEY C1_COHERE_API_KEY C2_COHERE_KEY C3_CO_API_KEY C4_COHERE_API_KEY_VAR
           {
             for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
               if [ -n "${!name:-}" ]; then printf 'export %s=%q\n' "$name" "${!name}"; fi
