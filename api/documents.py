@@ -270,7 +270,12 @@ def doi_work_key(doi: str | None) -> str | None:
     if not d:
         return None
     d = d.strip().lower()
-    d = re.sub(r"(?:/v|\.v)\d+$", "", d)
+    # Une version tient en un ou deux chiffres, et « /vN » est un segment à part, après un
+    # autre : chez MDPI, « 10.3390/v18040482 » est un article de Viruses, pas une version
+    # (le motif sans ces deux bornes ramenait tous les articles de Viruses à « 10.3390 »).
+    if d.count("/") >= 2:
+        d = re.sub(r"/v\d{1,2}$", "", d)
+    d = re.sub(r"\.v\d{1,2}$", "", d)
     if d.startswith("10.12688/"):
         d = re.sub(r"\.\d+$", "", d)
     return d or None

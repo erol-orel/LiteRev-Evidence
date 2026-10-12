@@ -34,6 +34,8 @@ TITLE = "live poultry exposure and public response to influenza a h7n9 in urban 
     ("10.6084/m9.figshare.1528105.v1", "10.6084/m9.figshare.1528105"),           # figshare
     ("10.12688/wellcomeopenres.23064.2", "10.12688/wellcomeopenres.23064"),      # F1000 : .N
     ("10.5555/upd.2024.2", "10.5555/upd.2024.2"),          # un numéro d'édition n'est pas une version
+    ("10.3390/v18040482", "10.3390/v18040482"),            # MDPI Viruses : « v » + numéro d'article
+    ("10.4314/bahpa.v61i2", "10.4314/bahpa.v61i2"),
     (None, None), ("", None),
 ])
 def test_the_work_doi_drops_punctuation_case_and_versions(raw, key):
@@ -81,6 +83,14 @@ def test_preprint_versions_join_each_other_when_nothing_is_published():
 def test_a_trailing_dot_is_the_same_doi():
     recs = [_rec(5, "10.1371/journal.pone.0073200"), _rec(9, "10.1371/journal.pone.0073200.")]
     assert same_work_survivors(recs) == {9: 5}
+
+
+def test_two_mdpi_articles_stay_two_works():
+    # Le motif de version sans bornes ramenait tous les articles de Viruses à « 10.3390 » :
+    # dix articles pertinents de HPAI_last se repliaient sur un seul.
+    recs = [_rec(107, "10.3390/v18040482", "next generation sequencing strategies during the 2024 2025"),
+            _rec(236468, "10.3390/v16091417", "characterization of avian influenza viruses detected in kenyan")]
+    assert same_work_survivors(recs) == {}
 
 
 def test_two_editions_with_one_title_stay_two_works():
