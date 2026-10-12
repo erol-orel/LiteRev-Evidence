@@ -6512,7 +6512,7 @@ export function EnrichmentSection({ scenarioId }: { scenarioId?: string }) {
     }
     const r = job.result ?? {};
     if (kind === "fulltext") {
-      return { msg: t("scenarioDetail.enrichment.resultLinks")
+      return { msg: t("scenarioDetail.enrichment.resultTexts")
         .replace("{n}", String(r.fetched ?? 0)).replace("{na}", String(r.not_available ?? 0))
         .replace("{errors}", String(r.errors ?? 0)), error: false };
     }

@@ -76,13 +76,17 @@ def test_a_failed_ncbi_call_is_none_not_an_exception(monkeypatch):
     assert P._ft_resolve_pmcid("31234567", None, None, "a@b.c") is None
 
 
-def test_the_fulltext_step_has_no_ncbi_call_of_its_own():
-    src = inspect.getsource(P._run_user_scenario_full_pipeline)
+def test_the_fulltext_download_has_no_ncbi_call_of_its_own():
+    """The download is the module-level `_fulltext_of` now (it lived in a closure of the full
+    pipeline), shared by the pipeline and the enrichment panel's full-text batch."""
+    src = inspect.getsource(P._fulltext_of)
     assert "ncbi.nlm.nih.gov" not in src, "un appel NCBI contourne encore le helper throttlé"
     assert "_ft_resolve_pmcid(" in src and "_ft_fetch_pmc_xml(" in src
+    assert "ncbi.nlm.nih.gov" not in inspect.getsource(P._run_user_scenario_full_pipeline)
     # Les gros PDF : 60 s pour les télécharger, 120 s pour pdftotext.
-    assert "_requests.get(pdf_url, timeout=60" in src
-    pdftotext = src[src.index('["pdftotext"'):]
+    pdf = inspect.getsource(P._extract_pdf_text_ft)
+    assert "_requests.get(pdf_url, timeout=60" in pdf
+    pdftotext = pdf[pdf.index('["pdftotext"'):]
     assert "timeout=120" in pdftotext[:200]
 
 

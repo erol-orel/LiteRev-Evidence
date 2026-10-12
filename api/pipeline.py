@@ -25,7 +25,8 @@ from .documents import (
     sanitize_db_text,
 )
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404, has_abstract_sql,
-                             pipeline_enrich_scope, scenario_scope_sql, scenario_search_mode)
+                             pipeline_enrich_scope, scenario_scope_sql, scenario_search_mode,
+                             scenario_threshold_info)
 from .search import (
     DOAJ_MAX_QUERY_CHARS,
     EXHAUSTIVE_MAX_PER_SOURCE,
@@ -238,6 +239,435 @@ def _ft_fetch_pmc_xml(pmcid: str):
     return _ft_ncbi_get(f"{_NCBI_EUTILS_FT}/efetch.fcgi",
                         {"db": "pmc", "id": pmcid.replace("PMC", ""), "rettype": "full", "retmode": "xml"},
                         timeout=30)
+
+
+# ── Le texte intégral en accès ouvert d'un article ──────────────────────────────
+# Il vivait dans une fermeture de `_run_user_scenario_full_pipeline` : seul le pipeline
+# complet savait télécharger un texte, et sur TOUT le corpus d'un scénario (17 510
+# articles pour HPAI_last, dont 1 075 pertinents), pendant que le lot « texte intégral »
+# du panneau d'enrichissement ne trouvait que des LIENS. Les mêmes fonctions servent
+# désormais aux deux (`download_fulltext`), sur la portée que l'appelant choisit.
+_EPMC_BASE_FT = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+_CHUNK_SIZE_FT = 4000
+_CHUNK_OVERLAP_FT = 400
+#: Les articles traités en parallèle : les appels NCBI restent espacés par le verrou partagé.
+FULLTEXT_WORKERS = 5
+
+
+def _unpaywall_email() -> str:
+    return os.getenv("UNPAYWALL_EMAIL", "literev@gesica.ch")
+
+
+def _ft_get(url, params=None, timeout=20):
+    import time as _time
+    import requests as _requests
+    for _att in range(3):
+        try:
+            _r = _requests.get(url, params=params, timeout=timeout,
+                               headers={"User-Agent": "LiteRev-Evidence/1.0"})
+            if _r.status_code == 429:
+                _time.sleep(int(_r.headers.get("Retry-After", 10)))
+                continue
+            return _r
+        except Exception as _fe:
+            logger.debug(f"_ft_get {url}: attempt {_att+1} failed: {_fe}")
+            _time.sleep(1)
+    logger.debug(f"_ft_get {url}: all retries exhausted")
+    return None
+
+
+def _parse_pmc_xml_ft(xml_str):
+    import xml.etree.ElementTree as _ET_ft
+    _skip = {"ref-list", "ack", "fn-group", "glossary", "app-group", "notes", "bio", "author-notes"}
+    try:
+        _root = _ET_ft.fromstring(xml_str)
+    except _ET_ft.ParseError:
+        xml_str = re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;)", "&amp;", xml_str)
+        try:
+            _root = _ET_ft.fromstring(xml_str)
+        except Exception:
+            return None
+    _parts = []
+
+    def _walk(n):
+        _tag = n.tag.split("}")[-1] if "}" in n.tag else n.tag
+        if _tag in _skip:
+            return
+        if n.text and n.text.strip():
+            _parts.append(n.text.strip())
+        for _ch in n:
+            _walk(_ch)
+        if n.tail and n.tail.strip():
+            _parts.append(n.tail.strip())
+    _walk(_root)
+    _txt = re.sub(r"\s+", " ", " ".join(_parts)).strip()
+    return _txt if len(_txt) > 50 else None
+
+
+def _extract_pdf_text_ft(pdf_url):
+    import subprocess as _subprocess
+    import tempfile as _tempfile
+    import requests as _requests
+    try:
+        # 60 s pour le téléchargement, 120 s pour pdftotext : à 30 s chacun, les
+        # gros PDF (suppléments, rapports) perdaient leur texte.
+        _r = _requests.get(pdf_url, timeout=60, stream=True,
+                           headers={"User-Agent": "LiteRev-Evidence/1.0"})
+        if _r.status_code != 200:
+            return None
+        _ct = _r.headers.get("content-type", "")
+        if "pdf" not in _ct.lower() and not pdf_url.lower().endswith(".pdf"):
+            _txt = re.sub(r"<[^>]+>", " ", _r.text)
+            _txt = sanitize_db_text(re.sub(r"\s+", " ", _txt)).strip()
+            return _txt if len(_txt) > 500 else None
+        with _tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as _f:
+            for _chunk in _r.iter_content(chunk_size=8192):
+                _f.write(_chunk)
+            _tmp = _f.name
+        try:
+            _res = _subprocess.run(["pdftotext", "-layout", _tmp, "-"],
+                                   capture_output=True, text=True, timeout=120)
+        finally:
+            os.unlink(_tmp)
+        if _res.returncode == 0 and _res.stdout.strip():
+            # pdftotext émet des NUL sur certains PDF mal formés ; sans ce
+            # nettoyage l'INSERT du chunk échoue et l'article perd son texte.
+            _txt = sanitize_db_text(re.sub(r"\s+", " ", _res.stdout)).strip()
+            return _txt if len(_txt) > 500 else None
+    except Exception:
+        pass
+    return None
+
+
+def _chunk_text_ft(text_str):
+    """Découpage SÉMANTIQUE par phrases : on coupe aux frontières de phrases (et non au
+    milieu d'un mot ou d'une idée), puis on fusionne en chunks d'environ _CHUNK_SIZE_FT
+    caractères avec un recouvrement au niveau de la phrase."""
+    text_str = re.sub(r"\s+", " ", text_str).strip()
+    if not text_str:
+        return []
+    _sentences = re.split(r"(?<=[.!?])\s+", text_str)
+    _chunks: list[str] = []
+    _cur: list[str] = []
+    _cur_len = 0
+    for _s in _sentences:
+        if _cur and _cur_len + len(_s) + 1 > _CHUNK_SIZE_FT:
+            _chunks.append(" ".join(_cur).strip())
+            _ov: list[str] = []
+            _olen = 0
+            for _p in reversed(_cur):
+                if _olen + len(_p) <= _CHUNK_OVERLAP_FT:
+                    _ov.insert(0, _p)
+                    _olen += len(_p)
+                else:
+                    break
+            _cur = _ov
+            _cur_len = sum(len(_p) + 1 for _p in _cur)
+        _cur.append(_s)
+        _cur_len += len(_s) + 1
+    if _cur:
+        _chunks.append(" ".join(_cur).strip())
+    # Phrase unique trop longue (> 1.5x la cible) : re-découpe en fenêtre mot.
+    _final: list[str] = []
+    _max = int(_CHUNK_SIZE_FT * 1.5)
+    for _c in _chunks:
+        if len(_c) <= _max:
+            _final.append(_c)
+            continue
+        _st = 0
+        while _st < len(_c):
+            _en = min(_st + _CHUNK_SIZE_FT, len(_c))
+            if _en < len(_c):
+                _cut = _c.rfind(" ", _st, _en)
+                if _cut > _st:
+                    _en = _cut
+            _final.append(_c[_st:_en].strip())
+            _st = _en
+    return [c for c in _final if len(c) > 50]
+
+
+def _insert_fulltext_chunks_ft(doc_id, chunks, source_label, emb_client=None):
+    """Insère les chunks fulltext_section et les embedde immédiatement si possible."""
+    import time as _time
+    with engine.begin() as _c:
+        _c.execute(text(
+            "DELETE FROM document_chunk WHERE document_id = :did "
+            "AND chunk_type IN ('fulltext_section', 'full_text')"
+        ), {"did": doc_id})
+        for _i, _chunk_text in enumerate(chunks):
+            _meta = json.dumps({"source": source_label, "chunk_index": _i})
+            # `sanitize_db_text` est un filet de sécurité au POINT D'ÉCRITURE : l'extracteur
+            # nettoie déjà, mais le texte vient de plusieurs provenances (PMC, Europe PMC,
+            # PDF) et un seul NUL fait échouer toute la transaction, DELETE compris.
+            _c.execute(text("""
+                INSERT INTO document_chunk
+                    (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
+                VALUES (:did, :content, :idx, 'fulltext_section', 1.0, CAST(:meta AS jsonb))
+            """), {"did": doc_id, "content": sanitize_db_text(_chunk_text),
+                   "idx": _i, "meta": _meta})
+        _c.execute(text(
+            "UPDATE literature_document SET has_fulltext = true, open_access = true WHERE id = :did"
+        ), {"did": doc_id})
+    # Embedder les nouveaux chunks immédiatement si client OpenAI disponible
+    if emb_client and chunks:
+        try:
+            with engine.connect() as _c2:
+                _new_chunks = _c2.execute(text("""
+                    SELECT id, content FROM document_chunk
+                    WHERE document_id = :did AND chunk_type = 'fulltext_section'
+                      AND embedding IS NULL ORDER BY chunk_index
+                """), {"did": doc_id}).mappings().fetchall()
+            for _bi in range(0, len(_new_chunks), 50):
+                _batch = _new_chunks[_bi:_bi + 50]
+                _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
+                _emb_resp = emb_client.embeddings.create(model=_model("embedding"), input=_texts)
+                for _k, _ed in enumerate(_emb_resp.data):
+                    _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
+                    with engine.begin() as _c3:
+                        _c3.execute(text(
+                            "UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"
+                        ), {"vec": _vec, "cid": _batch[_k]["id"]})
+                _time.sleep(0.1)
+        except Exception as _emb_e:
+            logger.warning(f"Fulltext embed doc {doc_id}: {_emb_e}")
+    return len(chunks)
+
+
+def _note_oa_link(doc_id: int, url: str) -> None:
+    """Le lien d'accès ouvert qu'Unpaywall donne, gardé même quand son PDF ne se lit pas :
+    c'est ce que le lot « texte intégral » rangeait seul avant de savoir télécharger."""
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                UPDATE literature_document
+                SET oa_url = COALESCE(oa_url, :url), oa_url_found_at = COALESCE(oa_url_found_at, NOW()),
+                    url = COALESCE(NULLIF(TRIM(COALESCE(url, '')), ''), :url)
+                WHERE id = :did
+            """), {"url": url, "did": doc_id})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.debug(f"oa_url doc {doc_id}: {_e}")
+
+
+def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
+    """Le texte intégral en accès ouvert d'un article, sa provenance, et pourquoi chaque
+    source a échoué : PMC (Europe PMC puis NCBI, en XML), Unpaywall, bioRxiv/medRxiv,
+    Semantic Scholar, OpenAlex (PDF lus par pdftotext)."""
+    _ext_id = row["external_id"] or ""
+    _doi = _normalize_doi(row["doi"] or "") or ""
+    _pmid = row["pmid"] or ""
+    _fulltext = None
+    _source_used = None
+    _fail: list[str] = []
+    _email = _unpaywall_email()
+
+    # Source 1 : PMC (les appels NCBI par le helper throttlé, cf. _ft_ncbi_get)
+    _pmcid = _ft_resolve_pmcid(_ext_id, _pmid, _doi, _email)
+    if _pmcid:
+        _r_pmc = _ft_get(f"{_EPMC_BASE_FT}/{_pmcid}/fullTextXML", timeout=30)
+        if _r_pmc and _r_pmc.status_code == 200 and _r_pmc.text.strip().startswith("<"):
+            _fulltext = _parse_pmc_xml_ft(_r_pmc.text)
+            if _fulltext and len(_fulltext) > 500:
+                _source_used = f"europepmc:{_pmcid}"
+            else:
+                _fulltext = None
+                _fail.append(f"europepmc:{_pmcid}:xml_parse_empty")
+        elif _r_pmc:
+            _fail.append(f"europepmc:{_pmcid}:http_{_r_pmc.status_code}")
+        if not _fulltext:
+            _r_ncbi = _ft_fetch_pmc_xml(_pmcid)
+            if _r_ncbi and _r_ncbi.status_code == 200 and _r_ncbi.text.strip().startswith("<"):
+                _fulltext = _parse_pmc_xml_ft(_r_ncbi.text)
+                if _fulltext and len(_fulltext) > 500:
+                    _source_used = f"pmc:{_pmcid}"
+                else:
+                    _fulltext = None
+                    _fail.append(f"pmc:{_pmcid}:xml_parse_empty")
+            elif _r_ncbi:
+                _fail.append(f"pmc:{_pmcid}:http_{_r_ncbi.status_code}")
+    else:
+        _fail.append("pmcid:not_resolved")
+
+    # Source 2 : Unpaywall
+    if not _fulltext and _doi and _doi.startswith("10."):
+        _r_uw = _ft_get(f"https://api.unpaywall.org/v2/{_doi}", params={"email": _email})
+        if _r_uw and _r_uw.status_code == 200:
+            try:
+                _uw_data = _r_uw.json()
+                _best = _uw_data.get("best_oa_location") or {}
+                _pdf_url = _best.get("url_for_pdf") or _best.get("url")
+                if not _pdf_url:
+                    for _loc in _uw_data.get("oa_locations", []):
+                        if _loc.get("url_for_pdf"):
+                            _pdf_url = _loc["url_for_pdf"]
+                            break
+                if _pdf_url:
+                    _note_oa_link(row["id"], _pdf_url)
+                    _fulltext = _extract_pdf_text_ft(_pdf_url)
+                    if _fulltext and len(_fulltext) > 500:
+                        _source_used = "unpaywall"
+                    else:
+                        _fulltext = None
+                        _fail.append("unpaywall:pdf_empty")
+                else:
+                    _fail.append(f"unpaywall:not_oa(is_oa={_uw_data.get('is_oa')})")
+            except Exception as _uw_e:
+                _fail.append(f"unpaywall:parse_error:{_uw_e}")
+        elif _r_uw:
+            _fail.append(f"unpaywall:http_{_r_uw.status_code}")
+        else:
+            _fail.append("unpaywall:timeout")
+    elif not _doi:
+        _fail.append("unpaywall:skipped_no_doi")
+
+    # Source 3 : bioRxiv/medRxiv
+    if not _fulltext and _doi and _doi.startswith("10.1101/"):
+        for _srv in ["biorxiv", "medrxiv"]:
+            _r_bx = _ft_get(f"https://api.biorxiv.org/details/{_srv}/{_doi}/na/json")
+            if _r_bx and _r_bx.status_code == 200:
+                try:
+                    _coll = _r_bx.json().get("collection", [])
+                    if _coll:
+                        _fulltext = _extract_pdf_text_ft(f"https://www.{_srv}.org/content/{_doi}.full.pdf")
+                        if _fulltext and len(_fulltext) > 500:
+                            _source_used = _srv
+                            break
+                        _fulltext = None
+                        _fail.append(f"{_srv}:pdf_empty")
+                    else:
+                        _fail.append(f"{_srv}:not_found")
+                except Exception as _bx_e:
+                    _fail.append(f"{_srv}:parse_error:{_bx_e}")
+
+    # Source 4 : Semantic Scholar
+    if not _fulltext:
+        _ss_id = (f"DOI:{_doi}" if _doi else f"PMID:{_pmid}" if _pmid
+                  else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC") else None)
+        if _ss_id:
+            _r_ss = _ft_get(f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
+                            params={"fields": "openAccessPdf,abstract"})
+            if _r_ss and _r_ss.status_code == 200:
+                try:
+                    _oa_pdf = _r_ss.json().get("openAccessPdf")
+                    if _oa_pdf and _oa_pdf.get("url"):
+                        _fulltext = _extract_pdf_text_ft(_oa_pdf["url"])
+                        if _fulltext and len(_fulltext) > 500:
+                            _source_used = "semanticscholar"
+                        else:
+                            _fulltext = None
+                            _fail.append("semanticscholar:pdf_empty")
+                    else:
+                        _fail.append("semanticscholar:no_oa_pdf")
+                except Exception as _ss_e:
+                    _fail.append(f"semanticscholar:parse_error:{_ss_e}")
+            elif _r_ss:
+                _fail.append(f"semanticscholar:http_{_r_ss.status_code}")
+        else:
+            _fail.append("semanticscholar:no_identifier")
+
+    # Source 5 : OpenAlex
+    if not _fulltext and (_ext_id.startswith("W") or _doi):
+        _oa_work_url = (f"https://api.openalex.org/works/{_ext_id}" if _ext_id.startswith("W")
+                        else f"https://api.openalex.org/works/doi:{_doi}")
+        _r_oa = _ft_get(_oa_work_url, params={"select": "open_access"})
+        if _r_oa and _r_oa.status_code == 200:
+            try:
+                _oa_info = _r_oa.json().get("open_access", {})
+                _oa_url = _oa_info.get("oa_url")
+                if _oa_url:
+                    _fulltext = _extract_pdf_text_ft(_oa_url)
+                    if _fulltext and len(_fulltext) > 500:
+                        _source_used = "openalex_oa"
+                    else:
+                        _fulltext = None
+                        _fail.append("openalex:pdf_empty")
+                else:
+                    _fail.append(f"openalex:not_oa(is_oa={_oa_info.get('is_oa')})")
+            except Exception as _oa_e:
+                _fail.append(f"openalex:parse_error:{_oa_e}")
+        elif _r_oa:
+            _fail.append(f"openalex:http_{_r_oa.status_code}")
+    return (_fulltext if _source_used else None), _source_used, _fail
+
+
+def _fetch_and_store_fulltext(row, emb_client=None) -> tuple[bool, str | None]:
+    """Un article : son texte téléchargé, découpé et rangé ; (succès, raison d'un échec)."""
+    try:
+        _fulltext, _source_used, _fail = _fulltext_of(row)
+        if _fulltext and _source_used:
+            _chunks_ft = _chunk_text_ft(_fulltext)
+            if _chunks_ft:
+                _insert_fulltext_chunks_ft(row["id"], _chunks_ft, _source_used, emb_client)
+                return True, None
+            logger.warning(f"Fulltext doc {row['id']}: text retrieved but produced 0 chunks (source={_source_used})")
+            return False, "0_chunks"
+        logger.info(f"Fulltext unavailable doc {row['id']} (ext_id={row['external_id'] or ''}, doi={row['doi'] or ''}): "
+                    f"{' | '.join(_fail) or 'no_sources_tried'}")
+        return False, "not_found"
+    except Exception as _ft_e:
+        logger.warning(f"Fulltext doc {row['id']}: {_ft_e}")
+        return False, str(_ft_e)
+
+
+#: Un article SANS texte intégral, c'est un article sans chunk de texte intégral : la
+#: même question que l'extraction se pose (`has_fulltext_chunk`). Le drapeau `has_fulltext`
+#: ne la tranche pas : un lien trouvé l'a longtemps posé sans qu'aucun texte soit rangé, et
+#: un article ainsi marqué n'était plus jamais téléchargé.
+NO_FULLTEXT_CHUNK_SQL = ("NOT EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = ld.id"
+                         " AND c.chunk_type IN ('fulltext_section', 'full_text'))")
+
+
+def rows_without_fulltext(scenario_id: str, scope: str, limit: int | None = None) -> list[dict]:
+    """Les articles d'un scénario dont aucun texte intégral n'est rangé, dans la portée
+    donnée (`relevant` : le sous-ensemble pertinent, `all` : tout le scénario)."""
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(f"""
+            SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
+            FROM literature_document ld
+            JOIN article_scenarios asn ON asn.document_id = ld.id AND asn.scenario_id = :sid
+            WHERE ld.project_context = 'literev'
+              AND ({scenario_scope_sql(scope, doc="ld", link="asn")})
+              AND {NO_FULLTEXT_CHUNK_SQL}
+            ORDER BY ld.id
+            LIMIT :lim
+        """), {"sid": scenario_id, "lim": limit}).mappings().fetchall()]
+
+
+def download_fulltext(rows: list[dict], progress=None) -> dict[str, int]:
+    """Télécharge le texte intégral en accès ouvert de ces articles, en parallèle, et le
+    range en chunks (embeddés si une clé OpenAI est réglée). `progress(done, total,
+    failed)` est appelé au fil de l'eau. Un article qui gagne ainsi un texte est relu par
+    la prochaine extraction (`extraction._needs_extraction`)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    emb_client = None
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            from llm_usage import MeteredOpenAI as _OAI_ft
+            emb_client = _OAI_ft(api_key=os.getenv("OPENAI_API_KEY"))
+        except Exception:                                    # noqa: BLE001
+            emb_client = None
+    total, fetched, failed, done = len(rows), 0, 0, 0
+    lock = threading.Lock()
+    if not rows:
+        return {"total": 0, "fetched": 0, "failed": 0}
+    with ThreadPoolExecutor(max_workers=FULLTEXT_WORKERS) as executor:
+        futures = [executor.submit(_fetch_and_store_fulltext, row, emb_client) for row in rows]
+        for future in as_completed(futures):
+            try:
+                ok, _ = future.result()
+            except Exception as e:                           # noqa: BLE001
+                ok = False
+                logger.error(f"Error in fulltext worker: {e}")
+            with lock:
+                done += 1
+                fetched += 1 if ok else 0
+                failed += 0 if ok else 1
+                if progress and (done % 10 == 0 or done == total):
+                    try:
+                        progress(done, total, failed)
+                    except Exception:                        # noqa: BLE001
+                        pass
+    return {"total": total, "fetched": fetched, "failed": failed}
 
 
 # ── Cache des réponses des sources (par fetcher et par requête) ──────────────────
@@ -2491,7 +2921,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     # stockés : elle n'écrivait JAMAIS rerank_score. L'utilisateur voyait donc une étape
     # de rerank réussir sans qu'un seul score de rerank existe, et le cross-encoder, lui,
     # ne tournait que sur le chemin /populate. Deux étapes, nommées pour ce qu'elles font.
-    STEP_ORDER = ["ingest", "fulltext", "embed", "semantic_scoring", "cross_encoder",
+    STEP_ORDER = ["ingest", "embed", "semantic_scoring", "cross_encoder", "fulltext",
                   "pico", "metadata", "clustering", "knowledge_graph", "evidence",
                   "variables", "actions"]
 
@@ -2570,415 +3000,6 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 "Aucun article trouvé (le détail par source est sur la carte PRISMA).")
             return
 
-        # ── Étape 2 : Full-text multi-sources (avant embedding pour enrichir les chunks) (PMC → EuropePMC → Unpaywall → bioRxiv → Semantic Scholar → OpenAlex) ──
-        update_step("fulltext", "running")
-        try:
-            import re as _re
-            import subprocess as _subprocess
-            import tempfile as _tempfile
-            import xml.etree.ElementTree as _ET_ft
-            import requests as _requests
-
-            _EPMC_BASE_FT = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-            _UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "literev@gesica.ch")
-            _CHUNK_SIZE_FT = 4000
-            _CHUNK_OVERLAP_FT = 400
-
-            def _ft_get(url, params=None, timeout=20):
-                for _att in range(3):
-                    try:
-                        _r = _requests.get(url, params=params, timeout=timeout,
-                                           headers={"User-Agent": "LiteRev-Evidence/1.0"})
-                        if _r.status_code == 429:
-                            _time.sleep(int(_r.headers.get("Retry-After", 10)))
-                            continue
-                        return _r
-                    except Exception as _fe:
-                        logger.debug(f"_ft_get {url}: attempt {_att+1} failed: {_fe}")
-                        _time.sleep(1)
-                logger.debug(f"_ft_get {url}: all retries exhausted")
-                return None
-
-            def _parse_pmc_xml_ft(xml_str):
-                _skip = {"ref-list","ack","fn-group","glossary","app-group","notes","bio","author-notes"}
-                try:
-                    _root = _ET_ft.fromstring(xml_str)
-                except _ET_ft.ParseError:
-                    xml_str = _re.sub(r"&(?!amp;|lt;|gt;|apos;|quot;)", "&amp;", xml_str)
-                    try:
-                        _root = _ET_ft.fromstring(xml_str)
-                    except Exception:
-                        return None
-                _parts = []
-                def _walk(n):
-                    _tag = n.tag.split("}")[-1] if "}" in n.tag else n.tag
-                    if _tag in _skip:
-                        return
-                    if n.text and n.text.strip():
-                        _parts.append(n.text.strip())
-                    for _ch in n:
-                        _walk(_ch)
-                    if n.tail and n.tail.strip():
-                        _parts.append(n.tail.strip())
-                _walk(_root)
-                _txt = _re.sub(r"\s+", " ", " ".join(_parts)).strip()
-                return _txt if len(_txt) > 50 else None
-
-            def _extract_pdf_text_ft(pdf_url):
-                try:
-                    # 60 s pour le téléchargement, 120 s pour pdftotext : à 30 s chacun, les
-                    # gros PDF (suppléments, rapports) perdaient leur texte.
-                    _r = _requests.get(pdf_url, timeout=60, stream=True,
-                                       headers={"User-Agent": "LiteRev-Evidence/1.0"})
-                    if _r.status_code != 200:
-                        return None
-                    _ct = _r.headers.get("content-type", "")
-                    if "pdf" not in _ct.lower() and not pdf_url.lower().endswith(".pdf"):
-                        _txt = _re.sub(r"<[^>]+>", " ", _r.text)
-                        _txt = sanitize_db_text(_re.sub(r"\s+", " ", _txt)).strip()
-                        return _txt if len(_txt) > 500 else None
-                    with _tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as _f:
-                        for _chunk in _r.iter_content(chunk_size=8192):
-                            _f.write(_chunk)
-                        _tmp = _f.name
-                    try:
-                        _res = _subprocess.run(["pdftotext", "-layout", _tmp, "-"],
-                                               capture_output=True, text=True, timeout=120)
-                    finally:
-                        os.unlink(_tmp)
-                    if _res.returncode == 0 and _res.stdout.strip():
-                        # pdftotext émet des NUL sur certains PDF mal formés ; sans ce
-                        # nettoyage l'INSERT du chunk échoue et l'article perd son texte.
-                        _txt = sanitize_db_text(_re.sub(r"\s+", " ", _res.stdout)).strip()
-                        return _txt if len(_txt) > 500 else None
-                except Exception:
-                    pass
-                return None
-
-            def _chunk_text_ft(text_str):
-                # Découpage SÉMANTIQUE par phrases : on coupe aux frontières de
-                # phrases (et non au milieu d'un mot/d'une idée), puis on fusionne
-                # en chunks d'environ _CHUNK_SIZE_FT caractères avec un recouvrement
-                # au niveau de la phrase. Plus cohérent que l'ancienne fenêtre brute.
-                text_str = _re.sub(r"\s+", " ", text_str).strip()
-                if not text_str:
-                    return []
-                _sentences = _re.split(r"(?<=[.!?])\s+", text_str)
-                _chunks: list[str] = []
-                _cur: list[str] = []
-                _cur_len = 0
-                for _s in _sentences:
-                    if _cur and _cur_len + len(_s) + 1 > _CHUNK_SIZE_FT:
-                        _chunks.append(" ".join(_cur).strip())
-                        _ov: list[str] = []
-                        _olen = 0
-                        for _p in reversed(_cur):
-                            if _olen + len(_p) <= _CHUNK_OVERLAP_FT:
-                                _ov.insert(0, _p)
-                                _olen += len(_p)
-                            else:
-                                break
-                        _cur = _ov
-                        _cur_len = sum(len(_p) + 1 for _p in _cur)
-                    _cur.append(_s)
-                    _cur_len += len(_s) + 1
-                if _cur:
-                    _chunks.append(" ".join(_cur).strip())
-                # Phrase unique trop longue (> 1.5x la cible) : re-découpe en fenêtre mot.
-                _final: list[str] = []
-                _max = int(_CHUNK_SIZE_FT * 1.5)
-                for _c in _chunks:
-                    if len(_c) <= _max:
-                        _final.append(_c)
-                        continue
-                    _st = 0
-                    while _st < len(_c):
-                        _en = min(_st + _CHUNK_SIZE_FT, len(_c))
-                        if _en < len(_c):
-                            _cut = _c.rfind(" ", _st, _en)
-                            if _cut > _st:
-                                _en = _cut
-                        _final.append(_c[_st:_en].strip())
-                        _st = _en
-                return [c for c in _final if len(c) > 50]
-
-            def _insert_fulltext_chunks_ft(doc_id, chunks, source_label, emb_client=None):
-                """Insère les chunks fulltext_section et les embedde immédiatement si possible."""
-                with engine.begin() as _c:
-                    _c.execute(text(
-                        "DELETE FROM document_chunk WHERE document_id = :did "
-                        "AND chunk_type IN ('fulltext_section', 'full_text')"
-                    ), {"did": doc_id})
-                    for _i, _chunk_text in enumerate(chunks):
-                        _meta = json.dumps({"source": source_label, "chunk_index": _i})
-                        # `sanitize_db_text` est un filet de sécurité au POINT D'ÉCRITURE :
-                        # l'extracteur nettoie déjà, mais cette fonction est appelée avec du
-                        # texte d'autres provenances (PMC, EuropePMC…) et un seul NUL fait
-                        # échouer toute la transaction - DELETE compris, donc zéro chunk
-                        # conservé.
-                        #
-                        # Ces quatre lignes étaient DANS la chaîne SQL (ab9a9f1, 16/09), où
-                        # Postgres les lisait comme du SQL : « syntax error at or near "#" ».
-                        # Donc l'insertion échouait à CHAQUE appel, la transaction était
-                        # annulée, et le DELETE avec elle : ce chemin n'a stocké aucun chunk
-                        # fulltext pendant trois semaines. L'appelant journalise en WARNING
-                        # et continue, ce qui est exactement pourquoi personne ne l'a vu.
-                        _c.execute(text("""
-                            INSERT INTO document_chunk
-                                (document_id, content, chunk_index, chunk_type, chunk_weight, metadata_json)
-                            VALUES (:did, :content, :idx, 'fulltext_section', 1.0, CAST(:meta AS jsonb))
-                        """), {"did": doc_id, "content": sanitize_db_text(_chunk_text),
-                               "idx": _i, "meta": _meta})
-                    _c.execute(text(
-                        "UPDATE literature_document SET has_fulltext = true, open_access = true WHERE id = :did"
-                    ), {"did": doc_id})
-                # Embedder les nouveaux chunks immédiatement si client OpenAI disponible
-                if emb_client and chunks:
-                    try:
-                        with engine.connect() as _c2:
-                            _new_chunks = _c2.execute(text("""
-                                SELECT id, content FROM document_chunk
-                                WHERE document_id = :did AND chunk_type = 'fulltext_section'
-                                  AND embedding IS NULL ORDER BY chunk_index
-                            """), {"did": doc_id}).mappings().fetchall()
-                        for _bi in range(0, len(_new_chunks), 50):
-                            _batch = _new_chunks[_bi:_bi+50]
-                            _texts = [_truncate_to_tokens(r["content"]) for r in _batch]
-                            _emb_resp = emb_client.embeddings.create(
-                                model=_model("embedding"), input=_texts)
-                            for _k, _ed in enumerate(_emb_resp.data):
-                                _vec = "[" + ",".join(str(x) for x in _ed.embedding) + "]"
-                                with engine.begin() as _c3:
-                                    _c3.execute(text(
-                                        "UPDATE document_chunk SET embedding = CAST(:vec AS vector) WHERE id = :cid"
-                                    ), {"vec": _vec, "cid": _batch[_k]["id"]})
-                            _time.sleep(0.1)
-                    except Exception as _emb_e:
-                        logger.warning(f"Fulltext embed doc {doc_id}: {_emb_e}")
-                return len(chunks)
-
-            # Récupérer tous les documents du scénario sans full-text
-            with engine.connect() as conn:
-                ft_rows = conn.execute(text("""
-                    SELECT ld.id, ld.external_id, ld.doi, ld.pmid, ld.source
-                    FROM literature_document ld
-                    JOIN article_scenarios asn ON asn.document_id = ld.id
-                    WHERE asn.scenario_id = :sid
-                      AND ld.project_context = 'literev'
-                      AND (ld.has_fulltext IS NULL OR ld.has_fulltext = false)
-                    ORDER BY ld.id
-                """), {"sid": scenario_id}).mappings().fetchall()
-
-            ft_fetched = 0
-            ft_errors = 0
-            ft_total = len(ft_rows)
-
-            # Initialiser le client OpenAI pour l'embedding des chunks fulltext
-            _ft_emb_client = None
-            try:
-                from llm_usage import MeteredOpenAI as _OAI_ft
-                _ft_emb_client = _OAI_ft(api_key=os.getenv("OPENAI_API_KEY"))
-            except Exception:
-                pass
-
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            import threading
-            
-            _ft_lock = threading.Lock()
-            _ft_done_count = 0
-            
-            def _process_ft_row(row):
-                _ext_id = row["external_id"] or ""
-                _doi = _normalize_doi(row["doi"] or "") or ""
-                _pmid = row["pmid"] or ""
-                _source = row["source"] or ""
-                _fulltext = None
-                _source_used = None
-                _ft_fail_reasons = []
-                
-                try:
-                    # Source 1 : PMC (les appels NCBI par le helper throttlé, cf. _ft_ncbi_get)
-                    _pmcid = _ft_resolve_pmcid(_ext_id, _pmid, _doi, _UNPAYWALL_EMAIL)
-                    if _pmcid:
-                        _r_pmc = _ft_get(f"{_EPMC_BASE_FT}/{_pmcid}/fullTextXML", timeout=30)
-                        if _r_pmc and _r_pmc.status_code == 200 and _r_pmc.text.strip().startswith("<"):
-                            _fulltext = _parse_pmc_xml_ft(_r_pmc.text)
-                            if _fulltext and len(_fulltext) > 500:
-                                _source_used = f"europepmc:{_pmcid}"
-                            else:
-                                _ft_fail_reasons.append(f"europepmc:{_pmcid}:xml_parse_empty")
-                        elif _r_pmc:
-                            _ft_fail_reasons.append(f"europepmc:{_pmcid}:http_{_r_pmc.status_code}")
-                        
-                        if not _fulltext:
-                            _r_ncbi = _ft_fetch_pmc_xml(_pmcid)
-                            if _r_ncbi and _r_ncbi.status_code == 200 and _r_ncbi.text.strip().startswith("<"):
-                                _fulltext = _parse_pmc_xml_ft(_r_ncbi.text)
-                                if _fulltext and len(_fulltext) > 500:
-                                    _source_used = f"pmc:{_pmcid}"
-                                else:
-                                    _fulltext = None
-                                    _ft_fail_reasons.append(f"pmc:{_pmcid}:xml_parse_empty")
-                            elif _r_ncbi:
-                                _ft_fail_reasons.append(f"pmc:{_pmcid}:http_{_r_ncbi.status_code}")
-                    else:
-                        _ft_fail_reasons.append("pmcid:not_resolved")
-                    
-                    # Source 2 : Unpaywall
-                    if not _fulltext and _doi and _doi.startswith("10."):
-                        _r_uw = _ft_get(f"https://api.unpaywall.org/v2/{_doi}",
-                                        params={"email": _UNPAYWALL_EMAIL})
-                        if _r_uw and _r_uw.status_code == 200:
-                            try:
-                                _uw_data = _r_uw.json()
-                                _pdf_url = None
-                                _best = _uw_data.get("best_oa_location") or {}
-                                _pdf_url = _best.get("url_for_pdf") or _best.get("url")
-                                if not _pdf_url:
-                                    for _loc in _uw_data.get("oa_locations", []):
-                                        if _loc.get("url_for_pdf"):
-                                            _pdf_url = _loc["url_for_pdf"]
-                                            break
-                                if _pdf_url:
-                                    _fulltext = _extract_pdf_text_ft(_pdf_url)
-                                    if _fulltext and len(_fulltext) > 500:
-                                        _source_used = "unpaywall"
-                                    else:
-                                        _fulltext = None
-                                        _ft_fail_reasons.append("unpaywall:pdf_empty")
-                                else:
-                                    _ft_fail_reasons.append(f"unpaywall:not_oa(is_oa={_uw_data.get('is_oa')})")
-                            except Exception as _uw_e:
-                                _ft_fail_reasons.append(f"unpaywall:parse_error:{_uw_e}")
-                        elif _r_uw:
-                            _ft_fail_reasons.append(f"unpaywall:http_{_r_uw.status_code}")
-                        else:
-                            _ft_fail_reasons.append("unpaywall:no_doi" if not _doi else "unpaywall:timeout")
-                    elif not _doi:
-                        _ft_fail_reasons.append("unpaywall:skipped_no_doi")
-                    
-                    # Source 3 : bioRxiv/medRxiv
-                    if not _fulltext and _doi and _doi.startswith("10.1101/"):
-                        for _srv in ["biorxiv", "medrxiv"]:
-                            _r_bx = _ft_get(f"https://api.biorxiv.org/details/{_srv}/{_doi}/na/json")
-                            if _r_bx and _r_bx.status_code == 200:
-                                try:
-                                    _coll = _r_bx.json().get("collection", [])
-                                    if _coll:
-                                        _pdf_url = f"https://www.{_srv}.org/content/{_doi}.full.pdf"
-                                        _fulltext = _extract_pdf_text_ft(_pdf_url)
-                                        if _fulltext and len(_fulltext) > 500:
-                                            _source_used = _srv
-                                            break
-                                        else:
-                                            _fulltext = None
-                                            _ft_fail_reasons.append(f"{_srv}:pdf_empty")
-                                    else:
-                                        _ft_fail_reasons.append(f"{_srv}:not_found")
-                                except Exception as _bx_e:
-                                    _ft_fail_reasons.append(f"{_srv}:parse_error:{_bx_e}")
-                    
-                    # Source 4 : Semantic Scholar
-                    if not _fulltext:
-                        _ss_id = None
-                        if _doi:
-                            _ss_id = f"DOI:{_doi}"
-                        elif _pmid:
-                            _ss_id = f"PMID:{_pmid}"
-                        elif _ext_id and _ext_id.upper().startswith("PMC"):
-                            _ss_id = f"PMCID:{_ext_id}"
-                        if _ss_id:
-                            _r_ss = _ft_get(
-                                f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
-                                params={"fields": "openAccessPdf,abstract"},
-                            )
-                            if _r_ss and _r_ss.status_code == 200:
-                                try:
-                                    _ss_data = _r_ss.json()
-                                    _oa_pdf = _ss_data.get("openAccessPdf")
-                                    if _oa_pdf and _oa_pdf.get("url"):
-                                        _fulltext = _extract_pdf_text_ft(_oa_pdf["url"])
-                                        if _fulltext and len(_fulltext) > 500:
-                                            _source_used = "semanticscholar"
-                                        else:
-                                            _fulltext = None
-                                            _ft_fail_reasons.append("semanticscholar:pdf_empty")
-                                    else:
-                                        _ft_fail_reasons.append(f"semanticscholar:no_oa_pdf")
-                                except Exception as _ss_e:
-                                    _ft_fail_reasons.append(f"semanticscholar:parse_error:{_ss_e}")
-                            elif _r_ss:
-                                _ft_fail_reasons.append(f"semanticscholar:http_{_r_ss.status_code}")
-                        else:
-                            _ft_fail_reasons.append("semanticscholar:no_identifier")
-                    
-                    # Source 5 : OpenAlex
-                    if not _fulltext and (_ext_id.startswith("W") or _doi):
-                        _oa_work_url = (
-                            f"https://api.openalex.org/works/{_ext_id}"
-                            if _ext_id.startswith("W")
-                            else f"https://api.openalex.org/works/doi:{_doi}"
-                        )
-                        _r_oa = _ft_get(_oa_work_url, params={"select": "open_access"})
-                        if _r_oa and _r_oa.status_code == 200:
-                            try:
-                                _oa_info = _r_oa.json().get("open_access", {})
-                                _oa_url = _oa_info.get("oa_url")
-                                if _oa_url:
-                                    _fulltext = _extract_pdf_text_ft(_oa_url)
-                                    if _fulltext and len(_fulltext) > 500:
-                                        _source_used = "openalex_oa"
-                                    else:
-                                        _fulltext = None
-                                        _ft_fail_reasons.append("openalex:pdf_empty")
-                                else:
-                                    _ft_fail_reasons.append(f"openalex:not_oa(is_oa={_oa_info.get('is_oa')})")
-                            except Exception as _oa_e:
-                                _ft_fail_reasons.append(f"openalex:parse_error:{_oa_e}")
-                        elif _r_oa:
-                            _ft_fail_reasons.append(f"openalex:http_{_r_oa.status_code}")
-                    
-                    if _fulltext and _source_used:
-                        _chunks_ft = _chunk_text_ft(_fulltext)
-                        if _chunks_ft:
-                            _insert_fulltext_chunks_ft(row["id"], _chunks_ft, _source_used, _ft_emb_client)
-                            return True, None
-                        else:
-                            logger.warning(f"Fulltext doc {row['id']}: text retrieved but produced 0 chunks (source={_source_used})")
-                            return False, "0_chunks"
-                    else:
-                        logger.info(f"Fulltext unavailable doc {row['id']} (ext_id={_ext_id}, doi={_doi}): {' | '.join(_ft_fail_reasons) or 'no_sources_tried'}")
-                        return False, "not_found"
-                except Exception as _ft_e:
-                    logger.warning(f"Fulltext doc {row['id']}: {_ft_e}")
-                    return False, str(_ft_e)
-
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {executor.submit(_process_ft_row, row): row for row in ft_rows}
-                for future in as_completed(futures):
-                    try:
-                        success, _ = future.result()
-                        with _ft_lock:
-                            _ft_done_count += 1
-                            if success:
-                                ft_fetched += 1
-                            else:
-                                ft_errors += 1
-                            
-                            if _ft_done_count % 10 == 0 or _ft_done_count == ft_total:
-                                update_step("fulltext", "running",
-                                            done=_ft_done_count, total=ft_total, paywall=ft_errors,
-                                            pct=round((_ft_done_count) / ft_total * 100, 1) if ft_total > 0 else 0)
-                    except Exception as e:
-                        with _ft_lock:
-                            _ft_done_count += 1
-                            ft_errors += 1
-                            logger.error(f"Error in fulltext worker: {e}")
-
-            update_step("fulltext", "done", fetched=ft_fetched, total=ft_total,
-                        paywall_or_failed=ft_errors)
-        except Exception as e:
-            update_step("fulltext", "error", error=str(e))
 
         # ── Étape 3 : Embeddings (title_abstract + fulltext_section - contenu enrichi) ────────
         update_step("embed", "running")
@@ -3106,11 +3127,38 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as _ce_ex:
             update_step("cross_encoder", "error", error=str(_ce_ex))
 
+        # ── Étape 5 bis : le texte intégral en accès ouvert, dans la portée du pipeline ──
+        # Après les scores : la portée « relevant » se lit sur eux, et ils ne lisent que le
+        # titre et le résumé (étape 4), si bien que le texte n'avait rien à faire avant.
+        # L'étape téléchargeait le texte de TOUT le scénario (17 510 articles pour HPAI_last,
+        # dont 1 075 pertinents). Tant qu'une personne n'a pas choisi le seuil, le sous-
+        # ensemble pertinent est celui du seuil de départ (0,45), qui peut prendre un tiers
+        # d'un corpus : le texte intégral, le PICO et les métadonnées l'ATTENDENT, et le
+        # statut du pipeline le dit (`waiting_threshold`).
+        _enrich_scope = pipeline_enrich_scope()
+        _enrich_waits = _enrich_scope == "relevant" and not scenario_threshold_info(scenario_id)["chosen"]
+        _WAIT_REASON = ("Seuil de pertinence non choisi : réglez-le, puis relancez le pipeline "
+                        "ou les lots du panneau d'enrichissement")
+        if _enrich_waits:
+            _user_scenario_pipeline_jobs[scenario_id]["waiting_threshold"] = True
+            update_step("fulltext", "skipped", reason=_WAIT_REASON)
+        else:
+            update_step("fulltext", "running")
+            try:
+                _ft = download_fulltext(
+                    rows_without_fulltext(scenario_id, _enrich_scope),
+                    progress=lambda d, t, f: update_step("fulltext", "running", done=d, total=t, paywall=f,
+                                                         pct=round(d / t * 100, 1) if t else 0))
+                update_step("fulltext", "done", fetched=_ft["fetched"], total=_ft["total"],
+                            paywall_or_failed=_ft["failed"], scope=_enrich_scope)
+            except Exception as e:
+                update_step("fulltext", "error", error=str(e))
+
         # ── Étape 6 : Extraction PICO ─────────────────────────────────────────────────────
         update_step("pico", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
+            if openai_key and not _enrich_waits:
                 from llm_usage import MeteredOpenAI as _OAI
                 from datetime import datetime, timezone
                 from .pico_map import PicoUnreadable, extract_pico, pico_fulltext_chunks
@@ -3210,7 +3258,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             findings_filled=_findings.get("done", 0),
                             findings_failed=_findings.get("failed", 0))
             else:
-                update_step("pico", "skipped", reason="Clé OpenAI non configurée")
+                update_step("pico", "skipped",
+                            reason=_WAIT_REASON if _enrich_waits else "Clé OpenAI non configurée")
         except Exception as e:
             update_step("pico", "error", error=str(e))
 
@@ -3218,7 +3267,7 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         update_step("metadata", "running")
         try:
             openai_key = os.getenv("OPENAI_API_KEY")
-            if openai_key:
+            if openai_key and not _enrich_waits:
                 from llm_usage import MeteredOpenAI as _OAI2
                 from datetime import datetime, timezone
                 from .pico_map import json_completion
@@ -3304,7 +3353,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             pct=round(_meta_total_with / _meta_total_in_scenario * 100, 1) if _meta_total_in_scenario > 0 else 0,
                             errors=meta_errors)
             else:
-                update_step("metadata", "skipped", reason="Clé OpenAI non configurée")
+                update_step("metadata", "skipped",
+                            reason=_WAIT_REASON if _enrich_waits else "Clé OpenAI non configurée")
         except Exception as e:
             update_step("metadata", "error", error=str(e))
 
@@ -3441,7 +3491,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Fin du pipeline ───────────────────────────────────────────────────
         _user_scenario_pipeline_jobs[scenario_id]["overall_status"] = "done"
         _user_scenario_pipeline_jobs[scenario_id]["message"] = (
-            f"Pipeline terminé."
+            "Pipeline terminé, sauf le texte intégral, le PICO et les métadonnées, qui attendent "
+            "le seuil de pertinence : réglez-le, puis relancez." if _enrich_waits else "Pipeline terminé."
         )
         # Persister pipeline_status = done et mettre à jour article_count (source de vérité = DB)
         try:

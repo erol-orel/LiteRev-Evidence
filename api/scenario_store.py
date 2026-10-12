@@ -373,21 +373,23 @@ SCOPES = ("all", "relevant")
 
 
 def pipeline_enrich_scope() -> str:
-    """La portée des étapes d'enrichissement DU PIPELINE, réglée par l'environnement.
+    """La portée des étapes d'enrichissement DU PIPELINE (texte intégral, PICO,
+    métadonnées), réglée par l'environnement.
 
-    `all` par défaut : le comportement d'aujourd'hui, inchangé. La carte (les faits
-    par article, mis en cache sur la ligne) est la moitié sur laquelle repose la règle
-    « toute extraction lit tous les articles pertinents » : la réduire au sous-ensemble
-    pertinent du moment économise beaucoup, et laisse sans faits les articles qu'un
-    seuil abaissé rendra pertinents plus tard. Le digest dit déjà combien d'articles
-    pertinents portent un PICO, et le panneau d'enrichissement dit ce qu'il reste à
-    faire, donc le manque se voit et se rattrape ; mais c'est un choix, pas un défaut.
+    `relevant` par défaut depuis le 12 octobre 2026 (décision d'Erol) : le pipeline
+    enchaîné après une recherche enrichissait TOUT le scénario (HPAI_last : 17 510
+    articles, dont 1 075 pertinents), et le texte intégral, le PICO et les métadonnées des
+    articles hors du sous-ensemble ne servaient à aucune extraction. La règle « toute
+    extraction lit tous les articles pertinents » tient toujours : un article que le
+    seuil rend pertinent plus tard reçoit son PICO du travail de fond (relevant
+    seulement, lui aussi), et le panneau d'enrichissement dit ce qui reste à faire, sur
+    l'une ou l'autre portée.
 
-    `PIPELINE_ENRICH_SCOPE=relevant` pour l'économie, comme les plafonds d'articles
-    sont un repli opérationnel pour un jour où le budget doit être tenu."""
+    `PIPELINE_ENRICH_SCOPE=all` pour tout le scénario. Une valeur illisible garde la
+    portée par défaut."""
     import os
-    value = (os.getenv("PIPELINE_ENRICH_SCOPE") or "all").strip().lower()
-    return value if value in SCOPES else "all"
+    value = (os.getenv("PIPELINE_ENRICH_SCOPE") or "relevant").strip().lower()
+    return value if value in SCOPES else "relevant"
 
 
 #: Les deux modes d'une recherche. `standard` : au plus LIVE_MAX_PER_SOURCE notices par

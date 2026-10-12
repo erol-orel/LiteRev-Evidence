@@ -256,6 +256,7 @@ export const en: Translations = {
     pipelinePrefix: "Pipeline:",
     pipelineInProgress: "in progress",
     pipelineCountsProvisional: "article count provisional until the pipeline finishes",
+    pipelineWaitingThreshold: "Waiting for the relevance threshold: set it, then run the pipeline again. Full texts, PICO and metadata cover the relevant articles.",
     searchRunning: "Search running…",
     predictiveModel: "Predictive Model",
     openModel: "Predict / open model",
@@ -1124,9 +1125,9 @@ export const en: Translations = {
       metadataLabel: "Metadata Enrichment",
       metadataDesc:
         "Fills in study type, sample size, country and risk of bias via LLM.",
-      fulltextLabel: "Open-access links",
+      fulltextLabel: "Open-access full texts",
       fulltextDesc:
-        "Searches Unpaywall (DOI required) for a link to the open-access version of each article. It downloads no text: the pipeline's full-text step reads these links.",
+        "Downloads the open-access text of each article that has none (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex) and stores it. The next extraction reads the articles that gained a text again.",
       title: "LLM Enrichment",
       subtitle: "Run automatic enrichments across the whole corpus",
       subtitleScenario: "Run the enrichments on this scenario",
@@ -1142,7 +1143,7 @@ export const en: Translations = {
       cappedBy: "of {n} pending, the rest on the next run",
       autoEnrichmentTitle: "Automatic enrichment active",
       autoEnrichmentBody:
-        ": The pipeline automatically runs PICO extraction and metadata enrichment when articles are ingested. Use the buttons below only to complete articles that may have been missed or to re-run a specific enrichment.",
+        ": After a search, the pipeline downloads the full texts and runs PICO extraction and metadata enrichment on the relevant articles, once the threshold has been chosen. Use the buttons below to complete what is missing, or to cover the whole scenario.",
       batchSizeLabel: "Batch size:",
       batchSizeAll: "all",
       articlesPerRun: "articles per run (empty: every pending article)",
@@ -1152,7 +1153,7 @@ export const en: Translations = {
       launchLinks: "Run ({n} articles, at most {cap} per run)",
       progress: "On the server: {done} of {total} processed",
       resultExtracted: "{n} articles enriched, {skipped} skipped, {errors} errors.",
-      resultLinks: "{n} open-access links found, {na} not available, {errors} errors.",
+      resultTexts: "{n} full texts downloaded, {na} without a readable open-access version, {errors} errors.",
     },
     seuil: {
       saveFailed: "The threshold was not saved: try again (API key or network).",

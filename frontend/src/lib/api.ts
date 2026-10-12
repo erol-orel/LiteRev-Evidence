@@ -2656,6 +2656,8 @@ export interface UserScenarioPipelineStatus {
   scenario_id: string;
   overall_status: 'not_started' | 'starting' | 'running' | 'done' | 'error';
   current_step?: string;
+  // Le texte intégral, le PICO et les métadonnées attendent qu'une personne choisisse le seuil.
+  waiting_threshold?: boolean;
   message?: string;
   error?: string;
   steps: {

@@ -67,7 +67,7 @@ database matches (up to 20000 per database) in an exhaustive one, within the
 | POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `include_live` (default true), `exhaustive` (true/false, recorded on the scenario; absent = the recorded mode, standard by default; the search screen sends true by default), `exclude_preprints` |
 | GET | `/user-scenarios/{id}/populate/status` | open | `{status, phase, ingested, sources, rerank_status}` - poll until `status=done` |
 | POST | `/scenarios/{id}/rebuild-corpus` | ✅ | re-run boolean membership on the existing library (no live fetch) |
-| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `exhaustive` (recorded on the scenario, used when the corpus is still to be built) - full pipeline (populate → fulltext → embed) |
+| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `exhaustive` (recorded on the scenario, used when the corpus is still to be built) - full pipeline (populate → embed → scores → full text → PICO → metadata → views). Full text, PICO and metadata cover the relevant articles (`PIPELINE_ENRICH_SCOPE`, default `relevant`; `all` for the whole scenario) and wait until a person has chosen the threshold: the status then carries `waiting_threshold: true` |
 | GET | `/user-scenarios/{id}/pipeline/status` | open | pipeline phase/progress |
 
 ```bash
@@ -99,7 +99,7 @@ Each accepts `?scenario_id=<id>` (omit = whole library) and `?limit=<n>`.
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| POST | `/fulltext/fetch?scenario_id=…&limit=…` | ✅ | fetch full text (Unpaywall / PMC) |
+| POST | `/fulltext/fetch?scenario_id=…&scope=…&limit=…` (scope `relevant` or `all`) | ✅ | download the open-access full text (PMC, Europe PMC, Unpaywall, bioRxiv/medRxiv, Semantic Scholar, OpenAlex) of the articles that have none, with the pipeline's own code; an article that gains a text is read again by the next extraction |
 | POST | `/pico/extract?scenario_id=…&limit=…` | ✅ | LLM PICO extraction |
 | POST | `/metadata/extract?scenario_id=…&limit=…` | ✅ | LLM metadata extraction; fills the design, sample size and quality score columns, as the pipeline step does |
 

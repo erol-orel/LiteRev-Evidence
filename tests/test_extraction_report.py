@@ -161,9 +161,9 @@ def test_the_report_says_how_much_more_each_cut_list_holds(report_corpus, monkey
 def test_the_limits_say_how_many_papers_were_read_condensed_or_cut(report_corpus):
     md = _get("md").text
     assert "1 articles held more data than one answer of the model can carry" in md
-    assert "1 articles were read from a text cut at the size limit (150,000 characters per article today)" in md
+    assert "1 articles were read from a text cut at the size limit (300,000 characters per article today)" in md
     fr = _get("md", "fr").text
-    assert "1 articles ont été lus dans un texte coupé à la taille limite (150 000 caractères" in fr
+    assert "1 articles ont été lus dans un texte coupé à la taille limite (300 000 caractères" in fr
     assert "forme condensée" in fr
     assert chr(0x2014) not in md and chr(0x2014) not in fr
 
