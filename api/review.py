@@ -352,6 +352,16 @@ def get_user_scenario_prisma(
             # locale quand elle a mordu : ce que la recherche a enregistré.
             "facets_skipped": [str(f) for f in (_figures.get("facets_skipped") or [])],
             "local_match_capped": bool(_figures.get("local_match_capped")),
+            # Passés au screening sans que la recherche les apparie, chacun sur sa ligne :
+            # le corpus d'avant une fédération incomplète (et les sources qui ont manqué),
+            # puis les liens qu'un relecteur a jugés. Servis quand la recherche les a
+            # enregistrés : une recherche antérieure ne disait rien de ce qu'elle gardait.
+            **({"kept_previous_links": int(_rec.get("kept_previous_links") or 0),
+                "kept_previous_failed_sources": [str(s) for s in
+                                                 (_figures.get("kept_previous_failed_sources") or [])],
+                "kept_reviewed_links": int(_rec.get("kept_reviewed_links") or 0)}
+               if _figures.get("kept_previous_links") is not None
+               or _figures.get("kept_reviewed_links") is not None else {}),
             "embedded": embedded,
             "figures_from": "search_run",
             # « populate » = une recherche a interrogé les sources ; « rebuild » = la

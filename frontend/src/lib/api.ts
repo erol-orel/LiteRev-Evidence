@@ -1143,6 +1143,17 @@ export interface ScenarioPrisma {
     facets_skipped?: string[];
     /** The local library match reached its row limit: the corpus may miss matches. */
     local_match_capped?: boolean;
+    /** Records of the corpus as it stood before the search, kept although the search did
+     *  not match them, because its federation did not complete (a source failed or was cut
+     *  off by the time budget): a re-search used to drop what only that source brings.
+     *  Counted in records_screened. Absent on figures stored before it existed. */
+    kept_previous_links?: number;
+    /** The sources whose incomplete answer kept the previous records. */
+    kept_previous_failed_sources?: string[];
+    /** Records the search did not match, kept because a reviewer decided on them (included,
+     *  excluded, a double-blind vote, an arbitration): a search never deletes that work.
+     *  Counted in records_screened. */
+    kept_reviewed_links?: number;
     removed_not_matching?: number;
     removed_other_reasons?: number;
     /** A search without preprints: the preprints other databases returned, removed before

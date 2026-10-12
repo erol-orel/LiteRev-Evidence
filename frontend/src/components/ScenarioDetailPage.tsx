@@ -4499,6 +4499,10 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     ...(ident.sources_cut_off ?? []),
     ...(ident.sources_skipped ?? []),
   ];
+  // Les sources dont la réponse incomplète a fait garder le corpus d'avant la recherche.
+  const keptBecause = (ident.kept_previous_failed_sources?.length ?? 0) > 0
+    ? (ident.kept_previous_failed_sources ?? [])
+    : [...(ident.sources_failed ?? []), ...(ident.sources_cut_off ?? [])];
   // Un paragraphe par requête distincte RÉELLEMENT soumise : les sources à la limite d'URL
   // reçoivent la même réduction, arXiv la sienne (syntaxe `all:`), OpenAIRE la sienne
   // (quatre opérateurs au plus). Les chiffres antérieurs n'ont qu'une requête pour toutes.
@@ -4597,6 +4601,15 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 {num(ident.removed_other_reasons) > 0 && (
                   <PrismaRow label={t("scenarioDetail.prisma.removedOtherReasons")} value={num(ident.removed_other_reasons)} />
                 )}
+                {/* Passés au screening sans que la recherche les apparie, chacun sur sa
+                    ligne pour que l'arithmétique tienne : le corpus d'avant une fédération
+                    incomplète, et les liens qu'un relecteur a jugés (jamais supprimés). */}
+                {num(ident.kept_previous_links) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.keptPreviousLinks")} value={`+${num(ident.kept_previous_links).toLocaleString()}`} accent="text-amber-300" />
+                )}
+                {num(ident.kept_reviewed_links) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.keptReviewedLinks")} value={`+${num(ident.kept_reviewed_links).toLocaleString()}`} />
+                )}
                 {/* Le corpus a changé depuis la recherche (reconstruction, pages tardives d'une
                     source, doublons marqués ensuite) : l'écart a sa ligne, dans son sens, pour
                     que identifiés − doublons − retraits (± depuis) = passés au screening. */}
@@ -4664,6 +4677,16 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                   {(SOURCE_LABELS_MAP[src] ?? src)} : {why}
                 </span>
               ))}
+            </p>
+          )}
+          {/* Le corpus d'avant la recherche, gardé parce qu'une source n'a pas répondu en
+              entier : une relance pendant une panne d'Europe PMC faisait tomber le corpus
+              de ce que seul son booléen natif apporte. Combien, pourquoi, et quoi faire. */}
+          {num(ident.kept_previous_links) > 0 && keptBecause.length > 0 && (
+            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
+              {t("scenarioDetail.prisma.keptPreviousNote")
+                .replace("{n}", num(ident.kept_previous_links).toLocaleString())
+                .replace("{sources}", keptBecause.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
             </p>
           )}
           {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.

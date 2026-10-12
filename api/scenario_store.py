@@ -170,6 +170,23 @@ def screening_status_sql(doc: str = "d", link: str = "ars") -> str:
     return f"{link}.screening_status"
 
 
+def reviewer_decision_sql(link: str = "ars") -> str:
+    """Le prédicat « ce lien porte la décision d'un relecteur », lu sur `link`
+    (article_scenarios) : inclus ou exclu, un vote de double aveugle, un arbitrage.
+
+    Une décision est un travail humain. Une recherche relancée supprimait les liens que sa
+    requête n'appariait plus, décision, motif et votes compris : l'inclusion à la main
+    disparaissait du sous-ensemble pertinent (« au-dessus du seuil, plus ce qu'un relecteur
+    a inclus »), et l'article revenait « en attente » si une recherche suivante le
+    retrouvait. Aucune recherche ne supprime plus un tel lien (`_set_scenario_corpus`).
+    Jamais NULL, pour qu'un `NOT` s'y applique tel quel (un statut NULL ferait sinon
+    garder tous les liens jamais jugés). Pur."""
+    return (f"(COALESCE({link}.screening_status IN ('included', 'excluded'), FALSE)"
+            f" OR {link}.reviewer_1_status IS NOT NULL"
+            f" OR {link}.reviewer_2_status IS NOT NULL"
+            f" OR {link}.kappa_final_status IS NOT NULL)")
+
+
 def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
     """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
 

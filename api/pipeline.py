@@ -43,6 +43,8 @@ from .search import (
     _facet_ops,
     _facets_intersect,
     _generate_search_strategy,
+    _ids_within_criteria,
+    _kept_link_counts,
     _looks_boolean,
     excludes_preprints,
     preprint_sql,
@@ -471,9 +473,9 @@ def _run_user_scenario_populate(
     # ③ Santé de la fédération, pour décider si un corpus PEUT rétrécir / se vider.
     #  • _source_errors  : nb de sources ayant échoué (except top-level d'un fetcher) ;
     #  • _fed_incomplete : True si le budget fédération a été dépassé (sources coupées).
-    # Un « zéro » n'est fiable - donc on autorise un corpus vide - que si la fédération
-    # a réussi (aucune source en erreur ET pas de timeout). Sinon on garde l'ancien
-    # corpus, pour ne pas l'effacer sur une panne passagère d'une source.
+    # Un résultat, vide ou plus petit, n'est fiable que si la fédération a réussi (aucune
+    # source en erreur ET pas de coupure). Sinon les liens d'avant la recherche restent
+    # (cf. l'assemblage final), pour ne pas les effacer sur une panne passagère d'une source.
     _source_errors = [0]
     _fed_incomplete = [False]
     # GEL du corpus : dès que l'assemblage final commence, un enregistrement qui arrive
@@ -557,9 +559,8 @@ def _run_user_scenario_populate(
         Deux conséquences : l'issue annoncée de la source devenait `ok`/`empty` comme si
         elle avait fini de répondre, et `_fed_incomplete` restait faux tant que
         `as_completed` ne débordait pas lui-même, donc le corpus était autorisé à se
-        VIDER sur une fédération pourtant partielle. Précisément : `_fed_incomplete`
-        éteint `allow_empty`, donc un résultat vide ne remplace pas l'ancien corpus ;
-        un résultat plus petit, lui, le remplace toujours (le corpus peut rétrécir).
+        VIDER sur une fédération pourtant partielle. Une fédération incomplète ne retire
+        plus aucun lien d'avant la recherche, vide ou non (cf. l'assemblage final).
         """
         if _time.time() < _fed_deadline[0]:
             return False
@@ -725,6 +726,20 @@ def _run_user_scenario_populate(
                     job["errors_by_source"][source_name] = \
                         job["errors_by_source"].get(source_name, 0) + err
                 job["sources"][source_name] = job["sources"].get(source_name, 0) + count
+
+    # Le corpus tel qu'il est AVANT cette recherche, relevé avant qu'elle ne lie quoi que
+    # ce soit. Une fédération qui n'aboutit pas (une source en échec, ou coupée par le
+    # budget) ne dit rien des liens qu'elle n'a pas ramenés : l'assemblage final garde
+    # alors ceux-ci, et seulement ceux-ci (les liens que cette recherche a posés en route
+    # restent soumis à sa propre requête).
+    _previous_links: list[int] | None = None
+    try:
+        with engine.connect() as _plc:
+            _previous_links = [int(x) for x in _plc.execute(text(
+                "SELECT document_id FROM article_scenarios WHERE scenario_id = :sid"),
+                {"sid": scenario_id}).scalars().all()]
+    except Exception as _e_prev:
+        logger.warning(f"Populate {scenario_id}: corpus précédent non relevé ({_e_prev})")
 
     # ── Étape 0 : Linking depuis la base locale (séquentiel, rapide) ─────────
     # Le CORPUS est défini par une correspondance LEXICALE (requête booléenne),
@@ -997,21 +1012,18 @@ def _run_user_scenario_populate(
 
         if _local_ids:
             with engine.begin() as _lc2:
-                # RESET du corpus à la correspondance booléenne. Sans cela,
-                # l'accumulation ON CONFLICT DO NOTHING ne retire jamais les liens
-                # devenus obsolètes (ex. un ancien match lexical OR-de-tous-les-mots
-                # qui avait gonflé le corpus à des dizaines de milliers d'articles).
-                # Le corpus = EXACTEMENT le résultat de la requête booléenne (base
-                # locale) ∪ les nouvelles références live ajoutées plus bas.
-                # Tableau côté serveur : un paramètre, pas un par identifiant. La forme
-                # expansée refusait au-delà de 65 535 liens (limite du protocole), et
-                # l'échec remontait dans un `except` qui journalise, puis la recherche
-                # se déclarait terminée avec ses liens obsolètes intacts.
-                _lc2.execute(text("DELETE FROM article_scenarios WHERE scenario_id = :sid "
-                                  "AND NOT (document_id = ANY(CAST(:ids AS bigint[])))"),
-                             {"sid": scenario_id, "ids": list(_local_ids)})
-                # Insertion en masse (un seul aller-retour) : le corpus local doit
-                # être lié quasi instantanément, sans une requête par document.
+                # Les correspondances locales sont liées tout de suite, et RIEN n'est
+                # supprimé ici. Ce bloc remettait le corpus à la seule correspondance
+                # locale AVANT la fédération : les liens que seules les sources
+                # booléennes-natives apportent (MeSH, synonymes d'Europe PMC)
+                # disparaissaient avant même de savoir si ces sources répondraient. Le
+                # 12 octobre 2026, Europe PMC répondait 503 et le corpus de HPAI_last est
+                # retombé à 8 494 articles au lieu de 15 000 à 18 000. Les liens obsolètes
+                # sont retirés à l'assemblage final, qui sait si la fédération a abouti
+                # (_set_scenario_corpus).
+                # Insertion en masse (un seul aller-retour), tableau côté serveur : le
+                # corpus local doit être lié quasi instantanément, sans une requête ni
+                # un paramètre par document.
                 _lc2.execute(text("""
                     INSERT INTO article_scenarios (document_id, scenario_id, similarity_score)
                     SELECT unnest(CAST(:ids AS bigint[])), :sid, NULL
@@ -2003,6 +2015,10 @@ def _run_user_scenario_populate(
     # _multi_query_corpus_ids (union/intersection) en multi-sous-requêtes. Le corpus
     # devient donc strictement « résultat de la requête sur base locale ∪ live ».
     # allow_empty=True en multi : une intersection légitimement vide DOIT vider le corpus.
+    # L'ensemble APPARIÉ par cette recherche (None tant qu'il n'est pas assemblé), et les
+    # sources dont la réponse n'est pas complète : les chiffres PRISMA les lisent plus bas.
+    _matched: list[int] | None = None
+    _incomplete_sources: list[str] = []
     try:
         # Gel : à partir d'ici, ce qui arrive encore des sources ne fait plus partie de
         # cette recherche (cf. _corpus_frozen). Le corpus et ses chiffres sont figés ensemble.
@@ -2046,21 +2062,48 @@ def _run_user_scenario_populate(
         _n_native = len(_bool_native_ids) if _union_native else 0
         if _union_native:
             _final_ids = list(set(_final_ids) | _bool_native_ids)
-        # ③ Autorise un corpus vide/réduit :
-        #  • multi-requêtes : une intersection légitimement vide DOIT vider (inchangé) ;
-        #  • base locale seule (pas de live) : le match booléen local est déterministe ;
-        #  • mono-requête + live : SEULEMENT si la fédération a réussi (fetch_ok) - sinon
-        #    un « zéro » peut venir d'une panne passagère → on garde l'ancien corpus.
-        _fetch_ok = (not _fed_incomplete[0]) and _source_errors[0] == 0
+        # Les critères propres de la recherche (bornes d'années, préprints exclus), que la
+        # correspondance locale applique déjà et que l'union native n'a pas vus : l'ensemble
+        # APPARIÉ, c'est-à-dire ce que cette recherche dit appartenir au corpus.
+        _matched = _ids_within_criteria(_final_ids, filters)
+        # ③ La fédération a-t-elle abouti ? Lu sur l'issue de chaque source, en plus des
+        # deux compteurs : un fetcher qui lève hors de son propre `except` finit en `error`
+        # sans passer par `_mark_source_error`.
+        _incomplete_sources = sorted({_source_label(_n) for _n, _o in _fetcher_outcome.items()
+                                      if _o in ("error", "cut_by_budget")})
+        _fetch_ok = (not _fed_incomplete[0]) and _source_errors[0] == 0 and not _incomplete_sources
+        # Ce qui peut être RETIRÉ du corpus :
+        #  • fédération aboutie, ou base locale seule : tout lien que la recherche n'apparie
+        #    pas, sauf ceux qu'un relecteur a jugés (_set_scenario_corpus) ;
+        #  • fédération incomplète : rien de ce que le corpus avait AVANT la recherche,
+        #    tant que ses critères le laissent (années, préprints). Une source en échec ne
+        #    dit rien des liens qu'elle n'a pas ramenés ; la carte PRISMA compte ces liens
+        #    gardés, nomme les sources, et demande de relancer. Seuls les liens que cette
+        #    recherche a posés en route et qu'elle n'apparie pas sont retirés.
+        # Un résultat vide ne vide le corpus qu'en multi-requêtes (une intersection
+        # légitimement vide), en base locale seule (déterministe), ou après une
+        # fédération aboutie ; sinon il ne touche à rien.
         _allow_empty = bool(_sub_queries) or (not include_live) or _fetch_ok
-        _n_corpus = _set_scenario_corpus(scenario_id, _final_ids, allow_empty=_allow_empty)
-        # « assemblé, AVANT nettoyage » : les lignes doublons (et les préprints d'une
-        # recherche qui les exclut) sont retirées juste après - le corpus retenu
-        # (article_count, « passés au screening » du PRISMA) est journalisé plus bas avec les
-        # chiffres PRISMA. Étiqueté « final » auparavant, ce nombre était lu comme le corpus.
+        _keep: list[int] | None = None
+        if not _fetch_ok:
+            _before = _previous_links
+            if _before is None:
+                # Relevé manqué au départ : les liens présents, au plus large.
+                with engine.connect() as _pbc:
+                    _before = [int(x) for x in _pbc.execute(text(
+                        "SELECT document_id FROM article_scenarios WHERE scenario_id = :sid"),
+                        {"sid": scenario_id}).scalars().all()]
+            _keep = _ids_within_criteria(_before, filters)
+        _n_corpus = _set_scenario_corpus(scenario_id, _matched, allow_empty=_allow_empty, keep=_keep)
+        # « assemblé, AVANT nettoyage » : les lignes doublons sont retirées juste après -
+        # le corpus retenu (article_count, « passés au screening » du PRISMA) est
+        # journalisé plus bas avec les chiffres PRISMA. Étiqueté « final » auparavant, ce
+        # nombre était lu comme le corpus.
         logger.info(f"Populate {scenario_id}: corpus assemblé (avant nettoyage) = {_n_corpus} docs "
                     f"(re-match local ∪ {_n_native} docs booléens-natifs PubMed/EPMC/préprints ; "
-                    f"{'multi ' + '/'.join(_facet_ops(_sub_queries, _combinator)) if _sub_queries else 'mono'})")
+                    f"{'multi ' + '/'.join(_facet_ops(_sub_queries, _combinator)) if _sub_queries else 'mono'})"
+                    + (f" ; fédération incomplète ({', '.join(_incomplete_sources) or 'budget'}) : "
+                       f"les {len(_keep)} liens d'avant la recherche restent" if _keep is not None else ""))
     except Exception as _e_corpus:
         logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 
@@ -2074,49 +2117,11 @@ def _run_user_scenario_populate(
         # pertinent tant qu'un relecteur ne les inclut pas : le titre se juge à la main.
         # Un résumé comblé plus tard les rend éligibles d'elles-mêmes.
 
-        # ── Recherche sans préprints : ceux que les autres bases ont rendus sortent ──
-        # La bibliothèque locale n'en apparie déjà plus (filtre de recherche), mais
-        # l'union des sources booléennes-natives entre sans re-filtrage : OpenAlex,
-        # Semantic Scholar, CORE rendent des préprints de bioRxiv, Research Square, SSRN.
-        # AVANT la dédup, pour que les lignes qu'elle fusionne soient toutes des articles.
-        if _no_preprints:
-            try:
-                with engine.begin() as conn:
-                    _removed_pp = conn.execute(text(f"""
-                        DELETE FROM article_scenarios a
-                        USING literature_document d
-                        WHERE a.document_id = d.id AND a.scenario_id = :sid
-                          AND {preprint_sql('d')}
-                    """), {"sid": scenario_id}).rowcount
-                if _removed_pp:
-                    logger.info(f"Populate {scenario_id}: {_removed_pp} préprints retirés (recherche sans préprints).")
-            except Exception as _e_pp:
-                logger.warning(f"Retrait des préprints {scenario_id}: {_e_pp}")
-
-        # ── Recherche bornée en années : l'union native aussi ────────────────
-        # La correspondance locale applique les bornes `year_min` / `year_max` des
-        # filtres du scénario (_build_where), mais l'union des sources booléennes-natives
-        # entre sans re-filtrage : une recherche « 2015-2024 » gardait les notices PubMed
-        # de 1987. La MÊME condition, écrite une fois dans _build_where, appliquée au
-        # corpus assemblé.
-        _year_bounds = {_k: (filters or {}).get(_k) for _k in ("year_min", "year_max")
-                        if (filters or {}).get(_k) not in (None, "")}
-        if _year_bounds:
-            try:
-                from .search import _build_where as _year_where   # lazy: une seule définition
-                _yw, _yp = _year_where(_year_bounds)
-                with engine.begin() as conn:
-                    _removed_y = conn.execute(text(f"""
-                        DELETE FROM article_scenarios a
-                        USING literature_document d
-                        WHERE a.document_id = d.id AND a.scenario_id = :sid
-                          AND (TRUE {_yw}) IS NOT TRUE
-                    """), {"sid": scenario_id, **_yp}).rowcount
-                if _removed_y:
-                    logger.info(f"Populate {scenario_id}: {_removed_y} articles hors des années "
-                                f"{_year_bounds} retirés.")
-            except Exception as _e_y:
-                logger.warning(f"Bornes d'années {scenario_id}: {_e_y}")
+        # Les préprints d'une recherche qui les exclut, et ce qui sort de ses bornes
+        # d'années, ne sont plus retirés ici après coup : l'assemblage ne lie que ce qui
+        # satisfait ces critères (_ids_within_criteria), avant la dédup, et ne garde de
+        # l'ancien corpus, quand la fédération n'a pas abouti, que ce qui les satisfait
+        # aussi. Un lien qu'un relecteur a jugé reste, comme partout ailleurs.
 
         # ── Dédup INTRA-scénario : un seul lien par article distinct ─────────
         # Fige le compte de façon déterministe (cf. _dedup_scenario_links). Une copie
@@ -2159,24 +2164,31 @@ def _run_user_scenario_populate(
                 _totals_snapshot = dict(_source_totals)
                 _ids_snapshot = list(_ident_docs)
             # Ventilation des documents identifiés mais ABSENTS du corpus : préprints quand
-            # la recherche les exclut (retirés avant la dédup), ou non liés (source par
+            # la recherche les exclut (écartés avant la dédup), ou non liés (source par
             # mots-clés hors requête booléenne, ou ligne fusionnée par la dédup, d'où la
             # soustraction). Les notices sans résumé n'y sont plus : elles sont gardées, et
             # comptées à part parmi les passées au screening (`kept_no_abstract`).
+            # « Passé au screening PAR cette recherche » = lié ET apparié par elle : un
+            # document identifié qui n'est resté que parce que le corpus l'avait déjà
+            # (fédération incomplète) ou qu'un relecteur en avait décidé compte parmi les
+            # retraits, et revient sur la ligne des liens gardés (_kept_link_counts).
+            _kept = {"reviewed": 0, "previous": 0}
+            if _matched is not None:
+                _kept = _kept_link_counts(scenario_id, _matched)
             _kept_no_abs, _not_linked, _pp_out = 0, 0, 0
             if _ids_snapshot:
                 _is_pp = preprint_sql("d") if _no_preprints else "FALSE"
+                _here = ("(EXISTS (SELECT 1 FROM article_scenarios a"
+                         " WHERE a.scenario_id = :sid AND a.document_id = d.id)"
+                         + (" AND d.id = ANY(CAST(:matched AS bigint[])))" if _matched is not None else ")"))
                 with engine.connect() as _bc:
                     _br = _bc.execute(text(f"""
-                        SELECT COUNT(*) FILTER (WHERE {_is_pp}
-                                                  AND NOT EXISTS (SELECT 1 FROM article_scenarios a
-                                                                   WHERE a.scenario_id = :sid AND a.document_id = d.id)) AS preprints,
-                               COUNT(*) FILTER (WHERE NOT {_is_pp}
-                                                  AND NOT EXISTS (SELECT 1 FROM article_scenarios a
-                                                                   WHERE a.scenario_id = :sid AND a.document_id = d.id)) AS not_linked
+                        SELECT COUNT(*) FILTER (WHERE {_is_pp} AND NOT {_here})     AS preprints,
+                               COUNT(*) FILTER (WHERE NOT {_is_pp} AND NOT {_here}) AS not_linked
                         FROM literature_document d
                         WHERE d.id = ANY(CAST(:ids AS bigint[]))
-                    """), {"sid": scenario_id, "ids": _ids_snapshot}).mappings().first()
+                    """), {"sid": scenario_id, "ids": _ids_snapshot,
+                           **({"matched": list(_matched)} if _matched is not None else {})}).mappings().first()
                 _pp_out = int(_br["preprints"] or 0)
                 _not_linked = int(_br["not_linked"] or 0)
             with engine.connect() as _kc2:
@@ -2226,7 +2238,13 @@ def _run_user_scenario_populate(
                 # Les facettes OU qu'aucune base n'a reçues, et la borne de la
                 # correspondance locale quand elle a mordu.
                 facets_skipped=(list(_facets_skipped) if include_live else []),
-                local_match_capped=bool(_local_capped[0]))
+                local_match_capped=bool(_local_capped[0]),
+                # Passés au screening sans que cette recherche les apparie : le corpus
+                # d'avant une fédération incomplète (et les sources qui l'ont rendue
+                # incomplète), puis les liens qu'un relecteur a jugés.
+                kept_previous_links=_kept["previous"],
+                kept_previous_failed_sources=list(_incomplete_sources),
+                kept_reviewed_links=_kept["reviewed"])
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le
@@ -2244,6 +2262,8 @@ def _run_user_scenario_populate(
                         f"{_figures['duplicates_removed']} doublons, "
                         f"{_figures['unique_records']} uniques, "
                         f"{_figures['removed_other_reasons']} retirés (autres raisons), "
+                        f"{_figures['kept_previous_links']} gardés de l'ancien corpus, "
+                        f"{_figures['kept_reviewed_links']} gardés pour une décision, "
                         f"{_figures['records_screened']} au screening.")
         except Exception as _e_pi:
             logger.warning(f"Populate {scenario_id}: chiffres PRISMA non stockés: {_e_pi}")

@@ -113,12 +113,24 @@ class Audit:
                                                    "removed_not_matching", "removed_other_reasons")]
             screened = ident.get("records_screened")
             added, gone = int(ident.get("added_after_search") or 0), int(ident.get("removed_after_search") or 0)
+            # Screened although the search did not match them: the corpus kept from before an
+            # incomplete federation, and the links a reviewer decided on (never deleted).
+            kept_prev = int(ident.get("kept_previous_links") or 0)
+            kept_rev = int(ident.get("kept_reviewed_links") or 0)
             arith_ok = (identified is not None and dups is not None and unique is not None
-                        and identified - dups == unique and unique - sum(buckets) + added - gone == screened)
+                        and identified - dups == unique
+                        and unique - sum(buckets) + kept_prev + kept_rev + added - gone == screened)
             self.add("OK" if arith_ok else "FAIL", "prisma arithmetic",
                      f"identified={identified} − duplicates={dups} = unique={unique}; unique − removed{buckets}"
+                     + (f" + kept_previous={kept_prev}" if kept_prev else "")
+                     + (f" + kept_reviewed={kept_rev}" if kept_rev else "")
                      + (f" + added_after={added}" if added else "") + (f" − removed_after={gone}" if gone else "")
                      + f" = screened={screened} (figures_from={ident.get('figures_from')}, federation_incomplete={ident.get('federation_incomplete')})")
+            if kept_prev:
+                self.add("WARN", "prisma kept from the previous search",
+                         f"{kept_prev} links of the previous search kept because "
+                         f"{', '.join(ident.get('kept_previous_failed_sources') or []) or 'some sources'} "
+                         f"did not answer in full; re-run the search to refresh them")
             if added or gone:
                 self.add("INFO", "prisma drift since the search",
                          f"the corpus changed after the search that produced the figures: +{added} / −{gone} documents "

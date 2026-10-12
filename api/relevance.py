@@ -46,6 +46,7 @@ from .search import (
     _boolean_corpus_ids,
     _dedup_scenario_links,
     _generate_search_strategy,
+    _kept_link_counts,
     _load_prisma_identification,
     _prisma_identification_figures,
     _set_scenario_corpus,
@@ -1174,7 +1175,11 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             ids = _boolean_corpus_ids(boolean, filters)        # base LOCALE uniquement
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
             _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
-            n_corpus -= _n_dup_rows
+            # Les liens qu'un relecteur a jugés restent, même hors de la correspondance
+            # locale (_set_scenario_corpus) : ils sont au corpus, et la carte les compte
+            # sur leur ligne. La reconstruction les supprimait avec leur décision.
+            _kept = _kept_link_counts(scenario_id, ids)
+            n_corpus = n_corpus - _n_dup_rows + _kept["reviewed"]
             # L'appartenance vient de changer : les cartes décrivaient l'ancien corpus, et
             # le scoring qui suit ne voit pas les articles RETIRÉS. Elles restaient servies
             # jusqu'à 30 jours. (Le scoring périme de nouveau ce qu'il change lui-même.)
@@ -1191,7 +1196,7 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             # garde donc ce que la dernière recherche avait établi, sous son propre nom.
             _figs = _prisma_identification_figures(
                 {}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild",
-                records_from_library=len(ids))
+                records_from_library=len(ids), kept_reviewed_links=_kept["reviewed"])
             _prev = _load_prisma_identification(scenario_id) or {}
             if _prev.get("method") == "populate":
                 _figs["last_search"] = {
