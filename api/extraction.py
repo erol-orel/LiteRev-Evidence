@@ -41,6 +41,7 @@ from fastapi.responses import Response
 from sqlalchemy import text
 
 from .codebook import annotate, get_codebook, get_index, normalise, sheet_key, vocabulary_prompt
+from .diseases import disease_key
 from .core import (_env_int, _is_openai_quota_error, _openai_in_cooldown, _trip_openai_cooldown, app,
                    engine, logger, require_api_key)
 from .extraction_review import load_reviews, overlay, overlay_annotated
@@ -1073,6 +1074,8 @@ def template_rows(articles: list[dict], id_prefix: str = "LR", index=None, revie
             if sheet in out:
                 row = annotate(index, fields) if index is not None else dict(fields)
                 out[sheet].append({**row, "id": aid, "source": ex.get("source"),
+                                   # The disease the pooled estimates file this row under (api/diseases.py).
+                                   "disease_key": disease_key(fields.get("disease")),
                                    "text_truncated": ex.get("truncated") is True,
                                    "condensed": ex.get("condensed") is True,
                                    "review_status": o["review_status"],
@@ -1201,11 +1204,13 @@ def build_workbook(articles: list[dict], coverage_note: str, id_prefix: str = "L
 def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, reviews: dict | None = None,
                    include_rejected: bool = False, nuts_index=None) -> str:
     """One flat table, one row per observation, with its sheet: for scripts and datasets.
-    `text_truncated` and `condensed` say, on each row, that its paper was read cut or condensed."""
+    `text_truncated` and `condensed` say, on each row, that its paper was read cut or condensed;
+    `disease_key` is the disease the pooled estimates file the row under, however `disease` spells it."""
     rows = template_rows(articles, id_prefix, index, reviews, include_rejected, nuts_index)
     fields = ["id", "sheet", "transmission_mode", "disease", "group", "covariate", "l1", "l2", "value", "descr",
               "notes", "n_cases", "pop_risk", "original_name", "page_section", "source_kind",
-              "quote", "quote_verified", "review_status", "reviewed_by", "source", "text_truncated", "condensed"]
+              "quote", "quote_verified", "review_status", "reviewed_by", "source", "text_truncated", "condensed",
+              "disease_key"]
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(fields)
@@ -1500,9 +1505,10 @@ def export_extraction_dataset(scenario_id: str, include_unreviewed: bool = Query
             eff = annotate(index, o["effective"])
             lines.append(json.dumps({
                 "article": {"id": a["id"], "title": a.get("title"), "doi": a.get("doi"), "year": a.get("year")},
-                "observation": {k: eff.get(k) for k in ("sheet", "group", "covariate", "value", "descr", "n_cases",
-                                                        "pop_risk", "disease", "transmission_mode", "page_section",
-                                                        "source_kind", "l1", "l2", "label_path")},
+                "observation": {**{k: eff.get(k) for k in ("sheet", "group", "covariate", "value", "descr", "n_cases",
+                                                           "pop_risk", "disease", "transmission_mode", "page_section",
+                                                           "source_kind", "l1", "l2", "label_path")},
+                                "disease_key": disease_key(eff.get("disease"))},
                 "quote": eff.get("quote"), "quote_found_in_text": eff.get("quote_verified"),
                 "review": {"status": st, "reviewers": [r["reviewer"] for r in o["reviews"]]},
                 # Whether the paper was read whole: a cut text or a condensed answer holds fewer

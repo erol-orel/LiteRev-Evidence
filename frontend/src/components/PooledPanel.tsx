@@ -2,8 +2,10 @@ import React from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Download, Info } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
 import { fetchPooled, pooledExportUrl } from "../lib/api";
-import type { PooledComparison, PooledGroup, PooledResponse, PooledStudy } from "../lib/api";
-import { bandTone, fmtOr, forestScale, intervalText, orDomain, pct, proportionDomain } from "../lib/pooling";
+import type { DiseaseSpelling, PooledComparison, PooledGroup, PooledResponse, PooledStudy } from "../lib/api";
+import {
+  DISEASE_NOT_STATED, bandTone, fmtOr, forestScale, intervalText, mergedSpellings, orDomain, pct, proportionDomain, spellingsText,
+} from "../lib/pooling";
 
 const W = 360;            // width of the plotting area
 const ROW = 20;
@@ -70,6 +72,27 @@ function Forest({ studies, pooled, domain, log, nullLine, T }: {
   );
 }
 
+/** "As written: HPAI H5N1 (5) · H5N1 (3)", or nothing when the pool merged no other spelling. */
+function writtenText(disease: string | null, spellings: DiseaseSpelling[] | undefined, T: (k: string) => string): string | undefined {
+  const sp = mergedSpellings(disease, spellings);
+  return sp.length ? T("asWritten").replace("{list}", () => spellingsText(sp)) : undefined;
+}
+
+/** The disease a pool is about, one name however the papers spell it. The spellings it merged
+ *  show on hover and, with `line`, in a small line below (cut to the cell; all of them on hover). */
+function DiseaseName({ disease, spellings, T, line = false }: {
+  disease: string | null; spellings?: DiseaseSpelling[]; T: (k: string) => string; line?: boolean;
+}) {
+  const written = writtenText(disease, spellings, T);
+  const name = disease == null ? T("allDiseases") : disease === DISEASE_NOT_STATED ? T("diseaseNotStated") : disease;
+  return (
+    <span title={written}>
+      {name}
+      {line && written && <span className="block max-w-[240px] truncate text-[9px] leading-3 text-white/35">{written}</span>}
+    </span>
+  );
+}
+
 function HetChip({ g, T }: { g: { I2: number; band: string; tau2: number }; T: (k: string) => string }) {
   return (
     <span className={`font-mono ${bandTone(g.band)}`} title={`tau2 ${g.tau2}`}>
@@ -111,8 +134,9 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
   const name = (g: { label: string; label_path?: string | null }) => (g.label_path ?? g.label).replace(/_/g, " ");
   const excluded = data ? Object.entries(data.excluded).filter(([, n]) => n > 0) : [];
 
-  const toggles: { k: keyof typeof opts; label: string }[] = [
-    { k: "verifiedOnly", label: T("optVerified") }, { k: "reviewedOnly", label: T("optReviewed") }, { k: "splitDisease", label: T("optDisease") },
+  const toggles: { k: keyof typeof opts; label: string; hint?: string }[] = [
+    { k: "verifiedOnly", label: T("optVerified") }, { k: "reviewedOnly", label: T("optReviewed") },
+    { k: "splitDisease", label: T("optDisease"), hint: T("optDiseaseHint") },
   ];
 
   return (
@@ -131,7 +155,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
 
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         {toggles.map((o) => (
-          <label key={o.k} className="flex items-center gap-1.5 text-[10px] text-white/55 cursor-pointer">
+          <label key={o.k} title={o.hint} className="flex items-center gap-1.5 text-[10px] text-white/55 cursor-pointer">
             <input type="checkbox" checked={opts[o.k]} onChange={(e) => setOpts((p) => ({ ...p, [o.k]: e.target.checked }))} className="accent-brand-500" />
             {o.label}
           </label>
@@ -160,6 +184,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
               {big.map((g: PooledGroup) => {
                 const id = `${g.sheet}|${g.group}|${g.label}|${g.disease}`;
                 const isOpen = open === id;
+                const written = writtenText(g.disease, g.disease_spellings, T);
                 return (
                   <React.Fragment key={id}>
                     <tr onClick={() => setOpen(isOpen ? null : id)} className="border-b border-white/5 cursor-pointer hover:bg-white/4">
@@ -169,7 +194,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                           {name(g)}{!g.mapped && <span className="text-gold-400/70"> ({t("scenarioDetail.extraction.unmapped")})</span>}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-white/50">{g.disease ?? T("allDiseases")}</td>
+                      <td className="px-3 py-2 text-white/50"><DiseaseName disease={g.disease} spellings={g.disease_spellings} T={T} line /></td>
                       <td className="px-3 py-2 font-mono text-white/65">{g.k}</td>
                       <td className="px-3 py-2 font-mono text-white/55">{g.events_total}/{g.n_total}</td>
                       <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{pct(g.pooled!.p)} <span className="text-white/40">({intervalText(g.pooled!.ci_low, g.pooled!.ci_high, pct)})</span></td>
@@ -188,6 +213,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                                 .replace("{p}", String(g.heterogeneity.p)).replace("{tau}", String(g.heterogeneity.tau2))}
                             </p>
                           )}
+                          {written && <p className="mt-1 text-[10px] text-white/40">{written}</p>}
                         </td>
                       </tr>
                     )}
@@ -207,11 +233,12 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
             {data!.comparisons.map((c: PooledComparison) => {
               const id = `cmp|${c.sheet}|${c.group}|${c.a}|${c.b}|${c.disease}`;
               const isOpen = open === id;
+              const written = writtenText(c.disease, c.disease_spellings, T);
               return (
                 <div key={id} className="rounded-xl border border-white/5">
                   <button onClick={() => setOpen(isOpen ? null : id)} className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left text-[11px]">
                     <span className="text-white/80">{c.a.replace(/_/g, " ")} <span className="text-white/35">{T("versus")}</span> {c.b.replace(/_/g, " ")}
-                      <span className="ml-2 text-white/40">{c.disease ?? T("allDiseases")}, {T("papers").replace("{n}", String(c.k))}</span></span>
+                      <span className="ml-2 text-white/40"><DiseaseName disease={c.disease} spellings={c.disease_spellings} T={T} />, {T("papers").replace("{n}", String(c.k))}</span></span>
                     <span className="font-mono text-white">OR {fmtOr(c.pooled.or)} <span className="text-white/40">({intervalText(c.pooled.ci_low, c.pooled.ci_high, fmtOr)})</span>
                       {" "}<HetChip g={c.heterogeneity} T={T} /></span>
                   </button>
@@ -220,6 +247,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                       <Forest T={T} log nullLine={1} domain={orDomain(c)}
                         studies={c.studies.map((s) => ({ label: studyLabel(s), est: s.or ?? 1, lo: s.ci_low ?? 1, hi: s.ci_high ?? 1, w: s.weight_pct ?? 1, n: `${s.x1}/${s.n1} vs ${s.x2}/${s.n2}` }))}
                         pooled={{ est: c.pooled.or, lo: c.pooled.ci_low, hi: c.pooled.ci_high, pLo: c.pooled.pi_low, pHi: c.pooled.pi_high }} />
+                      {written && <p className="mt-1 text-[10px] text-white/40">{written}</p>}
                     </div>
                   )}
                 </div>
@@ -250,7 +278,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
             <ul className="mt-2 space-y-1 text-[10px] text-white/50">
               {(allSmall ? small : small.slice(0, 40)).map((g) => (
                 <li key={`${g.sheet}|${g.group}|${g.label}|${g.disease}`}>
-                  <span className="text-white/70">{name(g)}</span> ({g.disease ?? T("allDiseases")}):{" "}
+                  <span className="text-white/70">{name(g)}</span> (<DiseaseName disease={g.disease} spellings={g.disease_spellings} T={T} />):{" "}
                   {g.studies.map((s) => `${studyLabel(s)} ${s.x}/${s.n} (${pct(s.p)})`).join("; ")}
                 </li>
               ))}

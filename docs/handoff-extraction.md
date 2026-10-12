@@ -48,7 +48,8 @@ Yield is a median of 22 rows per full-text paper (max 120) against
 **The corpus is on target.** 89.5% of the rows carry an avian influenza label (H5N1 above
 all), 5.9% another influenza, 0.2% COVID-19, against about 39% avian and 19%
 COVID-19 on the earlier scenario. The `disease` field is free text with 567 distinct
-spellings, which splits pools (below). Nothing has been human-reviewed: every figure is the model's
+spellings; pooling reads it through `api/diseases.py` (one key per disease, A(H5N1) however it is
+spelt), and the CSV and the dataset carry that `disease_key` on each row. Nothing has been human-reviewed: every figure is the model's
 unchecked reading.
 
 ## What exists
@@ -57,6 +58,7 @@ unchecked reading.
 |---|---|---|
 | Per-article extraction (map), cached in `literature_document.extraction_json` | `api/extraction.py` | `ExtractionSection.tsx` (Evidence tab, Extraction sub-tab) |
 | Codebook (label normalisation at read time, never rewrites stored labels) | `api/codebook.py` | `CodebookPanel.tsx` |
+| Disease names (one key per disease at read time: A(H5N1) for HPAI H5N1, influenza A(H5N1), H5N1...; other diseases as written) | `api/diseases.py` | `PooledPanel.tsx` (Disease column, with the spellings each pool merged) |
 | Reviewer decisions (accept, edit, reject, clear; Cohen's kappa) in table `extraction_review` | `api/extraction_review.py` | `ObservationPanel.tsx`, `ReviewSummaryCard.tsx` |
 | Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
 | Report as Markdown, Word, PDF | `api/extraction_report.py` | download buttons |
@@ -196,8 +198,6 @@ answer (at most 50 rows) and is marked `condensed`.
 - **`ref.first_author` is filled on 115 of 601 rows (19.1%)**, so some report citations read "? 2013".
 - **The pooled panel lists at most 120 groups** (`api/pooling.py`), now flagged as capped in the
   payload. On HPAI_last 2 580 labels exist and 45 reach the minimum of three studies.
-- **The disease is free text, so one infection is pooled under each spelling**: human H5N1
-  seropositivity sits in 14 pools. A read-time disease map is the fix (PR #341, open).
 - **Comparisons between groups often contrast the two shares of one sample** (men and women of the
   same 200 people), a composition, not a risk (PR #339, open).
 - **The report's country table stops at 25** of the 41 countries.

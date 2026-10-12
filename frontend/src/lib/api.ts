@@ -1925,11 +1925,22 @@ export interface Heterogeneity {
   band: "low" | "moderate" | "substantial" | "considerable";
 }
 
+/** One way the papers wrote a disease, and how many studies of a pool wrote it so. */
+export interface DiseaseSpelling {
+  spelling: string;
+  n: number;
+}
+
 export interface PooledGroup {
   sheet: string;
   group: string;
   label: string;
+  /** The disease the studies are pooled within, one name however the papers spell it
+   *  (api/diseases.py): "A(H5N1)", "A(H7N9) LPAI", "covid 19", "(not stated)". Null when
+   *  diseases are merged on request. */
   disease: string | null;
+  /** The spellings merged under `disease`, most frequent first. */
+  disease_spellings?: DiseaseSpelling[];
   label_path: string | null;
   mapped: boolean;
   k: number;
@@ -1945,6 +1956,7 @@ export interface PooledComparison {
   sheet: string;
   group: string;
   disease: string | null;
+  disease_spellings?: DiseaseSpelling[];
   a: string;
   b: string;
   k: number;

@@ -65,7 +65,11 @@ def test_the_markdown_report_carries_the_method_the_numbers_and_the_limits(pool_
     assert "the default codebook" in md and "DerSimonian-Laird" in md and "Hartung-Knapp-Sidik-Jonkman" in md
     assert "No row has been reviewed yet" in md
     # The numbers: the pooled male proportion, with its studies and the odds ratio against female.
-    assert "sex gender > male" in md and "hpai a h5n1" in md and "male against female" in md
+    assert "sex gender > male" in md and "| A(H5N1) |" in md and "male against female" in md
+    # The disease is named once whatever its spelling, says so, and shows what the papers wrote.
+    assert "A disease is recognised whatever its spelling" in md
+    assert "sex gender > male (A(H5N1)). As written: HPAI A(H5N1) (6)" in md
+    assert "sex gender > male (not stated)" in md and "(not stated))" not in md
     # The limits: an abstract-only paper and unreviewed rows are said, not hidden.
     assert "read from the abstract only" in md and "have not been reviewed" in md
     assert chr(0x2014) not in md
@@ -74,7 +78,8 @@ def test_the_markdown_report_carries_the_method_the_numbers_and_the_limits(pool_
 def test_the_french_report_is_in_french(pool_corpus):
     md = _get("md", "fr").text
     for needle in ("# Rapport d'extraction structurée", "## Comment cela a été fait", "## Proportions combinées", "## Limites à garder en tête",
-                   "Aucune ligne n'a encore été relue"):
+                   "Aucune ligne n'a encore été relue", "quelle que soit sa graphie", "Tel qu'écrit : HPAI A(H5N1) (6)",
+                   "sex gender > male (non précisée)"):
         assert needle in md, needle
     assert "How this was made" not in md and chr(0x2014) not in md
 
@@ -181,6 +186,11 @@ def test_the_excel_export_holds_the_full_lists(report_corpus, monkeypatch):
     pooled_head = [c.value for c in wb["POOLED"][1]]
     flags = {r[pooled_head.index("Pooled")].value for r in wb["POOLED"].iter_rows(min_row=2)}
     assert flags == {"Y", "N"}, "the labels with too few studies are listed too"
+    # Each pool and each comparison says how the papers behind it wrote its disease.
+    for sheet in ("POOLED", "COMPARISONS"):
+        head = [c.value for c in wb[sheet][1]]
+        assert head[-1] == "Disease as written (studies)"
+        assert any(str(r[-1].value or "").startswith("HPAI A(H5N1) (") for r in wb[sheet].iter_rows(min_row=2)), sheet
     countries = [(r[0].value, r[5].value) for r in wb["COUNTRIES"].iter_rows(min_row=2)]
     assert ("Germany", None) in countries and ("Germany", "DE3") in countries and ("Italy", None) in countries
     readme = " ".join(str(r[0].value) for r in wb["README"].iter_rows())

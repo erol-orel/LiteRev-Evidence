@@ -265,6 +265,10 @@ def test_the_long_csv_has_one_row_per_observation_with_its_sheet():
     assert [(r["sheet"], r["covariate"]) for r in rows] == [
         ("human_exp", "veterinary authority staff"), ("env", "free ranging")]
     assert rows[0]["id"] == "AB77" and rows[0]["quote"]
+    # The disease as the paper wrote it, and the disease the pooled estimates file the row under:
+    # a column added at the end, so a script that reads the columns by position keeps working.
+    assert list(rows[0])[-1] == "disease_key"
+    assert [(r["disease"], r["disease_key"]) for r in rows] == [("HPAI A(H5N1)", "A(H5N1)")] * 2
 
 
 def test_the_first_author_is_the_family_name_when_the_stored_form_says_so():

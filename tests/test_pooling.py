@@ -141,9 +141,54 @@ def test_one_article_gives_one_row_per_label_and_the_largest_population_is_kept(
 def test_diseases_are_not_pooled_together_unless_asked():
     rows = [_row(i, 2 + i, 20 + i, disease="HPAI") for i in range(1, 4)] + [_row(i, 1 + i, 30 + i, disease="COVID-19") for i in range(4, 7)]
     split = P.pooled_groups(rows)
-    assert sorted((g["disease"], g["k"]) for g in split) == [("covid 19", 3), ("hpai", 3)]
+    assert sorted((g["disease"], g["k"]) for g in split) == [("HPAI", 3), ("covid 19", 3)]
     merged = P.pooled_groups(rows, split_disease=False)
     assert len(merged) == 1 and merged[0]["k"] == 6 and merged[0]["disease"] is None
+    # Merged on request, and the pool says what it merged.
+    assert merged[0]["disease_spellings"] == [{"spelling": "COVID-19", "n": 3}, {"spelling": "HPAI", "n": 3}]
+
+
+#: The spellings of A(H5N1) that HPAI_last pooled apart under immune_status > seropositive, and how
+#: many studies each held there.
+HPAI_LAST = (("HPAI H5N1", 5), ("Influenza A(H5N1)", 4), ("Avian influenza A(H5N1)", 4), ("HPAI A(H5N1)", 4),
+             ("H5N1", 3), ("H5N1 avian influenza", 3))
+
+
+def test_one_disease_spelt_six_ways_is_one_pool_and_lists_its_spellings():
+    rows, aid = [], 0
+    for spelling, k in HPAI_LAST:
+        for _ in range(k):
+            aid += 1
+            rows.append(_row(aid, 2 + aid % 5, 40 + aid, label="seropositive", group="immune_status", disease=spelling))
+    rows += [_row(100 + i, 3, 50, label="seropositive", group="immune_status", disease=d)
+             for i, d in enumerate(("H9N2", "LPAI H9N2", "Avian influenza A(H9N2)"))]
+    groups = P.pooled_groups(rows)
+    assert sorted((g["disease"], g["k"]) for g in groups) == [("A(H5N1)", 23), ("A(H9N2)", 3)]
+    h5 = next(g for g in groups if g["disease"] == "A(H5N1)")
+    assert h5["pooled"] is not None and h5["n_total"] == sum(40 + i for i in range(1, 24))
+    assert h5["disease_spellings"] == [{"spelling": "HPAI H5N1", "n": 5}, {"spelling": "Avian influenza A(H5N1)", "n": 4},
+                                       {"spelling": "HPAI A(H5N1)", "n": 4}, {"spelling": "Influenza A(H5N1)", "n": 4},
+                                       {"spelling": "H5N1", "n": 3}, {"spelling": "H5N1 avian influenza", "n": 3}]
+
+
+def test_one_article_writing_one_disease_two_ways_is_still_one_study():
+    rows = [_row(1, 3, 20, disease="H5N1"), _row(1, 6, 50, disease="HPAI H5N1"), _row(2, 4, 30, disease="Influenza A(H5N1)")]
+    groups, dropped = P.build_groups(rows)
+    (only,) = groups.values()
+    assert dropped == 1 and {r["article_id"]: r["n"] for r in only} == {1: 50, 2: 30}
+
+
+def test_a_comparison_is_made_within_one_disease_however_spelt():
+    rows = []
+    for i, (m, f) in enumerate((("HPAI H5N1", "HPAI H5N1"), ("Influenza A(H5N1)", "influenza A (H5N1)"), ("H5N1", "HPAI H5N1")), 1):
+        rows += [_row(i, 4 + i, 30, disease=m), _row(i, 3 + i, 32, label="female", disease=f)]
+    rows += [_row(4, 5, 30, disease="H9N2"), _row(4, 4, 30, label="female", disease="H9N2")]
+    order = {("human_susc", "sex_gender", "male"): 0, ("human_susc", "sex_gender", "female"): 1}
+    (c,) = P.pooled_comparisons(rows, order)
+    assert (c["disease"], c["a"], c["b"], c["k"]) == ("A(H5N1)", "male", "female", 3)
+    # Each study counts once for each spelling its two rows use.
+    assert c["disease_spellings"] == [{"spelling": "HPAI H5N1", "n": 2}, {"spelling": "H5N1", "n": 1},
+                                      {"spelling": "Influenza A(H5N1)", "n": 1}]
 
 
 def test_fewer_than_three_studies_get_no_pooled_estimate_but_keep_their_studies():
@@ -212,17 +257,20 @@ def _group(body, label, disease):
 
 def test_the_endpoint_pools_the_whole_relevant_corpus_within_a_disease(pool_corpus):
     body = _get().json()
-    male = _group(body, "male", "hpai a h5n1")
+    male = _group(body, "male", "A(H5N1)")
     assert male["k"] == 6 and male["mapped"] and male["label_path"] == "sex_gender > male"
     assert male["events_total"] == sum(x for x, _ in MALE) and male["n_total"] == sum(n for _, n in MALE)
     ref = P.pool_proportions([dict(x=x, n=n) for x, n in MALE])
     assert male["pooled"]["p"] == pytest.approx(ref["pooled"]["p"]) and male["heterogeneity"]["I2"] == ref["heterogeneity"]["I2"]
     assert [s["first_author"] for s in male["studies"]] == ["Smith"] * 6
+    assert male["disease_spellings"] == [{"spelling": "HPAI A(H5N1)", "n": 6}]
     # The two seeded papers have no disease stated: a group of their own, too small to pool.
     stated = _group(body, "male", "(not stated)")
     assert stated["k"] == 2 and stated["pooled"] is None and stated["reason"] == "too_few_studies"
-    cmp_ = next(c for c in body["comparisons"] if c["disease"] == "hpai a h5n1")
+    assert stated["disease_spellings"] == []
+    cmp_ = next(c for c in body["comparisons"] if c["disease"] == "A(H5N1)")
     assert (cmp_["a"], cmp_["b"], cmp_["k"]) == ("male", "female", 6)
+    assert cmp_["disease_spellings"] == [{"spelling": "HPAI A(H5N1)", "n": 6}]
     assert body["filters"] == {"reviewed_only": False, "verified_only": True, "split_disease": True, "min_studies": 3}
 
 
@@ -237,10 +285,10 @@ def test_unverified_quotes_are_left_out_unless_asked_and_counted(pool_corpus):
     with pool_corpus.cursor() as cur:
         cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = 9711", (_doc(9711, MALE[0], FEMALE[0], verified=False),))
     body = _get().json()
-    assert _group(body, "male", "hpai a h5n1")["k"] == 5
+    assert _group(body, "male", "A(H5N1)")["k"] == 5
     # The male and female rows of 9711 (2), plus the seeded paper's "female" row that never had its quote found.
     assert body["excluded"]["quote_not_found"] == 3
-    assert _group(_get(verified_only="false").json(), "male", "hpai a h5n1")["k"] == 6
+    assert _group(_get(verified_only="false").json(), "male", "A(H5N1)")["k"] == 6
 
 
 def test_reviews_decide_what_counts(pool_corpus):
@@ -254,19 +302,19 @@ def test_reviews_decide_what_counts(pool_corpus):
     # A correction replaces the model's count in the pool.
     post("Ana", "edited", edits={"n_cases": 6, "pop_risk": 32})
     body = _get().json()
-    s = next(s for s in _group(body, "male", "hpai a h5n1")["studies"] if s["article_id"] == 9712)
+    s = next(s for s in _group(body, "male", "A(H5N1)")["studies"] if s["article_id"] == 9712)
     assert (s["x"], s["n"], s["review_status"]) == (6, 32, "edited")
     # A rejection removes the row; a disagreement removes it too and says so.
     post("Ana", "rejected")
     body = _get().json()
-    assert _group(body, "male", "hpai a h5n1")["k"] == 5 and body["excluded"]["rejected"] == 1
+    assert _group(body, "male", "A(H5N1)")["k"] == 5 and body["excluded"]["rejected"] == 1
     post("Ben", "accepted")
     body = _get().json()
-    assert _group(body, "male", "hpai a h5n1")["k"] == 5 and body["excluded"]["conflict"] == 1
+    assert _group(body, "male", "A(H5N1)")["k"] == 5 and body["excluded"]["conflict"] == 1
     # reviewed_only keeps just the rows a person stood behind.
     post("Ben", "clear"); post("Ana", "accepted")
     only = _get(reviewed_only="true").json()
-    assert _group(only, "male", "hpai a h5n1")["k"] == 1 and only["excluded"]["not_reviewed"] > 0
+    assert _group(only, "male", "A(H5N1)")["k"] == 1 and only["excluded"]["not_reviewed"] > 0
 
 
 def test_a_duplicate_row_in_one_article_is_counted_once_and_reported(pool_corpus):
@@ -275,7 +323,7 @@ def test_a_duplicate_row_in_one_article_is_counted_once_and_reported(pool_corpus
     with pool_corpus.cursor() as cur:
         cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = 9713", (_doc(9713, MALE[2], FEMALE[2], extra_rows=[dup]),))
     body = _get().json()
-    s = next(s for s in _group(body, "male", "hpai a h5n1")["studies"] if s["article_id"] == 9713)
+    s = next(s for s in _group(body, "male", "A(H5N1)")["studies"] if s["article_id"] == 9713)
     assert s["n"] == 90 and body["n_duplicate_rows_dropped"] == 1           # the larger population is kept
 
 
@@ -288,6 +336,74 @@ def test_invalid_and_missing_counts_are_reported_not_silently_dropped(pool_corpu
         cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = 9714", (_doc(9714, MALE[3], FEMALE[3], extra_rows=bad),))
     ex = _get().json()["excluded"]
     assert ex["invalid_counts"] >= 1 and ex["missing_counts"] >= 1
+
+
+#: HPAI_last's six spellings of A(H5N1) under immune_status > seropositive, two papers each, and
+#: three papers of A(H9N2), spelt three ways.
+SPELT = [(s, 9741 + 2 * k + j) for k, (s, _n) in enumerate(HPAI_LAST) for j in (0, 1)]
+H9N2 = [("H9N2", 9753), ("LPAI H9N2", 9754), ("Avian influenza A(H9N2)", 9755)]
+SPELT_IDS = [i for _s, i in SPELT + H9N2]
+
+
+@pytest.fixture()
+def spelt_corpus(extracted):
+    def doc(disease, i):
+        x, n = 2 + i % 4, 30 + i % 7
+        return json.dumps({"v": 1, "source": "fulltext", "coverage": {}, "observations": [{
+            "sheet": "human_susc", "group": "immune status", "covariate": "seropositive", "value": None, "n_cases": x,
+            "pop_risk": n, "disease": disease, "quote": f"{x} of {n} were seropositive", "quote_verified": True}]})
+    with extracted.cursor() as cur:
+        cur.execute("DELETE FROM article_scenarios WHERE document_id = ANY(%s)", (SPELT_IDS,))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (SPELT_IDS,))
+        for disease, i in SPELT + H9N2:
+            cur.execute("INSERT INTO literature_document (id, title, abstract, authors, year, source, is_duplicate, project_context, "
+                        "extraction_json) VALUES (%s,%s,'Antibodies to avian influenza among exposed poultry workers.',"
+                        "'Lee K',2024,'pubmed',false,'literev',%s::jsonb)",
+                        (i, f"Serosurvey {i}", doc(disease, i)))
+            cur.execute("INSERT INTO article_scenarios (scenario_id, document_id, similarity_score) VALUES (%s,%s,0.9)", (SID, i))
+    yield extracted
+    with extracted.cursor() as cur:
+        cur.execute("DELETE FROM article_scenarios WHERE document_id = ANY(%s)", (SPELT_IDS,))
+        cur.execute("DELETE FROM literature_document WHERE id = ANY(%s)", (SPELT_IDS,))
+
+
+def test_one_disease_spelt_six_ways_is_one_pool_where_there_were_six(spelt_corpus):
+    from api.codebook import clean_label
+    # Keyed on the folded spelling, as the pools were, these papers made six pools of two
+    # studies: none reached three, so none had a pooled value.
+    assert len({clean_label(s) for s, _i in SPELT}) == 6
+    body = _get().json()
+    sero = sorted((g["disease"], g["k"]) for g in body["pooled"] if g["label"] == "seropositive")
+    assert sero == [("A(H5N1)", 12), ("A(H9N2)", 3)]
+    h5 = _group(body, "seropositive", "A(H5N1)")
+    assert h5["pooled"] is not None and h5["label_path"] == "immune_status > seropositive"
+    assert sorted(s["article_id"] for s in h5["studies"]) == [i for _s, i in SPELT]
+    assert sorted((s["spelling"], s["n"]) for s in h5["disease_spellings"]) == sorted((s, 2) for s, _n in HPAI_LAST)
+    # A(H9N2) is pooled apart, and "LPAI" adds nothing to an H9 virus.
+    h9 = _group(body, "seropositive", "A(H9N2)")
+    assert h9["pooled"] is not None and sorted(s["spelling"] for s in h9["disease_spellings"]) == sorted(s for s, _i in H9N2)
+    # Merging every disease is still there to be asked for, and says what it merged.
+    merged = next(g for g in _get(split_disease="false").json()["pooled"] if g["label"] == "seropositive")
+    assert merged["disease"] is None and merged["k"] == 15 and len(merged["disease_spellings"]) == 9
+
+
+def test_the_exports_say_which_pool_each_row_went_to(spelt_corpus):
+    import csv
+    import io
+    from fastapi.testclient import TestClient
+    c = TestClient(main.app)
+    expected = {i: ("A(H5N1)" if i < 9753 else "A(H9N2)", s) for s, i in SPELT + H9N2}
+    # The flat CSV: the disease as the paper wrote it, and the key it is pooled under.
+    rows = list(csv.DictReader(io.StringIO(c.get(f"/user-scenarios/{SID}/extraction/export?format=csv").text.lstrip(chr(0xFEFF)))))
+    got = {int(r["id"][2:]): (r["disease_key"], r["disease"]) for r in rows if int(r["id"][2:]) in expected}
+    assert got == expected
+    # The dataset (JSONL), one observation per line.
+    lines = [json.loads(x) for x in c.get(f"/user-scenarios/{SID}/extraction/dataset?include_unreviewed=true").text.splitlines()]
+    got = {ln["article"]["id"]: (ln["observation"]["disease_key"], ln["observation"]["disease"])
+           for ln in lines if ln["article"]["id"] in expected}
+    assert got == expected
+    # The seeded papers' rows name no disease, and the key says so.
+    assert {r["disease_key"] for r in rows if not r["disease"]} == {"(not stated)"}
 
 
 def test_unknown_scenario_is_a_404():
@@ -337,11 +453,13 @@ def test_the_download_carries_every_label_and_every_comparison(pool_corpus, monk
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
     rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
     assert {row["kind"] for row in rows} == {"proportion", "odds_ratio"}
-    male = next(row for row in rows if row["kind"] == "proportion" and row["label"] == "male" and row["disease"] == "hpai a h5n1")
+    male = next(row for row in rows if row["kind"] == "proportion" and row["label"] == "male" and row["disease"] == "A(H5N1)")
     assert male["studies"] == "6" and male["pooled"] == "Y" and float(male["estimate"]) > 0 and "Smith" in male["study_list"]
+    assert male["disease_as_written"] == "HPAI A(H5N1) (6)"
     assert any(row["kind"] == "proportion" and row["pooled"] == "N" for row in rows), "too few studies: in the file too"
     cmp_ = next(row for row in rows if row["kind"] == "odds_ratio")
     assert (cmp_["label"], cmp_["label_b"], cmp_["studies"]) == ("male", "female", "6") and " vs " in cmp_["study_list"]
+    assert cmp_["disease_as_written"] == "HPAI A(H5N1) (6)"
     assert int(r.headers["x-comparisons"]) == sum(1 for row in rows if row["kind"] == "odds_ratio")
     assert _get("/export", min_studies=1).status_code == 422
     from fastapi.testclient import TestClient
