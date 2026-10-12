@@ -76,6 +76,27 @@ describe("tone and csv", () => {
     expect(csv[1]).toContain('"say ""hi"""');
     expect(csv[2]).toContain(",,,,,,");
   });
+  it("says in the csv how many studies give the composition of their sample", () => {
+    const csv = csvOfPooled([group({ k_composition: 2 }), group()]).split("\n");
+    expect(csv[0].endsWith(",heterogeneity,k_composition,disease_as_written")).toBe(true);
+    expect(csv[1].endsWith(',"substantial",2,')).toBe(true);
+    expect(csv[2].endsWith(',"substantial",,')).toBe(true);                // an older answer without the count
+  });
+  it("ends each csv row with the disease as the papers wrote it", () => {
+    const csv = csvOfPooled([group({ disease: "A(H5N1)", disease_spellings: [{ spelling: "HPAI H5N1", n: 5 }, { spelling: "H5N1", n: 3 }] }),
+      group({ disease_spellings: undefined })]).split("\n");
+    expect(csv[1]).toContain(',"A(H5N1)",');
+    expect(csv[1].endsWith(',"substantial",,"HPAI H5N1 (5); H5N1 (3)"')).toBe(true);
+    expect(csv[2].endsWith(',"substantial",,')).toBe(true);
+  });
+  it("keeps both columns in one order: the composition count, then the spellings, last", () => {
+    const csv = csvOfPooled([group({ k_composition: 3, disease: "A(H5N1)", disease_spellings: [{ spelling: "HPAI H5N1", n: 2 }, { spelling: "H5N1", n: 1 }] })])
+      .split("\n");
+    const head = csv[0].split(",");
+    expect(head.slice(-3)).toEqual(["heterogeneity", "k_composition", "disease_as_written"]);
+    expect(head).toHaveLength(17);
+    expect(csv[1].endsWith(',"substantial",3,"HPAI H5N1 (2); H5N1 (1)"')).toBe(true);
+  });
 });
 
 describe("disease spellings", () => {
@@ -95,6 +116,7 @@ describe("disease spellings", () => {
   });
   it("writes each spelling with its number of studies", () => {
     expect(spellingsText(sp)).toBe("HPAI H5N1 (5) · H5N1 (3)");
+    expect(spellingsText(sp, "; ")).toBe("HPAI H5N1 (5); H5N1 (3)");               // in a table cell, as the server writes it
     expect(spellingsText([])).toBe("");
   });
 });

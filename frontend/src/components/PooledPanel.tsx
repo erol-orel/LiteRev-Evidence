@@ -192,6 +192,11 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                         <span className="inline-flex items-center gap-1.5">
                           {isOpen ? <ChevronUp size={11} className="text-brand-300" /> : <ChevronDown size={11} className="text-white/40" />}
                           {name(g)}{!g.mapped && <span className="text-gold-400/70"> ({t("scenarioDetail.extraction.unmapped")})</span>}
+                          {(g.k_composition ?? 0) > 0 && (
+                            <span className="text-gold-400/70">
+                              {" "}({T("compositionMark").replace("{n}", String(g.k_composition)).replace("{k}", String(g.k))})
+                            </span>
+                          )}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-white/50"><DiseaseName disease={g.disease} spellings={g.disease_spellings} T={T} line /></td>
@@ -207,6 +212,11 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                           <Forest T={T} log={false} nullLine={null} domain={proportionDomain(g)}
                             studies={g.studies.map((s) => ({ label: studyLabel(s), est: s.p ?? 0, lo: s.ci_low ?? 0, hi: s.ci_high ?? 0, w: s.weight_pct ?? 1, n: `${s.x}/${s.n}` }))}
                             pooled={{ est: g.pooled!.p, lo: g.pooled!.ci_low, hi: g.pooled!.ci_high, pLo: g.pooled!.pi_low, pHi: g.pooled!.pi_high }} />
+                          {g.studies.some((s) => s.composition) && (
+                            <p className="mt-1 text-[10px] text-gold-400/80">
+                              {T("compositionStudies").replace("{list}", g.studies.filter((s) => s.composition).map(studyLabel).join(", "))}
+                            </p>
+                          )}
                           {g.heterogeneity && (
                             <p className="mt-1 text-[10px] text-white/40">
                               {T("hetDetail").replace("{q}", String(g.heterogeneity.Q)).replace("{df}", String(g.heterogeneity.df))
@@ -238,7 +248,8 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
                 <div key={id} className="rounded-xl border border-white/5">
                   <button onClick={() => setOpen(isOpen ? null : id)} className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left text-[11px]">
                     <span className="text-white/80">{c.a.replace(/_/g, " ")} <span className="text-white/35">{T("versus")}</span> {c.b.replace(/_/g, " ")}
-                      <span className="ml-2 text-white/40"><DiseaseName disease={c.disease} spellings={c.disease_spellings} T={T} />, {T("papers").replace("{n}", String(c.k))}</span></span>
+                      <span className="ml-2 text-white/40"><DiseaseName disease={c.disease} spellings={c.disease_spellings} T={T} />, {T("papers").replace("{n}", String(c.k))}
+                        {(c.excluded_composition ?? 0) > 0 && `, ${T("papersLeftOut").replace("{n}", String(c.excluded_composition))}`}</span></span>
                     <span className="font-mono text-white">OR {fmtOr(c.pooled.or)} <span className="text-white/40">({intervalText(c.pooled.ci_low, c.pooled.ci_high, fmtOr)})</span>
                       {" "}<HetChip g={c.heterogeneity} T={T} /></span>
                   </button>
