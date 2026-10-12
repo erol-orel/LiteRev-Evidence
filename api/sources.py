@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import Depends, Query
 from sqlalchemy import text
 
-from .core import RELIEFWEB_APPNAME, app, engine, logger, require_api_key
+from .core import RELIEFWEB_APPNAME, app, engine, logger, redact_keys, require_api_key
 from .documents import _normalize_doi, _normalize_title, same_work_doi_match, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              has_abstract_sql, relevant_gate_tail_sql)
@@ -434,16 +434,38 @@ def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
     return results, total
 
 
+#: L'adresse donnée à OpenAlex avec chaque appel, celle que la recherche donnait déjà.
+OPENALEX_MAILTO = "literev@gesica.ch"
+
+
+def openalex_params(params: dict | None = None) -> dict:
+    """Les paramètres d'un appel à OpenAlex : `mailto`, et la clé quand le serveur en a une.
+
+    OpenAlex facture désormais son API : un appel sans clé puise dans un petit budget
+    quotidien gratuit, partagé par tous les clients derrière la même adresse IP, et une fois
+    ce budget dépensé chaque appel répond 429 « Insufficient budget » jusqu'à minuit UTC.
+    C'est ce qui a arrêté la recherche HPAI exposition du 12 octobre 2026 après 1 594
+    notices. Une clé gratuite (openalex.org/settings/api, enregistrée sous OPENALEX_API_KEY)
+    donne au serveur un budget à lui, plus large ; une page de recherche coûte, une notice
+    lue par son identifiant non. La clé voyage dans l'URL : toute erreur qui peut la citer
+    passe par `redact_keys` avant d'être journalisée ou enregistrée."""
+    out = {"mailto": OPENALEX_MAILTO, **dict(params or {})}
+    key = (os.getenv("OPENALEX_API_KEY") or "").strip()
+    if key:
+        out["api_key"] = key
+    return out
+
+
 def _live_fetch_openalex(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
         # OpenAlex `search` n'accepte pas la syntaxe booléenne (renvoie HTTP 400)
         # → on lui passe des mots-clés simples.
-        r = _req.get("https://api.openalex.org/works", params={
+        r = _req.get("https://api.openalex.org/works", params=openalex_params({
             "search": _plain_keywords(query), "per-page": min(max_results, 50),
             "select": "id,title,abstract_inverted_index,doi,publication_year,authorships,primary_location,open_access"
-        }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
+        }), headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)
         r.raise_for_status()      # un 429 ou un 500 n'est pas « aucun résultat »
         for item in r.json().get("results", []):
             doi = item.get("doi", "")
@@ -993,7 +1015,8 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool =
          eutils_params, ua,
          lambda j: int(j.get("esearchresult", {}).get("count", 0) or 0)),
         ("OpenAlex", "https://api.openalex.org/works",
-         {"search": (query if raw else _plain_keywords(query)), "per-page": 1, "select": "id,title"}, ua,
+         openalex_params({"search": (query if raw else _plain_keywords(query)), "per-page": 1,
+                          "select": "id,title"}), ua,
          lambda j: j.get("meta", {}).get("count")),
         ("Crossref", "https://api.crossref.org/works",
          {"query": query, "rows": 1, "select": "DOI,title"}, ua,
@@ -1041,11 +1064,11 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool =
                     count = None
             return {"source": name, "ok": r.status_code == 200, "http": r.status_code,
                     "latency_ms": ms, "count": count,
-                    "error": None if r.status_code == 200 else (r.text or "")[:200]}
+                    "error": None if r.status_code == 200 else redact_keys(r.text or "")[:200]}
         except Exception as e:
             return {"source": name, "ok": False, "http": None,
                     "latency_ms": round((_t.time() - t0) * 1000), "count": None,
-                    "error": f"{type(e).__name__}: {e}"[:200]}
+                    "error": redact_keys(f"{type(e).__name__}: {e}")[:200]}
 
     results: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as ex:
@@ -1088,6 +1111,9 @@ def sources_health(query: str = "cardiac arrest", timeout: int = 12, raw: bool =
             # question à se poser.
             "semantic_scholar_api_key": bool(os.getenv("SEMANTIC_SCHOLAR_API_KEY")),
             "core_api_key": bool(os.getenv("CORE_API_KEY")),
+            # Sans elle, OpenAlex puise dans un budget quotidien partagé par l'adresse IP du
+            # serveur, et répond 429 « Insufficient budget » une fois ce budget dépensé.
+            "openalex_api_key": bool(os.getenv("OPENALEX_API_KEY")),
         },
     }
 

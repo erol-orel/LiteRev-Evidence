@@ -52,11 +52,17 @@ and the interface says how many articles they draw.
 - The API reads `/etc/literev-api.env`, the canonical file. On the server,
   `scripts/env_audit.py --live` says which file each setting comes from, by fingerprint
   only; `GET /sources/health` says whether each source key is loaded (`config`).
-- `SEMANTIC_SCHOLAR_API_KEY` and `COHERE_API_KEY` are kept in the GitHub
-  **environment "production"**, not as repository secrets. The deploy job writes them into
-  the canonical file on every deploy, reading the first of their usual names that is set
-  (secret or variable: `S2_API_KEY`, `COHERE_KEY`...), and its log names the one that
-  held each key, or says none did, never a value: read it there when a key seems missing.
-  The manual server command runs in "production-admin" and sees them empty.
+- `SEMANTIC_SCHOLAR_API_KEY`, `COHERE_API_KEY` and `OPENALEX_API_KEY` are kept in the
+  GitHub **environment "production"**, not as repository secrets. The deploy job writes
+  them into the canonical file on every deploy, reading the first of their usual names that
+  is set (secret or variable: `S2_API_KEY`, `COHERE_KEY`, `OPENALEX_KEY`...), and its log
+  names the one that held each key, or says none did, never a value: read it there when a
+  key seems missing. The manual server command runs in "production-admin" and sees them
+  empty.
+- OpenAlex takes its key in the URL (`api_key=`): every OpenAlex call goes through
+  `openalex_params` (`api/sources.py`), and any error text that can carry a URL goes through
+  `redact_keys` (`api/core.py`) before it is logged or stored. Without the key, OpenAlex
+  draws on a small daily budget shared by the server's IP address and answers 429
+  "Insufficient budget" once it is spent, until midnight UTC.
 - Never print, commit or paste a key: check presence, never values. More in
   `docs/ops-runbook.md`, "Keys".

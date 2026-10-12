@@ -375,20 +375,24 @@ env audit (names and fingerprints only):
 
 | File | Defines |
 |---|---|
-| `/etc/literev-api.env` | `DB_URL`, `OPENAI_API_KEY`, `WRITE_API_KEY`, `CDS_API_KEY`, `COHERE_API_KEY`, `NCBI_API_KEY`, `RELIEFWEB_APPNAME`, `LIVE_MAX_PER_SOURCE` and `POPULATE_FEDERATION_BUDGET` (moved there by the deploy of #353), and `SEMANTIC_SCHOLAR_API_KEY` once the deploy finds it |
+| `/etc/literev-api.env` | `DB_URL`, `OPENAI_API_KEY`, `WRITE_API_KEY`, `CDS_API_KEY`, `COHERE_API_KEY`, `NCBI_API_KEY`, `RELIEFWEB_APPNAME`, `LIVE_MAX_PER_SOURCE` and `POPULATE_FEDERATION_BUDGET` (moved there by the deploy of #353), and `SEMANTIC_SCHOLAR_API_KEY` and `OPENALEX_API_KEY` once the deploy finds them |
 | `/opt/literev-api/.env` | `OPEN_API_KEY` (an OpenAI key under a misspelt name, read by nothing) |
 | `/opt/literev-api/secrets.env` | stale copies of `OPENAI_API_KEY`, `DB_URL`, `WRITE_API_KEY`, `CDS_API_KEY`, plus `CORE_API_KEY` and the mail settings |
 
 GitHub holds the keys that reach the server through a workflow:
 
 - **environment "production"** (Settings > Secrets and variables > Actions > Environment
-  secrets): the Semantic Scholar key, and the Cohere key once a paid one exists.
+  secrets): the Semantic Scholar key, the Cohere key once a paid one exists, and the
+  OpenAlex key (free, from openalex.org/settings/api).
   The deploy job (`deploy.yml`, step "Install the API keys kept in this environment")
   writes them into the canonical file on every deploy, before the restart, as
-  `SEMANTIC_SCHOLAR_API_KEY` and `COHERE_API_KEY`, reading the first of their usual
-  names that is set, as a secret or a variable (`SEMANTIC_SCHOLAR_API_KEY`,
+  `SEMANTIC_SCHOLAR_API_KEY`, `COHERE_API_KEY` and `OPENALEX_API_KEY`, reading the first
+  of their usual names that is set, as a secret or a variable (`SEMANTIC_SCHOLAR_API_KEY`,
   `SEMANTIC_SCHOLAR_KEY`, `SEMANTICSCHOLAR_API_KEY`, `S2_API_KEY`, `S2_KEY`;
-  `COHERE_API_KEY`, `COHERE_KEY`, `CO_API_KEY`). A key the environment does not hold
+  `COHERE_API_KEY`, `COHERE_KEY`, `CO_API_KEY`; `OPENALEX_API_KEY`, `OPENALEX_KEY`).
+  Without its key, OpenAlex draws on a small daily budget shared by the server's IP
+  address: on 12 October 2026 it answered 429 "Insufficient budget" to every call after
+  the day's searches, until midnight UTC. A key the environment does not hold
   leaves the server's line as it is. The step's log names the usual name that held each
   key, or says that none did, never a value: the deploy of #353 found no
   `SEMANTIC_SCHOLAR_API_KEY` there although the key had been saved in that environment.

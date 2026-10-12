@@ -14,7 +14,7 @@ from fastapi import Depends, Query
 from sqlalchemy import text, bindparam
 
 from .core import (EXHAUSTIVE_FEDERATION_BUDGET, POPULATE_FEDERATION_BUDGET, _norm_lang, app,
-                   engine, logger, require_api_key)
+                   engine, logger, redact_keys, require_api_key)
 from .documents import (
     METADATA_UPDATE_SQL,
     _llm_lang_directive,
@@ -82,6 +82,7 @@ from .sources import (
     _ingest_doc_direct,
     _ncbi_get,
     epmc_query,
+    openalex_params,
     pubmed_esearch_by_years,
     pubmed_year_bounds,
     pubmed_years_term,
@@ -268,13 +269,13 @@ def _unpaywall_email() -> str:
     return os.getenv("UNPAYWALL_EMAIL", "literev@gesica.ch")
 
 
-def _ft_get(url, params=None, timeout=20):
+def _ft_get(url, params=None, timeout=20, headers=None):
     import time as _time
     import requests as _requests
     for _att in range(3):
         try:
             _r = _requests.get(url, params=params, timeout=timeout,
-                               headers={"User-Agent": "LiteRev-Evidence/1.0"})
+                               headers={"User-Agent": "LiteRev-Evidence/1.0", **(headers or {})})
             if _r.status_code == 429:
                 _time.sleep(int(_r.headers.get("Retry-After", 10)))
                 continue
@@ -553,8 +554,12 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
         _ss_id = (f"DOI:{_doi}" if _doi else f"PMID:{_pmid}" if _pmid
                   else f"PMCID:{_ext_id}" if _ext_id and _ext_id.upper().startswith("PMC") else None)
         if _ss_id:
+            # La clé de Semantic Scholar quand le serveur en a une, comme la recherche :
+            # sans elle, l'appel puise dans le quota anonyme, souvent épuisé (429).
+            _s2_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
             _r_ss = _ft_get(f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
-                            params={"fields": "openAccessPdf,abstract"})
+                            params={"fields": "openAccessPdf,abstract"},
+                            headers=({"x-api-key": _s2_key} if _s2_key else None))
             if _r_ss and _r_ss.status_code == 200:
                 try:
                     _oa_pdf = _r_ss.json().get("openAccessPdf")
@@ -578,7 +583,7 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
     if not _fulltext and (_ext_id.startswith("W") or _doi):
         _oa_work_url = (f"https://api.openalex.org/works/{_ext_id}" if _ext_id.startswith("W")
                         else f"https://api.openalex.org/works/doi:{_doi}")
-        _r_oa = _ft_get(_oa_work_url, params={"select": "open_access"})
+        _r_oa = _ft_get(_oa_work_url, params=openalex_params({"select": "open_access"}))
         if _r_oa and _r_oa.status_code == 200:
             try:
                 _oa_info = _r_oa.json().get("open_access", {})
@@ -991,7 +996,7 @@ def _run_user_scenario_populate(
         _f = getattr(_tls, "fetcher", None)
         if _f:
             with _counter_lock:
-                _fetcher_errors[_f] = (str(reason)[:200] if reason is not None
+                _fetcher_errors[_f] = (redact_keys(reason)[:200] if reason is not None
                                        else _fetcher_errors.get(_f) or "")
 
     def _mark_source_skipped(reason: str):
@@ -1780,14 +1785,15 @@ def _run_user_scenario_populate(
                         # garde les 2000 LES PLUS PERTINENTS (BM25 OpenAlex) et non les plus
                         # récents. `per-page`, avec un TRAIT D'UNION : c'est le nom du
                         # paramètre chez OpenAlex ; `per_page` était refusé.
-                        _oa_params = {"search": _ox_q, "per-page": _oa_batch, "page": _oa_page,
-                                      "sort": "relevance_score:desc", "mailto": "literev@gesica.ch"}
+                        _oa_params = openalex_params({"search": _ox_q, "per-page": _oa_batch, "page": _oa_page,
+                                                      "sort": "relevance_score:desc"})
                     else:
                         # Pas de virgule dans un filtre OpenAlex : elle y sépare deux filtres.
                         _oa_params = ({"filter": "title_and_abstract.search:" + _ox_q.replace(",", " ")}
                                       if _pass == "scoped" else {"search": _ox_q})
-                        _oa_params.update({"per-page": _oa_batch, "cursor": _oa_cursor,
-                                           "mailto": "literev@gesica.ch"})
+                        # `mailto`, et la clé OpenAlex quand le serveur en a une (`openalex_params`).
+                        _oa_params = openalex_params({**_oa_params, "per-page": _oa_batch,
+                                                      "cursor": _oa_cursor})
                     oa_resp = _with_retries(lambda: _requests.get("https://api.openalex.org/works",
                                                                   params=_oa_params, timeout=20), "OpenAlex")
                     if (_oa_fetched == 0 and 400 <= oa_resp.status_code < 500 and oa_resp.status_code != 429
@@ -2491,7 +2497,7 @@ def _run_user_scenario_populate(
                     except Exception as _fe:
                         logger.warning(f"Populate {scenario_id} source future error: {_fe}")
                         with _counter_lock:
-                            _fetcher_errors[_fname] = str(_fe)[:200]
+                            _fetcher_errors[_fname] = redact_keys(_fe)[:200]
             # CRITIQUE - sur Python <3.11, as_completed lève
             # concurrent.futures.TimeoutError (≠ TimeoutError natif). Sans
             # _FuturesTimeout dans le except, l'exception remontait, le bloc
