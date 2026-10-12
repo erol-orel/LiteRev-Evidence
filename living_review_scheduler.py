@@ -91,7 +91,9 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 #: Une page d'identifiants esearch, puis un lot efetch (le BATCH_SIZE du populate).
 _ESEARCH_PAGE = 500
 _EFETCH_BATCH = 200
-#: eutils ne rend aucun identifiant au-delà du 10 000e d'une même recherche PubMed.
+#: eutils ne rend aucun identifiant au-delà du 10 000e d'une même recherche PubMed. Au-delà,
+#: et quand le garde-fou en demande davantage, la recherche est découpée par années de
+#: publication, par le helper du populate (`api.sources.pubmed_esearch_by_years`).
 _NCBI_ESEARCH_CEILING = 10_000
 #: Une page de la facette préprints d'Europe PMC, la taille qu'emploie le populate.
 _EPMC_PAGE = 100
@@ -323,7 +325,12 @@ def search_pubmed(query: str, days: int = DEFAULT_LOOKBACK_DAYS,
 
     Renvoie {"ids", "total", "fetched", "truncated", "error"} : `total` est le compte que
     PubMed annonce, `truncated` dit que le garde-fou (ou une erreur) a arrêté la lecture
-    avant ce total. Une page qui échoue arrête la lecture, et l'erreur est rendue."""
+    avant ce total. Une page qui échoue arrête la lecture, et l'erreur est rendue.
+
+    Au-delà des 10 000 identifiants qu'eutils rend par recherche (une longue fenêtre,
+    `--days`), et quand le garde-fou en demande davantage, la même requête est lue par
+    tranches d'années de publication, avec le découpage du populate ; `year_slices` les
+    nomme dans le rapport, et `total` reste le compte de la requête entière."""
     date_from = (datetime.now() - timedelta(days=days)).strftime("%Y/%m/%d")
     date_to = datetime.now().strftime("%Y/%m/%d")
     # [EDAT] = date d'ENTRÉE dans PubMed (indexation), pas [PDAT] (date de publication).
@@ -331,22 +338,28 @@ def search_pubmed(query: str, days: int = DEFAULT_LOOKBACK_DAYS,
     # une fenêtre [PDAT] ratait donc les articles récemment indexés mais publiés il y a
     # plus de `days`. Dédup à l'ingestion → élargir la fenêtre est sans risque.
     term = f"({query}) AND ({date_from}[EDAT]:{date_to}[EDAT])"
-    cap = max(0, min(int(max_results), _NCBI_ESEARCH_CEILING))
+    limit = max(0, int(max_results))
+    cap = min(limit, _NCBI_ESEARCH_CEILING)
     ids: list[str] = []
     seen: set[str] = set()
     total: Optional[int] = None
     error: Optional[str] = None
+
+    def _page(t: str, retstart: int, retmax: int) -> dict:
+        r = _eutils("esearch.fcgi", {
+            "db": "pubmed", "term": t, "retmode": "json",
+            "retstart": retstart, "retmax": retmax,
+        })
+        r.raise_for_status()
+        res = (r.json() or {}).get("esearchresult") or {}
+        if res.get("ERROR"):
+            raise RuntimeError(str(res["ERROR"])[:200])
+        return res
+
     retstart = 0
     while retstart < cap:
         try:
-            r = _eutils("esearch.fcgi", {
-                "db": "pubmed", "term": term, "retmode": "json",
-                "retstart": retstart, "retmax": min(_ESEARCH_PAGE, cap - retstart),
-            })
-            r.raise_for_status()
-            res = (r.json() or {}).get("esearchresult") or {}
-            if res.get("ERROR"):
-                raise RuntimeError(str(res["ERROR"])[:200])
+            res = _page(term, retstart, min(_ESEARCH_PAGE, cap - retstart))
         except Exception as e:
             error = f"esearch: {type(e).__name__}: {e}"[:300]
             logger.warning(f"PubMed esearch '{query[:60]}' (retstart={retstart}) : {e}")
@@ -357,11 +370,39 @@ def search_pubmed(query: str, days: int = DEFAULT_LOOKBACK_DAYS,
             if p not in seen:
                 seen.add(p)
                 ids.append(p)
+        if retstart == 0 and total > _NCBI_ESEARCH_CEILING and limit > _NCBI_ESEARCH_CEILING:
+            return _search_pubmed_by_years(query, term, _page, total, limit, ids)
         retstart += len(page)
         if not page or retstart >= total:
             break
     return {"ids": ids, "total": total, "fetched": len(ids),
             "truncated": total is None or total > len(ids), "error": error}
+
+
+def _search_pubmed_by_years(query: str, term: str, page, total: int, limit: int,
+                            first: list[str]) -> dict:
+    """La fenêtre d'une veille qui annonce plus de 10 000 notices, lue par tranches d'années
+    de publication (`api.sources.pubmed_esearch_by_years`, le découpage du populate). Les
+    identifiants de la première page restent si le découpage n'a pas pu aller au bout."""
+    _, sources = _api()
+    split = sources.pubmed_esearch_by_years(
+        page, lambda lo, hi: sources.pubmed_years_term(term, lo, hi),
+        total=total, cap=limit, page=_ESEARCH_PAGE, ceiling=_NCBI_ESEARCH_CEILING)
+    ids: list[str] = []
+    seen: set[str] = set()
+    for p in list(split["ids"]) + list(first):
+        if p not in seen:
+            seen.add(p)
+            ids.append(p)
+    ids = ids[:limit]
+    if split["error"]:
+        logger.warning(f"PubMed esearch '{query[:60]}', découpage par années : {split['error']}")
+    logger.info(f"PubMed '{query[:60]}' : {total} notices annoncées, lues en "
+                f"{len(split['slices'])} tranche(s) d'années, {len(ids)} PMID distincts")
+    return {"ids": ids, "total": total, "fetched": len(ids), "truncated": total > len(ids),
+            "error": (f"esearch: {split['error']}"[:300] if split["error"] else None),
+            "year_slices": [s["years"] for s in split["slices"]],
+            "year_slices_capped": {s["years"]: int(s["count"]) for s in split["slices"] if s["capped"]}}
 
 
 def _text_of(el) -> str:
@@ -711,7 +752,12 @@ def _review(scenario_id: str, *, label: str, queries: list[str], window: int,
                         dry_run=dry_run, tally=tally)
         searches.append({"source": "pubmed", "query": q_pm, "total": s["total"],
                          "fetched": s["fetched"], "truncated": s["truncated"],
-                         "error": s["error"] or err})
+                         "error": s["error"] or err,
+                         # Lue par tranches d'années au-delà de 10 000 notices : le rapport
+                         # le dit, comme la carte PRISMA d'une recherche.
+                         **({"year_slices": s["year_slices"],
+                             "year_slices_capped": s.get("year_slices_capped") or {}}
+                            if s.get("year_slices") else {})})
 
     if with_preprints and not no_preprints:
         for q in queries:

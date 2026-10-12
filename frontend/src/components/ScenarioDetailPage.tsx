@@ -4731,6 +4731,28 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{n}", String(parts.length))}
             </p>
           ))}
+          {/* PubMed au-delà des 10 000 notices qu'eutils rend par requête : lue en entier,
+              par tranches d'années. Le total affiché reste celui de la requête entière. */}
+          {Object.entries(ident.year_slices ?? {}).map(([src, years]) => {
+            const over = Object.entries(ident.year_slices_capped?.[src] ?? {});
+            return (
+              <p key={`years-${src}`} className="text-[10px] text-emerald-300/60 pt-1 leading-relaxed">
+                {t("scenarioDetail.prisma.yearSlicesNote")
+                  .replace("{source}", SOURCE_LABELS_MAP[src] ?? src)
+                  .replace("{n}", String(years.length))
+                  .replace("{years}", years.join(", "))}
+                {ident.sources_capped?.includes(src) && (
+                  <span className="block">{t("scenarioDetail.prisma.yearSlicesShared")}</span>
+                )}
+                {over.length > 0 && (
+                  <span className="block text-amber-300/80">
+                    {t("scenarioDetail.prisma.yearSlicesCapped")
+                      .replace("{years}", over.map(([y, n]) => `${y} (${num(n).toLocaleString()})`).join(", "))}
+                  </span>
+                )}
+              </p>
+            );
+          })}
           {/* Les facettes OU d'une recherche multi-facettes trop longues pour être
               fédérées : aucune base ne les a reçues, la bibliothèque locale seule. */}
           {(ident.facets_skipped?.length ?? 0) > 0 && (

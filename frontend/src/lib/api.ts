@@ -1216,7 +1216,8 @@ export interface ScenarioPrisma {
     search_mode?: "standard" | "exhaustive";
     /** The cap actually applied to a source when it differs from `per_source_cap`: the
      *  relevance-ranked passes keep their own (RANKED_PASS_MAX, 2,000 by default), Crossref
-     *  in both modes and OpenAlex in a standard search; PubMed returns at most 10,000. */
+     *  in both modes and OpenAlex in a standard search. PubMed has none of its own: past the
+     *  10,000 records eutils returns per query, it is read in year slices (`year_slices`). */
     source_caps?: Record<string, number>;
     /** Sources searched in titles and abstracts only (OpenAlex in an exhaustive search). */
     title_abstract_sources?: string[];
@@ -1225,6 +1226,14 @@ export interface ScenarioPrisma {
     unranked_sources?: string[];
     /** Sources that received the whole boolean split into several short queries. */
     split_queries?: Record<string, string[]>;
+    /** Sources whose query announced more than the 10,000 records eutils returns per
+     *  query (PubMed), read whole in publication-year slices ("≤1962", "1963-1994",
+     *  "2021", "≥2023"). Each record counted once; the source's total stays the whole
+     *  query's. */
+    year_slices?: Record<string, string[]>;
+    /** Among those slices, the single years still over 10,000, with what they announced:
+     *  only their 10,000 most relevant could be read. */
+    year_slices_capped?: Record<string, Record<string, number>>;
     /** "populate" = sources were searched; "rebuild" = the boolean query was replayed
      *  over the local library and nothing was searched. The panel called both a search. */
     method?: string;

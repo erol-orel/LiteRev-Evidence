@@ -416,6 +416,14 @@ def get_user_scenario_prisma(
                 "unranked_sources": list(_figures.get("unranked_sources") or []),
                 "split_queries": {str(k): [str(q) for q in (v or [])]
                                   for k, v in (_figures.get("split_queries") or {}).items() if v},
+                # PubMed au-delà de 10 000 notices : lue par tranches d'années, et les
+                # années seules encore au-delà. Vides pour une recherche antérieure.
+                "year_slices": {str(k): [str(y) for y in (v or [])]
+                                for k, v in (_figures.get("year_slices") or {}).items() if v},
+                "year_slices_capped": {str(k): {str(y): int(n) for y, n in (v or {}).items()
+                                                if isinstance(n, (int, float))}
+                                       for k, v in (_figures.get("year_slices_capped") or {}).items()
+                                       if isinstance(v, dict) and v},
             })
         # La séparation « bases interrogées / bibliothèque locale » : prise telle quelle
         # si elle est stockée, sinon DÉDUITE de la ligne `db_cache` que les anciennes

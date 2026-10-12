@@ -96,7 +96,7 @@ the corpus count itself stays pure lexical.
 
 | # | Source | Page size | Standard search keeps | Exhaustive search keeps | Key needed |
 |---|--------|-----------|-----------------------|-------------------------|-----------|
-| 1 | **PubMed** | 200 | 2000, by relevance | every match (eutils stops at 10 000) | optional (`NCBI_API_KEY`) |
+| 1 | **PubMed** | 200 | 2000, by relevance | every match (past 10 000, read in year slices) | optional (`NCBI_API_KEY`) |
 | 2 | **OpenAlex** | 200 | 2000, by relevance | every title/abstract match + its 2000 most relevant | none (polite email) |
 | 3 | **Crossref** | 1000 | 2000, by relevance | **2000, by relevance** (keywords only) | none (polite email) |
 | 4 | **Europe PMC** | 1000 | 2000, by relevance | every match | none |
@@ -121,6 +121,14 @@ the corpus count itself stays pure lexical.
 ### 1. PubMed - `eutils.ncbi.nlm.nih.gov/entrez/eutils` (`main.py:7618`)
 - esearch (`usehistory=y`) → efetch in batches of **`BATCH_SIZE = 200`** (`main.py:7500`).
 - `sort=relevance` (PubMed's Best Match): at the cap, the most relevant are kept.
+- eutils returns at most 10 000 identifiers per query. When a query announces more and
+  the per-source cap asks for more, the same query is read in publication-year slices
+  (`AND (YYYY:YYYY[dp])`, each range halved until it announces 10 000 or fewer;
+  `api.sources.pubmed_esearch_by_years`, shared with the living review). Every record is
+  counted once, the PRISMA total stays the whole query's count, and the card names the
+  slices. A single year still over 10 000 keeps its 10 000 most relevant, and says so;
+  above the per-source cap, the cap is shared between the slices in proportion. The
+  scenario's years (`year_min`, `year_max`) are applied in the PubMed query itself.
 - Rate limit: **3 req/s keyless**, ~10 req/s with `NCBI_API_KEY` (optional). A
   shared lock throttles all eutils calls (`_NCBI_LOCK`) to avoid 429s.
 - Uses the translated **PubMed boolean** query. Extracts authors, journal, DOI.

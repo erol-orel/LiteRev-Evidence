@@ -138,6 +138,241 @@ def _ncbi_get(url: str, params: dict, timeout: int = 12, use_key: bool = True):
     return r
 
 
+# ── PubMed au-delà de 10 000 notices : la même requête, par tranches d'années ─────
+#: eutils ne rend aucun identifiant au-delà du 10 000e d'une même recherche PubMed
+#: (`retstart + retmax` ≤ 10 000 ; NCBI le documente et conseille de découper la requête).
+#: Une requête qui en annonçait 23 000 n'en rapportait donc que les 10 000 premiers, et la
+#: carte PRISMA les présentait comme la recherche entière, plafond compris.
+NCBI_ESEARCH_CEILING = 10_000
+#: Borne NOMINALE d'une tranche ouverte vers le passé : elle sert à calculer un milieu,
+#: jamais à écrire la requête. La tranche la plus ancienne s'écrit « NOT (Y:3000[dp]) » et
+#: prend tout ce qui précède Y, quelle que soit sa date : une borne basse écrite en dur
+#: aurait laissé dehors les notices plus anciennes qu'elle, que PubMed indexe.
+_PUBMED_SPLIT_FLOOR = 1800
+
+
+def pubmed_year_bounds(filters) -> tuple[int | None, int | None]:
+    """Les bornes d'années du scénario (`year_min`, `year_max`), en entiers, pour PubMed.
+
+    Une borne illisible est ignorée, et des bornes inversées aussi : la correspondance
+    locale (`_build_where`) applique alors sa propre règle, comme avant. PUR."""
+    f = filters if isinstance(filters, dict) else {}
+
+    def _year(v) -> int | None:
+        if v is None or isinstance(v, bool):
+            return None
+        try:
+            y = int(float(str(v).strip()))
+        except (TypeError, ValueError):
+            return None
+        return y if 1000 <= y <= 9999 else None
+
+    lo, hi = _year(f.get("year_min")), _year(f.get("year_max"))
+    if lo is not None and hi is not None and lo > hi:
+        return None, None
+    return lo, hi
+
+
+def pubmed_years_term(term: str, lo: int | None, hi: int | None) -> str:
+    """`term` restreinte aux années de publication [lo, hi] ; None ouvre ce côté.
+
+    « 3000 » est la borne « jusqu'à aujourd'hui » de PubMed. Une tranche ouverte vers le
+    passé s'écrit par exclusion, « NOT (hi+1:3000[dp]) », pour ne dépendre d'aucune année
+    plancher. [dp] lit la date imprimée ET la date électronique : une notice mise en ligne
+    en décembre et imprimée en janvier répond aux deux années, d'où la déduplication des
+    identifiants quand les tranches sont réunies. PUR."""
+    if lo is None and hi is None:
+        return term
+    if hi is None:
+        return f"({term}) AND ({lo}:3000[dp])"
+    if lo is None:
+        return f"({term}) NOT ({hi + 1}:3000[dp])"
+    return f"({term}) AND ({lo}:{hi}[dp])"
+
+
+def pubmed_years_label(lo: int | None, hi: int | None) -> str:
+    """Le libellé d'une tranche pour la carte PRISMA : « 2021 », « 1995-2010 », « ≤1962 »,
+    « ≥2023 ». PUR."""
+    if lo is None and hi is None:
+        return ""
+    if lo is None:
+        return f"≤{hi}"
+    if hi is None:
+        return f"≥{lo}"
+    return str(lo) if lo == hi else f"{lo}-{hi}"
+
+
+def _pubmed_year_halves(lo, hi, floor: int, top: int):
+    """Les deux moitiés de la tranche [lo, hi], ou None quand elle ne se coupe plus (une
+    seule année, ou une tranche ouverte au-delà de sa borne nominale). PUR."""
+    a = floor if lo is None else lo
+    b = top if hi is None else hi
+    if a >= b:
+        return None
+    mid = (a + b) // 2
+    return (lo, mid), (mid + 1, hi)
+
+
+def pubmed_slice_quotas(counts: list[int], cap: int, total: int,
+                        ceiling: int = NCBI_ESEARCH_CEILING) -> list[int]:
+    """Combien d'identifiants demander à chaque tranche.
+
+    Tout ce qu'elle peut rendre (au plus `ceiling`) quand la requête entière tient sous le
+    plafond par source. Au-delà, le plafond est PARTAGÉ entre les tranches à proportion de
+    leur taille, chacune gardant ses plus pertinentes : prendre les tranches dans l'ordre
+    jusqu'au plafond aurait gardé une époque et perdu les autres, ce que le tri par date
+    faisait déjà (la littérature H5N1 de 2004 à 2012 perdue). Le reste de l'arrondi va aux
+    plus grandes parts fractionnaires, jamais au-delà de ce qu'une tranche peut rendre.
+    Déterministe. PUR."""
+    counts = [max(0, int(c or 0)) for c in counts]
+    avail = [min(c, int(ceiling)) for c in counts]
+    cap = max(0, int(cap))
+    if int(total) <= cap or sum(avail) <= cap:
+        return avail
+    weight = sum(counts) or 1
+    raw = [cap * c / weight for c in counts]
+    quota = [min(a, int(r)) for a, r in zip(avail, raw)]
+    left = cap - sum(quota)
+    order = sorted(range(len(counts)), key=lambda i: (-(raw[i] - int(raw[i])), i))
+    while left > 0:
+        moved = False
+        for i in order:
+            if left <= 0:
+                break
+            if quota[i] < avail[i]:
+                quota[i] += 1
+                left -= 1
+                moved = True
+        if not moved:
+            break
+    return quota
+
+
+def _interleave_by_rank(lists: list[list[str]]) -> list[str]:
+    """Les identifiants de plusieurs tranches, chacune dans son ordre de pertinence, réunis
+    par rang RELATIF (le premier dixième de chaque tranche, puis le deuxième...), chacun une
+    fois. Une coupure par le budget pendant le téléchargement des notices perd ainsi les
+    moins pertinentes de chaque tranche, et non les tranches les plus récentes. PUR."""
+    keyed = []
+    for i, ids in enumerate(lists):
+        n = len(ids) or 1
+        keyed.extend((r / n, i, r, pmid) for r, pmid in enumerate(ids))
+    keyed.sort(key=lambda k: (k[0], k[1], k[2]))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _f, _i, _r, pmid in keyed:
+        if pmid not in seen:
+            seen.add(pmid)
+            out.append(pmid)
+    return out
+
+
+class _SplitStopped(Exception):
+    """Le budget de temps est écoulé pendant le découpage."""
+
+
+def pubmed_esearch_by_years(esearch, render, *, total: int, cap: int,
+                            year_min: int | None = None, year_max: int | None = None,
+                            page: int | None = None, ceiling: int | None = None,
+                            stop=None, this_year: int | None = None) -> dict:
+    """Tous les PMID d'une requête PubMed qui en annonce plus que `ceiling` (10 000), par la
+    MÊME requête restreinte à des tranches d'années de publication.
+
+    Décision du propriétaire du produit. La tranche des années du scénario (toutes, sans
+    bornes) est coupée en deux, récursivement, jusqu'à ce que chaque tranche en annonce au
+    plus `ceiling` ; chaque tranche est lue, et les identifiants sont réunis, chacun une
+    fois (une notice électronique en décembre et imprimée en janvier répond aux deux
+    années). Une seule année encore au-delà de `ceiling` garde ses `ceiling` plus
+    pertinentes, et le dit (`capped`). Quand la requête entière dépasse le plafond par
+    source `cap`, une tranche dont la part du plafond tient en une recherche n'est plus
+    coupée (cf. `pubmed_slice_quotas`).
+
+    `esearch(term, retstart, retmax)` rend l'objet `esearchresult` d'eutils ou lève : c'est
+    l'appelant qui porte ses reprises, son espacement, son tri et le passage en POST d'une
+    requête longue (`_ncbi_get`). `render(lo, hi)` écrit la requête d'une tranche, avec ce
+    que l'appelant y ajoute (l'exclusion des préprints). `total` est le compte de la
+    requête ENTIÈRE, celui que la carte PRISMA garde : la somme des tranches compterait
+    deux fois les notices à cheval sur deux années. `stop()` vrai arrête tout (budget).
+
+    Rend {ids, total, slices: [{years, from, to, count, kept, capped}], complete, stopped,
+    error}. Un découpage qui n'a pas pu être planifié (erreur, budget) ne rend aucun
+    identifiant : l'appelant garde alors ce que la requête entière lui a déjà rendu."""
+    ceiling = int(ceiling or NCBI_ESEARCH_CEILING)
+    page = max(1, min(int(page or ceiling), ceiling))
+    cap = max(0, int(cap))
+    total = max(0, int(total or 0))
+    if this_year is None:
+        from datetime import datetime as _dt
+        this_year = _dt.now().year
+    floor, top = _PUBMED_SPLIT_FLOOR, int(this_year)
+    out = {"ids": [], "total": total, "slices": [], "complete": False, "stopped": False,
+           "error": None}
+
+    def _result(term: str, retstart: int, retmax: int) -> dict:
+        res = esearch(term, retstart, retmax) or {}
+        if res.get("ERROR"):
+            raise RuntimeError(f"esearch: {str(res['ERROR'])[:200]}")
+        return res
+
+    def _needs_split(c: int) -> bool:
+        if c <= ceiling:
+            return False
+        # Au-delà du plafond par source, une tranche dont la part tient en une recherche
+        # n'a pas à être coupée : on n'en lira que sa part.
+        return not (total > cap and c * cap <= ceiling * total)
+
+    leaves: list[tuple[tuple, int, bool]] = []
+
+    def _visit(rng: tuple, c: int) -> None:
+        if not _needs_split(c):
+            leaves.append((rng, c, False))
+            return
+        halves = _pubmed_year_halves(rng[0], rng[1], floor, top)
+        if halves is None:
+            leaves.append((rng, c, True))           # une seule année, encore trop grande
+            return
+        for half in halves:
+            if stop is not None and stop():
+                raise _SplitStopped()
+            _visit(half, int(_result(render(*half), 0, 0).get("count") or 0))
+
+    try:
+        _visit((year_min, year_max), total)
+    except _SplitStopped:
+        out["stopped"] = True
+        return out
+    except Exception as e:                                   # noqa: BLE001 - dit, pas avalé
+        out["error"] = f"{type(e).__name__}: {e}"[:300]
+        return out
+
+    quotas = pubmed_slice_quotas([c for _r, c, _k in leaves], cap, total, ceiling)
+    lists: list[list[str]] = []
+    for (rng, c, capped), want in zip(leaves, quotas):
+        got: list[str] = []
+        while len(got) < want and not out["stopped"]:
+            if stop is not None and stop():
+                out["stopped"] = True
+                break
+            try:
+                res = _result(render(*rng), len(got), min(page, want - len(got)))
+            except Exception as e:                           # noqa: BLE001 - dit, pas avalé
+                out["error"] = f"{type(e).__name__}: {e}"[:300]
+                break
+            ids = [str(p).strip() for p in (res.get("idlist") or []) if str(p).strip()]
+            if not ids:
+                break
+            got.extend(ids)
+        got = got[:want]
+        lists.append(got)
+        out["slices"].append({"years": pubmed_years_label(*rng), "from": rng[0], "to": rng[1],
+                              "count": int(c), "kept": len(got), "capped": bool(capped)})
+        if out["stopped"]:
+            break
+    out["ids"] = _interleave_by_rank(lists)
+    out["complete"] = not out["stopped"] and out["error"] is None
+    return out
+
+
 def _live_fetch_pubmed(query: str, max_results: int) -> tuple[list[dict], int]:
     """Fetch from PubMed eSearch+eSummary.
 

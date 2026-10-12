@@ -1560,7 +1560,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    local_match_capped: bool = False,
                                    kept_previous_links: int = 0,
                                    kept_previous_failed_sources: list | None = None,
-                                   kept_reviewed_links: int = 0) -> dict[str, Any]:
+                                   kept_reviewed_links: int = 0,
+                                   year_slices: dict | None = None,
+                                   year_slices_capped: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
     recherche a RÉELLEMENT ramené - et non du corpus déjà dédupliqué.
 
@@ -1642,6 +1644,13 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              retire.
     kept_reviewed_links    : les liens que la recherche n'a pas appariés et qui restent parce
                              qu'un relecteur en a décidé (inclus, exclu, vote, arbitrage).
+    year_slices            : les sources dont la requête a été lue par tranches d'années de
+                             publication, et ces tranches (PubMed : eutils ne rend pas plus
+                             de 10 000 identifiants par recherche). Le total de la source
+                             reste celui de la requête entière.
+    year_slices_capped     : parmi elles, les tranches d'une seule année qui en annonçaient
+                             encore plus de 10 000, et ce qu'elles annonçaient : seules leurs
+                             10 000 plus pertinentes ont pu être lues.
 
     PRISMA 2020 : identifiés → doublons retirés → (retirés pour d'autres raisons) →
     passés au screening. « Autres raisons » ici : préprint quand la recherche les exclut,
@@ -1779,6 +1788,10 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "unranked_sources": sorted({_source_label(s) for s in (unranked_sources or [])}),
         "split_queries": {_source_label(k): [str(q) for q in v]
                           for k, v in (split_queries or {}).items() if v},
+        "year_slices": {_source_label(k): [str(y) for y in v]
+                        for k, v in (year_slices or {}).items() if v},
+        "year_slices_capped": {_source_label(k): {str(y): int(n) for y, n in (v or {}).items()}
+                               for k, v in (year_slices_capped or {}).items() if v},
         "duplicate_records_across_sources": across,
         "duplicate_rows_in_database": rows,
         "duplicates_removed": duplicates,
