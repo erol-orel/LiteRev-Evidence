@@ -224,26 +224,26 @@ def _normalize_doi(doi: str | None) -> str | None:
 # corpus et l'extraction comptait la même étude deux fois. Ce qui suit dit quand deux DOI
 # désignent le même travail ; deux DOI de revue de racines différentes restent deux.
 
-#: Les serveurs de préprints : un DOI ici est une version d'un travail, que sa version
-#: publiée (un DOI de revue de même titre) remplace.
-PREPRINT_DOI_PREFIXES = (
-    "10.1101/",     # bioRxiv, medRxiv
-    "10.64898/",    # bioRxiv, préfixe de 2025
-    "10.21203/",    # Research Square
-    "10.22541/",    # Authorea
-    "10.2139/",     # SSRN
-    "10.20944/",    # Preprints.org
-    "10.31219/",    # OSF Preprints
-    "10.31234/",    # PsyArXiv
-    "10.31222/",    # MetaArXiv
-    "10.32942/",    # EcoEvoRxiv
-    "10.26434/",    # ChemRxiv
-    "10.36227/",    # TechRxiv
-    "10.48550/",    # arXiv
-    "10.13140/",    # ResearchGate
-    "10.1590/scielopreprints.",
-    "10.2196/preprints.",
+#: Le DOI d'un serveur de préprints (bioRxiv et medRxiv sous la forme datée
+#: « 10.1101/2020.03.05.20031773 » ou l'ancienne à six chiffres, et non « 10.1101/gr. » ou
+#: « 10.1101/cshperspect. », qui sont des revues de Cold Spring Harbor). Un seul motif
+#: pour l'exclusion des préprints (`search.preprint_sql`) et la dédup par travail, ici :
+#: un DOI de préprint est une version d'un travail, que sa version publiée remplace.
+PREPRINT_DOI_RE = (
+    r"^10\.1101/(\d{4}\.\d{2}\.\d{2}\.\d+|\d{6}(v\d+)?$)"       # bioRxiv, medRxiv
+    # Le préfixe que portent les DOI datés de bioRxiv et medRxiv en 2026 (vu sur HPAI_last :
+    # « 10.64898/2026.08.06.26359901 », revue « medRxiv : the preprint server… »).
+    r"|^10\.64898/\d{4}\.\d{2}\.\d{2}\.\d+"
+    r"|^10\.21203/rs\."                                         # Research Square
+    r"|^10\.2139/ssrn\."                                        # SSRN
+    r"|^10\.20944/preprints"                                    # Preprints.org
+    r"|^10\.48550/arxiv\."                                      # arXiv
+    r"|^10\.3123[45]/osf\.io/|^10\.31219/osf\.io/"              # OSF, PsyArXiv, SocArXiv
+    r"|^10\.26434/chemrxiv|^10\.36227/techrxiv|^10\.32942/"     # ChemRxiv, TechRxiv, EcoEvoRxiv
+    r"|^10\.22541/au\.|^10\.2196/preprints\."                   # Authorea, JMIR Preprints
+    r"|^10\.1590/scielopreprints\."                             # SciELO Preprints
 )
+
 #: Les dépôts de données : figures, tableaux et jeux de données déposés sous le titre de
 #: l'article (figshare en dépose une par figure). Jamais un travail à part de l'article.
 DATA_DOI_PREFIXES = (
@@ -283,7 +283,7 @@ def doi_kind(doi: str | None) -> str | None:
         return None
     if d.startswith(DATA_DOI_PREFIXES):
         return "data"
-    if d.startswith(PREPRINT_DOI_PREFIXES):
+    if re.match(PREPRINT_DOI_RE, d):
         return "preprint"
     return "journal"
 

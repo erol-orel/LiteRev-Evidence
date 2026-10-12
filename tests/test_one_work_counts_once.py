@@ -44,6 +44,7 @@ def test_the_work_doi_drops_punctuation_case_and_versions(raw, key):
     ("10.1186/1471-2334-9-170", "journal"),
     ("10.21203/rs.2.14161/v1", "preprint"),
     ("10.1101/2020.01.01.123456", "preprint"),
+    ("10.1101/gr.123456.110", "journal"),          # Genome Research, une revue de Cold Spring Harbor
     ("10.64898/2025.12.08.693062", "preprint"),
     ("10.6084/m9.figshare.1528105.v1", "data"),
     ("10.5281/zenodo.1234567", "data"),

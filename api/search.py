@@ -17,7 +17,7 @@ from sqlalchemy import text, bindparam
 import lexical_search as _lex
 
 from .core import app, engine, logger, require_api_key
-from .documents import _strategy_is_degraded, same_work_survivors
+from .documents import PREPRINT_DOI_RE, _strategy_is_degraded, same_work_survivors
 from .scenario_store import _get_user_scenario_or_404, has_abstract_sql
 from llm_usage import model_for as _model
 
@@ -42,20 +42,7 @@ from llm_usage import model_for as _model
 # serveur de préprints. La déduplication par titre réunit souvent le préprint et l'article
 # publié sous une seule ligne, qui garde le DOI de la première arrivée et reçoit la revue
 # de la seconde : cette ligne est un article publié, et l'exclusion ne doit pas l'écarter.
-PREPRINT_DOI_RE = (
-    r"^10\.1101/(\d{4}\.\d{2}\.\d{2}\.\d+|\d{6}(v\d+)?$)"       # bioRxiv, medRxiv
-    # Le préfixe que portent les DOI datés de bioRxiv et medRxiv en 2026 (vu sur HPAI_last :
-    # « 10.64898/2026.08.06.26359901 », revue « medRxiv : the preprint server… »).
-    r"|^10\.64898/\d{4}\.\d{2}\.\d{2}\.\d+"
-    r"|^10\.21203/rs\."                                         # Research Square
-    r"|^10\.2139/ssrn\."                                        # SSRN
-    r"|^10\.20944/preprints"                                    # Preprints.org
-    r"|^10\.48550/arxiv\."                                      # arXiv
-    r"|^10\.3123[45]/osf\.io/|^10\.31219/osf\.io/"              # OSF, PsyArXiv, SocArXiv
-    r"|^10\.26434/chemrxiv|^10\.36227/techrxiv|^10\.32942/"     # ChemRxiv, TechRxiv, EcoEvoRxiv
-    r"|^10\.22541/au\.|^10\.2196/preprints\."                   # Authorea, JMIR Preprints
-    r"|^10\.1590/scielopreprints\."                             # SciELO Preprints
-)
+# PREPRINT_DOI_RE : défini dans `documents`, où la dédup par travail le lit aussi.
 PREPRINT_URL_RE = (
     r"(biorxiv\.org|medrxiv\.org|arxiv\.org/|researchsquare\.com|ssrn\.com|preprints\.org"
     r"|chemrxiv\.org|psyarxiv\.com|osf\.io/preprints|authorea\.com"
