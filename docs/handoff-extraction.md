@@ -1,12 +1,10 @@
 # Handoff: structured extraction (GEOAI4EI use case)
 
-State of production on 2026-10-08, after the full run. Everything below is merged to `main`
-(PRs #309, #310, #311, #313, #315) and deployed to https://literev-scenario.com. Nothing is pending on
-a branch.
-
-**This note replaces the first version, which said the corpus held 558 relevant papers of which 5 were
-extracted and listed the full run as not done. The full run has happened.** Every figure here was read
-from the live system and re-checked independently.
+State of production on 2026-10-12, after the full run on HPAI_last (`usr-b1e16a5d9c38`), the
+scenario the Italian partner team now works from. Everything below is merged to `main` and
+deployed to https://literev-scenario.com. The first version of this note described the earlier
+scenario `usr-4757684f5462` (640 articles, threshold 0.30, 601 extracted on 2026-10-08); its
+figures are kept below only where they still say something.
 
 A partner-facing write-up of the same material, with the field-by-field comparison against a human
 reading of one paper, is in `docs/hpai-report-italian-team.md`. Test steps are in
@@ -25,33 +23,33 @@ that check.
 
 ## The run, as it stands
 
-Scenario `usr-4757684f5462` (HPAI), threshold 0.30, extraction version 1.
+Scenario `usr-b1e16a5d9c38` (HPAI_last), exhaustive search of 2026-10-12, threshold 0.5201 on the
+similarity of the title and abstract, extraction version 1. Papers are read up to
+150 000 characters.
 
 | | |
 |---|---|
-| Corpus | 640 articles |
-| Relevant | 602 |
-| Extracted | 601 (573 from full text, 28 from abstract) |
-| Observations | 10 893 |
-| Quote located in the source | 10 291 (94.5%) |
-| Given up after 3 attempts | 1 (article 163468, never retried) |
-| Extracted but zero observations | 7 |
-| Text cut at the 60 000 character limit | 192 (33.5% of the full-text set) |
+| Corpus | 17 510 articles (1 820 without an abstract) |
+| Relevant | 1 075 |
+| Extracted | 1 072 (426 from full text, 646 from abstract) |
+| Observations | 14 908 |
+| Quote located in the source | 13 848 (92.9%) |
+| Given up after 3 attempts | 0 |
+| Read through the condensed retry | 3 |
+| Extracted but zero observations | 55 |
+| Text cut at the 150 000 character limit | 14 |
 | Reviewed by a human | 0 |
-| Rows carrying a codebook label | 1 896 (17.4%) |
+| Rows carrying a codebook label | 36% |
+| Stamped with model and prompt | 1 040; 32 come from the 2026-10-08 run, inherited through the shared article rows |
 
-Ran 2026-10-08, roughly 10:49 to 12:11 UTC. Yield is 18.8 rows per full-text paper (median 18, range 0
-to 68) against 4.6 per abstract-only paper (median 4.5, range 1 to 11). No abstract produced a table or
-figure row.
+Yield is a median of 22 rows per full-text paper (max 120) against
+6 per abstract-only paper. Rows by sheet: human_exp 5 690 (772 papers), animal 5 080 (673 papers), human_susc 2 162 (481 papers), env 1 955 (501 papers), vector 21 (17 papers).
 
-Rows by sheet: animal 3 336 (445 papers), human_exp 3 172 (441), human_susc 2 449 (360), env 1 619
-(364), vector 317 (114).
-
-**Two facts that bound what this corpus can support.** About half the rows are not avian influenza:
-COVID-19 alone is 2 091 rows (19.2%) across 136 papers, and roughly 4 300 rows (about 39%) carry an
-avian or H5/H7/H9 label. The exact split depends on the label rule, since `disease` is free text with
-626 distinct spellings, so quote it as a range. And nothing has been human-reviewed, so every figure is
-the model's unchecked reading.
+**The corpus is on target.** 89.5% of the rows carry an avian influenza label (H5N1 above
+all), 5.9% another influenza, 0.2% COVID-19, against about 39% avian and 19%
+COVID-19 on the earlier scenario. The `disease` field is free text with 567 distinct
+spellings, which splits pools (below). Nothing has been human-reviewed: every figure is the model's
+unchecked reading.
 
 ## What exists
 
@@ -133,15 +131,18 @@ Writes, `X-API-Key` required:
 
 Server (root@literev-app-01), API on localhost:8000, key in `/etc/literev-api.env` (`WRITE_API_KEY`):
 
-    curl -X POST "http://localhost:8000/user-scenarios/usr-4757684f5462/extraction/run" -H "X-API-Key: <key>"
-    curl http://localhost:8000/user-scenarios/usr-4757684f5462/extraction/status
+    curl -X POST "http://localhost:8000/user-scenarios/usr-b1e16a5d9c38/extraction/run" -H "X-API-Key: <key>"
+    curl http://localhost:8000/user-scenarios/usr-b1e16a5d9c38/extraction/status
 
 Add `?max_articles=5` for a trial. A full run costs model credits. In the browser, click the header
 badge to store the write key; without it the app is read-only, and the five write actions each show an
 explanatory line rather than a dead button.
 
 Note: the run endpoint has no `force` parameter and skips any row already at the current extraction
-version, so a re-run will not revisit the 601 papers unless the version changes.
+version, so a re-run will not revisit extracted papers unless the version changes. `?retry_given_up=true`
+gives back their attempts to the relevant articles given up after three failures, once their cause
+is fixed. A paper whose answer overflows the 8 000-token ceiling is asked once more for a condensed
+answer (at most 50 rows) and is marked `condensed`.
 
 ## Not done yet
 
@@ -181,21 +182,25 @@ version, so a re-run will not revisit the 601 papers unless the version changes.
 
 **Defects.**
 
-- **No model identifier and no prompt fingerprint on any of the 601 extractions.** The code stamps
+- **No model identifier and no prompt fingerprint on the 32 extractions of the first run** (601 on the earlier scenario, of which these are inherited). The code stamps
   both, but the run finished about twenty-five minutes before the commit that writes them, so
-  `coverage.by_model` reads `[{model: unknown, prompt_sha: unknown, n: 601}]` and the report's method
-  line reads "Made with: unknown, prompt unknown (601)". Because the extraction version did not change
+  `coverage.by_model` still counts these 32 under `unknown` (it read 601 on the earlier
+  scenario), and the report's method line says so. Because the extraction version did not change
   and the run endpoint has no force flag, this cannot be backfilled without a code change and a paid
   re-run.
-- **192 papers had their text cut** at 60 000 characters. The fact is in the interface and in
+- **14 papers had their text cut**, at 150 000 characters (192 at 60 000 on the earlier scenario). The fact is in the interface and in
   `/extraction/articles`, and in none of the deliverables: not the report, not the workbook, not the
   CSV, not the JSONL.
 - **The labelled dataset download returns 0 bytes** because nothing is reviewed and the interface does
   not pass the flag for unreviewed rows.
 - **`ref.first_author` is filled on 115 of 601 rows (19.1%)**, so some report citations read "? 2013".
-- **The pooled panel lists at most 120 groups** (`api/pooling.py:308`) with no truncation flag in the
-  payload. Of those 120 today, 101 hold one study and 15 hold two, so only 4 reach the minimum of three.
-- **The report's country table stops at 25** of the 36 countries.
+- **The pooled panel lists at most 120 groups** (`api/pooling.py`), now flagged as capped in the
+  payload. On HPAI_last 2 580 labels exist and 45 reach the minimum of three studies.
+- **The disease is free text, so one infection is pooled under each spelling**: human H5N1
+  seropositivity sits in 14 pools. A read-time disease map is the fix (PR #341, open).
+- **Comparisons between groups often contrast the two shares of one sample** (men and women of the
+  same 200 people), a composition, not a risk (PR #339, open).
+- **The report's country table stops at 25** of the 41 countries.
 - **The Excel export is not byte-reproducible.** Successive downloads differ by a byte or two and have
   different checksums, since openpyxl writes a zip with varying metadata. Never quote an exact size;
   say about 1.6 MB. The CSV is byte-stable.
