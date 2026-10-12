@@ -445,7 +445,10 @@ approximate-nearest-neighbor index on `document_chunk.embedding` (so semantic
 search stays fast). It also **recovers orphaned jobs**: any scenario left
 `running`/`starting` from a previous process (threads die on restart) is reset or
 auto-relaunched, and a permanent enrichment worker embeds chunks / extracts PICO /
-backfills abstracts on a loop. Schema is created/extended by idempotent
+backfills abstracts on a loop. Its PICO batch (`background_pico_sql`) takes only the
+articles relevant to at least one scenario (the shared gate, with each scenario's own
+threshold): a whole corpus is summarized only by an explicit `POST /pico/extract`
+with `scope=all`. Schema is created/extended by idempotent
 `_ensure_*()` DDL functions run at import time (e.g. `_ensure_user_scenarios_table`,
 `_ensure_scenario_settings_table`, `_ensure_double_blind_columns`).
 

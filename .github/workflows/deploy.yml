@@ -127,6 +127,57 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      # Keys kept as secrets of THIS environment ("production") reach the server here, on
+      # every deploy, before deploy.sh restarts the API. The Semantic Scholar key sat in
+      # this environment while the manual server command (environment "production-admin")
+      # looked for it and found it empty: written on each deploy, it cannot go missing
+      # again. Values travel on STDIN (never in a command line or a log; GitHub masks
+      # them anyway) and only the variable NAMES are printed. A secret this environment
+      # does not hold leaves the server's line as it is.
+      - name: Install the API keys kept in this environment
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          {
+            for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
+              if [ -n "${!name:-}" ]; then printf 'export %s=%q\n' "$name" "${!name}"; fi
+            done
+            cat <<'REMOTE'
+          set -e
+          f=/etc/literev-api.env
+          for name in SEMANTIC_SCHOLAR_API_KEY COHERE_API_KEY; do
+            if [ -z "${!name:-}" ]; then echo "$name: no secret in this environment, server line left as it is"; continue; fi
+            tmp=$(mktemp)
+            grep -v "^${name}=" "$f" > "$tmp" || true
+            printf '%s=%s\n' "$name" "${!name}" >> "$tmp"
+            cat "$tmp" > "$f"
+            rm -f "$tmp"
+            echo "$name: written to $f"
+          done
+          # Two settings lived only in the repository's .env, where the env audit called
+          # them "scattered": in force, from a file nobody looks in. They move to the
+          # canonical file once, values unchanged.
+          for name in LIVE_MAX_PER_SOURCE POPULATE_FEDERATION_BUDGET; do
+            if ! grep -q "^${name}=" "$f" && grep -q "^${name}=" /opt/literev-api/.env 2>/dev/null; then
+              grep -m1 "^${name}=" /opt/literev-api/.env >> "$f"
+              sed -i "/^${name}=/d" /opt/literev-api/.env
+              echo "$name: moved to $f"
+            fi
+          done
+          REMOTE
+          } | ssh -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 \
+              -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              bash
+
       - name: Deploy via SSH (runs deploy.sh on the server)
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

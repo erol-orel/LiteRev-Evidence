@@ -46,3 +46,15 @@ and the interface says how many articles they draw.
   a presentation.
 - Frontend strings live in `frontend/src/i18n/locales/{fr,en}.ts`; both files must carry
   the same keys and the same `{placeholders}`.
+
+## Where the keys live (names only, never a value)
+
+- The API reads `/etc/literev-api.env`, the canonical file. On the server,
+  `scripts/env_audit.py --live` says which file each setting comes from, by fingerprint
+  only; `GET /sources/health` says whether each source key is loaded (`config`).
+- `SEMANTIC_SCHOLAR_API_KEY` and `COHERE_API_KEY` are secrets of the GitHub
+  **environment "production"**, not repository secrets. The deploy job writes them into
+  the canonical file on every deploy. The manual server command runs in
+  "production-admin" and sees them empty.
+- Never print, commit or paste a key: check presence, never values. More in
+  `docs/ops-runbook.md`, "Keys".
