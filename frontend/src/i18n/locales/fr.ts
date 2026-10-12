@@ -1304,6 +1304,16 @@ export const fr = {
         truncated: "axes tronqués pour la lecture : {rows}/{rowsTotal} lignes, {cols}/{colsTotal} colonnes",
         coverage: "Lisible sur {with} des {total} articles pertinents : les autres n'ont pas de concepts extraits et n'apparaissent nulle part dans cette matrice.",
       },
+      levels: {
+        high: "Élevée",
+        moderate: "Modérée",
+        low: "Faible",
+        veryLow: "Très faible",
+        notApplicable: "Non applicable",
+        notAssessed: "Non évaluée",
+        strong: "Fort",
+        insufficient: "Insuffisant",
+      },
       claims: {
         title: "Affirmations et force des preuves",
         computed: "La force n'est pas écrite par le modèle : elle est calculée d'après les devis des articles cités, puis plafonnée par ce que le corpus entier peut soutenir.",
