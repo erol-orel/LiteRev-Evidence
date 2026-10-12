@@ -3,6 +3,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
+import { levelBadge, levelText } from "../lib/gradeLevels";
 import { useI18n } from "../i18n/LanguageProvider";
 import {
   ArrowLeft, Brain,
@@ -179,18 +180,6 @@ import {
  *  seuil qui compte. À éparpiller la valeur en littéraux, un scénario passé à 0.60
  *  affichait encore ses articles comme « pertinents » à partir de 0.45. */
 const DEFAULT_SIMILARITY_THRESHOLD = 0.45;
-
-/**
- * Claim strength, which the backend computes from the cited studies' designs rather than
- * letting the model assert it. The labels come from `api/evidence.py::_STRENGTH_ORDER`;
- * an unknown one falls back to neutral styling rather than disappearing.
- */
-const CLAIM_STRENGTH_STYLE: Record<string, string> = {
-  Fort: "bg-brand-500/20 text-brand-300",
-  "Modéré": "bg-gold-500/20 text-gold-300",
-  Faible: "bg-orange-500/20 text-orange-300",
-  Insuffisant: "bg-white/10 text-white/45",
-};
 
 const STATUS_COLORS = {
   green: {
@@ -8159,8 +8148,10 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                 {llmData.claims.map((c, i) => (
                   <div key={i} className="rounded-xl border border-white/8 bg-white/3 p-3 space-y-1.5">
                     <div className="flex items-start gap-2">
-                      <span className={`shrink-0 rounded-md px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${CLAIM_STRENGTH_STYLE[c.strength] ?? "bg-white/10 text-white/50"}`}>
-                        {c.strength}
+                      {/* Claim strength, computed by the backend from the cited studies' designs
+                          (a GRADE level, `api/evidence.py`), shown in the interface's language. */}
+                      <span className={`shrink-0 rounded-md px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${levelBadge(c.strength)}`}>
+                        {levelText(c.strength, t)}
                       </span>
                       <p className="text-xs text-white/80 leading-relaxed">{c.claim}</p>
                     </div>
@@ -8173,7 +8164,7 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
                         .replace("{designs}", Object.entries(c.basis.designs)
                           .map(([d, n]) => `${d} (${n})`).join(", ") || "-")}
                       {c.basis.downgraded_single_study && ` · ${t("scenarioDetail.evidences.claims.singleStudy")}`}
-                      {c.basis.capped_by_corpus && ` · ${t("scenarioDetail.evidences.claims.capped").replace("{level}", c.basis.from_designs)}`}
+                      {c.basis.capped_by_corpus && ` · ${t("scenarioDetail.evidences.claims.capped").replace("{level}", levelText(c.basis.from_designs, t))}`}
                     </p>
                     {c.articles.length > 0 && (
                       <ul className="pl-1 space-y-0.5">

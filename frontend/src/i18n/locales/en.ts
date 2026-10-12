@@ -1304,6 +1304,16 @@ export const en: Translations = {
         truncated: "axes truncated for reading: {rows}/{rowsTotal} rows, {cols}/{colsTotal} columns",
         coverage: "Readable on {with} of the {total} relevant articles: the others have no extracted concepts and appear nowhere in this matrix.",
       },
+      levels: {
+        high: "High",
+        moderate: "Moderate",
+        low: "Low",
+        veryLow: "Very low",
+        notApplicable: "Not applicable",
+        notAssessed: "Not assessed",
+        strong: "Strong",
+        insufficient: "Insufficient",
+      },
       claims: {
         title: "Claims and evidence strength",
         computed: "The strength is not written by the model: it is computed from the study designs of the cited articles, then capped by what the whole corpus can support.",
