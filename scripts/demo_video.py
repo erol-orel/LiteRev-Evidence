@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Record the demo video of the main pipeline from the real interface, and render it.
+"""Record the demo video from the real interface, and render it.
 
 The video is code: the interface changes, the script runs again, the video follows.
 
-  python3 scripts/demo_video.py                       # English, into docs/demo/
-  python3 scripts/demo_video.py --lang fr             # French
-  python3 scripts/demo_video.py --lang en --lang fr   # both
+  # the site's video: a real deployment filmed read-only, into docs/demo/
+  python3 scripts/demo_video.py --base-url https://literev-scenario.com --scenario usr-b1e16a5d9c38 \\
+      --lang en --lang fr
+  # the local demo on its synthetic corpus, into demo-video/
+  python3 scripts/demo_video.py --lang en --lang fr
 
 By default, like the browser smoke test (scripts/smoke_e2e.py), the script:
 
@@ -21,18 +23,25 @@ By default, like the browser smoke test (scripts/smoke_e2e.py), the script:
   6. stops the API and drops the database (unless --keep-db).
 
 With --base-url the tour films a running deployment instead, on --scenario and its real
-data. It only reads: it types a question without launching the search, opens tabs and
-expands an article. No database is touched and no corpus is seeded.
+data, read-only: it types without sending, opens tabs, articles and plots, and a guard in the
+browser aborts every request that would write. A screen whose content is not computed yet in
+the filmed language (a translation, cluster summaries, a brief) is skipped, not computed: the
+run lists the skipped scenes and what the guard did. No key is given to the browser, no
+database is touched and no corpus is seeded. Then only Pillow and ffmpeg are needed here.
+
+The site plays docs/demo/literev-demo-<lang>.mp4, a deployment filmed this way: --out-dir is
+docs/demo/ with --base-url, and demo-video/ for the local demo, so a synthetic recording
+never replaces the site's video by accident.
 
 Narration: set DEMO_TTS_API_KEY (an OpenAI key, or the key of any API that speaks
-/v1/audio/speech: DEMO_TTS_BASE_URL) and each caption is also read aloud. --narrate does
-the same with OPENAI_API_KEY. DEMO_TTS_MODEL and DEMO_TTS_VOICE choose the voice. The
+/v1/audio/speech: DEMO_TTS_BASE_URL) and each scene's narration is read aloud. --narrate
+does the same with OPENAI_API_KEY. DEMO_TTS_MODEL and DEMO_TTS_VOICE choose the voice. The
 clips are cached in the work directory, so a re-render does not pay for them twice.
 
 Needs: the backend dependencies plus uvicorn (as for the smoke test), Pillow, ffmpeg,
 Node with the frontend dev dependencies (npm ci in frontend/) and a Playwright Chromium
-(npx playwright install chromium in frontend/). The captions live in
-frontend/demo/storyboard.ts; docs/demo-video.md explains the whole chain.
+(npx playwright install chromium in frontend/). The captions and the narration live in
+frontend/demo/storyboard.json; docs/demo-video.md explains the whole chain.
 """
 from __future__ import annotations
 
@@ -193,12 +202,29 @@ def record(lang: str, frames: str, *, base_url: str | None, web_port: int, api_b
                         cwd=FRONTEND, env=env).returncode
     if rc != 0:
         raise RuntimeError(f"the tour failed ({lang}): Playwright exited with code {rc}")
+    report_recording(frames, lang)
+
+
+def report_recording(frames: str, lang: str) -> None:
+    """What the recording left out, and on a deployment what the read-only guard did."""
+    with contextlib.suppress(OSError, ValueError):
+        with open(os.path.join(frames, "manifest.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        for s in manifest.get("skipped") or []:
+            _log(f"{lang}: scene {s.get('id')} skipped: {s.get('reason')}")
+        guard = manifest.get("guard")
+        if guard:
+            _log(f"{lang}: read-only guard: {len(guard.get('blocked') or [])} request(s) blocked, "
+                 f"{len(guard.get('redirected') or [])} read from the stored copy")
+            for line in (guard.get("blocked") or []) + (guard.get("redirected") or []):
+                _log(f"  {line}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lang", action="append", choices=("en", "fr"), help="interface and caption language (repeatable)")
-    ap.add_argument("--out-dir", default=os.path.join(ROOT, "docs", "demo"), help="where the videos go")
+    ap.add_argument("--out-dir", default=None,
+                    help="where the videos go (default: docs/demo/ with --base-url, demo-video/ otherwise)")
     ap.add_argument("--base-url", default=None, help="film this running deployment instead (read only)")
     ap.add_argument("--scenario", default=None, help="scenario to film (default: the built-in demo scenario)")
     ap.add_argument("--db-url", default=os.environ.get("DB_URL"),
@@ -229,7 +255,9 @@ def main() -> int:
     # Absolute: the tour runs from frontend/ and would read a relative path from there.
     work = os.path.abspath(args.work or tempfile.mkdtemp(prefix="literev-demo-"))
     os.makedirs(work, exist_ok=True)
-    out_dir = os.path.abspath(args.out_dir)
+    # The site plays docs/demo/, filmed on a deployment: a synthetic recording goes elsewhere.
+    out_dir = os.path.abspath(args.out_dir or (os.path.join(ROOT, "docs", "demo") if remote
+                                               else os.path.join(ROOT, "demo-video")))
     scenario = args.scenario or DEMO_SCENARIO_ID
     results = []
 
@@ -243,7 +271,7 @@ def main() -> int:
 
     try:
         if remote:
-            film_and_render(None, os.environ.get("DEMO_API_KEY", ""))
+            film_and_render(None, "")         # read-only: never a key in the browser of a deployment
         else:
             api_key = f"demo-{uuid.uuid4().hex[:12]}"
             with throwaway_database(args.db_url, args.db_name, args.keep_db) as db_url, \

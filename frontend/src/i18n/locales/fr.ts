@@ -16,8 +16,9 @@ export const fr = {
       "Définir la clé admin (X-API-Key) pour activer les écritures",
     languageLabel: "Langue",
     demoVideo: "Vidéo de démonstration",
-    demoVideoTitle: "LiteRev en 95 secondes environ",
-    demoVideoNote: "Les écrans sont ceux de l'application ; les 200 articles sont fictifs.",
+    demoVideoTitle: "LiteRev, visite guidée (environ {minutes} minutes)",
+    demoVideoTitleShort: "LiteRev, visite guidée",
+    demoVideoNote: "Filmé sur le site en ligne, sur le scénario HPAI_last, en lecture seule.",
     demoVideoOpen: "Ouvrir le fichier vidéo",
     demoVideoClose: "Fermer",
     removeKeyConfirm:

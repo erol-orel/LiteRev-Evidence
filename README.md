@@ -5,15 +5,16 @@ literature search, evidence synthesis (PICO, PRISMA screening, GRADE levels), an
 assistant grounded in the corpus, clustering and a concept map, through to a predictive
 model trained on real data. In production at [literev-scenario.com](https://literev-scenario.com).
 
-## The main pipeline, in a short video
+## A guided tour, in a video
 
 [![The corpus of a scenario, scored and selected: a frame of the demo video](docs/demo/literev-demo-en.jpg)](docs/demo/literev-demo-en.mp4)
 
 Watch it in [English](docs/demo/literev-demo-en.mp4) or in [French](docs/demo/literev-demo-fr.mp4)
-(subtitles: [en](docs/demo/literev-demo-en.vtt), [fr](docs/demo/literev-demo-fr.vtt)).
-It is recorded by code from the real interface, on a synthetic demo corpus, so
-`python3 scripts/demo_video.py` makes it again whenever the interface changes:
-[docs/demo-video.md](docs/demo-video.md) says how, and what in it is real.
+(subtitles: [en](docs/demo/literev-demo-en.vtt), [fr](docs/demo/literev-demo-fr.vtt)):
+about five minutes, filmed read-only on the live site on a real scenario, avian influenza
+in people exposed at work. It is recorded by code from the real interface, so the Demo
+video workflow makes it again whenever the interface changes:
+[docs/demo-video.md](docs/demo-video.md) says how, and why filming never changes the site.
 
 ## Documentation
 

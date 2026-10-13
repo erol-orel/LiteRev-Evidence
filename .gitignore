@@ -63,3 +63,8 @@ __pycache__/
 # les installations qui gardent l'ancien chemin sous la racine de déploiement.
 uploads_datasets/
 model_data/
+
+# The demo video, made locally (scripts/demo_video.py): its output and its working files.
+# The videos the site plays are in docs/demo/, committed by the Demo video workflow.
+demo-video/
+demo-work/

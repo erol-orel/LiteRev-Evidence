@@ -287,8 +287,11 @@ def test_the_narration_track_places_each_clip_at_its_scene(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 STORYBOARD = os.path.join(ROOT, "frontend", "demo", "storyboard.json")
 TOUR = os.path.join(ROOT, "frontend", "demo", "tour.spec.ts")
+WORKFLOW = os.path.join(ROOT, ".github", "workflows", "demo-video.yml")
 #: A body longer than this takes a third line on the caption card and hides the screen.
 MAX_BODY = 230
+#: A narration longer than this keeps one screen up for more than about fifteen seconds.
+MAX_NARRATION = 240
 
 
 @pytest.fixture(scope="module")
@@ -297,9 +300,14 @@ def board():
         return json.load(f)
 
 
-def test_both_languages_caption_every_scene_the_tour_films(board):
+@pytest.fixture(scope="module")
+def tour():
     with open(TOUR, encoding="utf-8") as f:
-        filmed = set(re.findall(r"^  async (\w+)\(\{ page, rec \}\)", f.read(), re.M))
+        return f.read()
+
+
+def test_both_languages_caption_every_scene_the_tour_films(board, tour):
+    filmed = set(re.findall(r"^  async (\w+)\(\{[\w ,]+\}\)", tour, re.M))
     assert filmed, "no scene found in the tour"
     assert set(board["en"]["scenes"]) == set(board["fr"]["scenes"]) == filmed
     assert set(board["order"]) <= filmed and len(board["order"]) == len(set(board["order"]))
@@ -315,6 +323,95 @@ def test_every_caption_fits_its_card(board):
             assert c["step"].isdigit() and c["title"] and c["body"], (lang, sid)
             assert len(c["title"]) <= 40 and len(c["body"]) <= MAX_BODY, (lang, sid)
             assert c["body"].endswith("."), (lang, sid)          # read aloud as a sentence
+            # The narration says the scene for the ear, at the pace of the screen.
+            assert c["narration"].endswith(".") and len(c["narration"]) <= MAX_NARRATION, (lang, sid)
+
+
+def test_both_languages_name_the_same_figures_and_only_known_ones(board, tour):
+    """A caption's {figures} are read from the scenario when the tour starts: the same
+    ones in both languages, on screen and in the voice, and only those the tour reads."""
+    known = set(re.findall(r'"(\w+)"', re.search(r"const FACT_NAMES = \[([^\]]*)\]", tour).group(1)))
+    assert {"records", "sources", "relevant", "extracted", "values"} <= known
+
+    def figures(lang: str, sid: str, field: str) -> set[str]:
+        return set(re.findall(r"\{(\w+)\}", board[lang]["scenes"][sid][field]))
+
+    for sid in board["en"]["scenes"]:
+        for field in ("body", "narration"):
+            en, fr = figures("en", sid, field), figures("fr", sid, field)
+            assert en == fr and en <= known, (sid, field, en, fr)
+        assert figures("en", sid, "body") == figures("en", sid, "narration"), sid
+
+
+def test_the_tour_shows_what_literev_extracts_generates_and_exports(board):
+    """The long tour: what is extracted from each article, what the AI generates over the
+    whole corpus, and every export, ending on everything a review can take away."""
+    order = board["order"]
+    for sid in ("corpus", "sources", "article", "prisma", "prismaSources", "strategy", "evidence",
+                "epiParams", "brief", "claims", "pico", "extraction", "coverage", "sheets", "quotes",
+                "downloads", "geography", "pooled", "assistant", "assistantAnswer", "clusters",
+                "concepts", "variables", "alerts", "takeaway"):
+        assert sid in order, sid
+    assert order[-1] == "takeaway"
+    en, fr = board["en"]["takeawayCard"], board["fr"]["takeawayCard"]
+    assert [len(g["items"]) for g in en["groups"]] == [len(g["items"]) for g in fr["groups"]]
+    assert all(g["title"] and all(g["items"]) for card in (en, fr) for g in card["groups"])
+    # The title card says what is filmed: a real scenario, and the AI's text as a draft.
+    for lang in ("en", "fr"):
+        assert len(board[lang]["intro"]["lines"]) == 2, lang
+
+
+def test_on_a_deployment_the_tour_only_reads(tour):
+    """Filming the live site must never change it: no key in the browser, a guard that
+    aborts every request to the API that is not a read, and the questions typed, not sent."""
+    assert 'const API_KEY = REMOTE ? "" :' in tour
+    assert 'if (method !== "GET" && method !== "HEAD") return block("not a read")' in tour
+    assert "await installReadOnlyGuard(page, CACHES)" in tour
+    # The GETs that compute on a cold cache are aborted or read from the stored copy.
+    for where in ("recommended-actions|knowledge-graph", "seir\\/projection", "variables|model\\/spec"):
+        assert where in tour, where
+    # The assistant's question is typed, then cleared: asking stores an answer and its cost.
+    assistant = tour[tour.index("  async assistant({ page, rec })"):tour.index("  async assistantAnswer(")]
+    assert 'await input.fill("")' in assistant and "press(\"Enter\")" not in assistant
+    with open(os.path.join(ROOT, "scripts", "demo_video.py"), encoding="utf-8") as f:
+        assert 'film_and_render(None, "")' in f.read()
+
+
+def test_the_tour_counts_the_renderer_transitions(tour):
+    """A scene is held as long as its caption takes to read, transitions included: the tour
+    counts them with the renderer's own durations."""
+    durations = dict(re.findall(r"^const (DIP|MOVE|FADE) = ([\d.]+);", tour, re.M))
+    assert float(durations["DIP"]) == render.FADE_SCENE
+    assert float(durations["MOVE"]) == render.MOVE
+    assert float(durations["FADE"]) == render.FADE_BEAT
+
+
+def _job(workflow: str, name: str) -> str:
+    """The text of one job of a workflow, up to the next job."""
+    return re.search(rf"^  {name}:\n(.*?)(?=^  \w[\w-]*:\n|\Z)", workflow, re.M | re.S).group(1)
+
+
+def test_the_workflow_films_a_deployment_and_commits_from_a_job_of_its_own():
+    """Started by hand, the workflow films a deployment (base_url, scenario) and can commit
+    the six files the site plays. The commit is a job of its own: it holds the only write
+    token, takes the files from the render job's artifact, and never sees the narration key,
+    which reaches the render step only."""
+    with open(WORKFLOW, encoding="utf-8") as f:
+        workflow = f.read()
+    dispatch = workflow[workflow.index("workflow_dispatch:"):workflow.index("pull_request:")]
+    for name in ("base_url:", "scenario:", "commit:"):
+        assert name in dispatch, name
+    assert "type: boolean" in dispatch and "default: false" in dispatch
+    render_job, commit_job = _job(workflow, "render"), _job(workflow, "commit")
+    assert workflow.count("secrets.DEMO_TTS_API_KEY") == 1 and "secrets.DEMO_TTS_API_KEY" in render_job
+    assert "name: production" in render_job and "contents: read" in render_job
+    assert "timeout-minutes: 60" in render_job
+    assert "needs: render" in commit_job and "contents: write" in commit_job and "inputs.commit" in commit_job
+    assert "environment" not in commit_job and "secrets." not in commit_job
+    assert "actions/download-artifact" in commit_job and "demo-video" in commit_job
+    assert "for lang in en fr" in commit_job and "for ext in mp4 vtt jpg" in commit_job
+    assert 'name="literev-demo-$lang.$ext"' in commit_job and "git add -- $files" in commit_job
+    assert "github-actions[bot]" in commit_job and "Demo video recorded by the workflow" in commit_job
 
 
 def test_a_narration_clip_is_asked_once_then_read_from_the_cache(tmp_path, monkeypatch):
@@ -351,6 +448,62 @@ def test_a_narration_clip_is_asked_once_then_read_from_the_cache(tmp_path, monke
     assert "instructions" not in calls[-1][2]                       # tts-1 refuses them
 
 
+def test_a_clip_left_unanswered_or_refused_for_a_while_is_asked_again(tmp_path, monkeypatch):
+    """On 13 October the first clip got no answer for two minutes and the whole recording
+    was lost. A slow or busy API is now asked again, a few times, with a growing wait."""
+    import io
+    import urllib.error
+    answers = [TimeoutError("The read operation timed out"),
+               urllib.error.HTTPError("u", 503, "busy", {}, io.BytesIO(b"{}")),
+               b"\x01\x00" * render.TTS_RATE]
+    waits = []
+
+    class Answer:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self):
+            return self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        assert timeout == render.TTS_TIMEOUT
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return Answer(a)
+
+    monkeypatch.setattr(render.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(render.time, "sleep", waits.append)
+    clip = render.speak("Each article gets a score.", render.Voice(api_key="k"), str(tmp_path))
+    assert abs(render.pcm_seconds(clip) - 1.0) < 1e-9 and not answers
+    assert waits == [5, 10]
+
+
+def test_a_refused_key_stops_at_once_and_never_quotes_the_message(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    calls = []
+    body = b'{"error": {"message": "Incorrect API key provided: sk-ab***yz", "code": "invalid_api_key"}}'
+
+    def fake_urlopen(req, timeout):
+        calls.append(req)
+        raise urllib.error.HTTPError("u", 401, "unauthorized", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(render.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(render.time, "sleep", lambda s: pytest.fail("a refused key is not asked again"))
+    with pytest.raises(RuntimeError) as err:
+        render.speak("Each article gets a score.", render.Voice(api_key="k"), str(tmp_path))
+    assert len(calls) == 1
+    assert "401" in str(err.value) and "invalid_api_key" in str(err.value)
+    assert "sk-" not in str(err.value) and "Incorrect" not in str(err.value)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The site plays it: the build serves docs/demo/ under /demo/, the header opens it
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,3 +527,16 @@ def test_the_site_serves_the_video_and_the_header_plays_it():
             locale = f.read()
         for key in ("demoVideo:", "demoVideoTitle:", "demoVideoNote:", "demoVideoOpen:", "demoVideoClose:"):
             assert key in locale, (lang, key)
+
+
+def test_the_header_says_how_long_the_video_is():
+    """The modal's title gives the length of the file it plays, read from the video once it
+    has loaded, so a new recording never leaves a stale length on screen."""
+    with open(os.path.join(ROOT, "frontend", "src", "App.tsx"), encoding="utf-8") as f:
+        app = f.read()
+    assert "onLoadedMetadata" in app and 't("header.demoVideoTitle").replace("{minutes}"' in app
+    for lang in ("en", "fr"):
+        with open(os.path.join(ROOT, "frontend", "src", "i18n", "locales", f"{lang}.ts"), encoding="utf-8") as f:
+            locale = f.read()
+        title = re.search(r'demoVideoTitle: "([^"]*)"', locale).group(1)
+        assert "{minutes}" in title and "demoVideoTitleShort:" in locale, lang

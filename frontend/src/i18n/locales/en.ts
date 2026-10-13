@@ -18,8 +18,9 @@ export const en: Translations = {
       "Set the admin key (X-API-Key) to enable writes",
     languageLabel: "Language",
     demoVideo: "Demo video",
-    demoVideoTitle: "LiteRev in about 95 seconds",
-    demoVideoNote: "The screens are the real application; the 200 articles are synthetic.",
+    demoVideoTitle: "LiteRev, a guided tour (about {minutes} minutes)",
+    demoVideoTitleShort: "LiteRev, a guided tour",
+    demoVideoNote: "Filmed on the live site, on the HPAI_last scenario, read-only.",
     demoVideoOpen: "Open the video file",
     demoVideoClose: "Close",
     removeKeyConfirm:

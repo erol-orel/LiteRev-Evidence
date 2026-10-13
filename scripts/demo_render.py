@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 import wave
 from dataclasses import dataclass, field, replace
@@ -379,6 +382,13 @@ def frames(tl: Timeline, composer: Composer):
 # Narration (optional): one clip per scene from a text-to-speech API
 # ─────────────────────────────────────────────────────────────────────────────
 TTS_RATE = 24_000           # the API's raw PCM: 24 kHz, 16-bit, mono
+#: A clip is asked again when the API is slow or busy: a long video asks for dozens, and
+#: one request left unanswered for minutes (as on 13 October) must not lose the recording.
+#: An answer starts within seconds, so 30 s without a byte is a request the API dropped:
+#: on 13 October 5 of 33 requests hung, and each time a later attempt answered at once.
+TTS_ATTEMPTS = 6
+TTS_TIMEOUT = 30            # seconds without a byte before an attempt is given up
+TTS_RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -404,12 +414,37 @@ def speak(text: str, voice: Voice, cache_dir: str) -> str:
     req = urllib.request.Request(voice.base_url.rstrip("/") + "/audio/speech", data=json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {voice.api_key}",
                                           "Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=120) as r:
-        pcm = r.read()
+    for attempt in range(1, TTS_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TTS_TIMEOUT) as r:
+                pcm = r.read()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in TTS_RETRY_STATUS or attempt == TTS_ATTEMPTS:
+                # The error's code only: an OpenAI message can quote part of the key.
+                raise RuntimeError(f"text-to-speech refused the clip: HTTP {e.code} ({_error_code(e)})") from None
+            why = f"HTTP {e.code}"
+        except (TimeoutError, ConnectionError, urllib.error.URLError, http.client.HTTPException) as e:
+            if attempt == TTS_ATTEMPTS:
+                raise RuntimeError(f"text-to-speech did not answer in {TTS_ATTEMPTS} attempts ({type(e).__name__})") from None
+            why = type(e).__name__
+        wait = min(5 * 2 ** (attempt - 1), 30)
+        print(f"text-to-speech: attempt {attempt} failed ({why}), next in {wait} s", file=sys.stderr)
+        time.sleep(wait)
     os.makedirs(cache_dir, exist_ok=True)
     with open(path, "wb") as f:
         f.write(pcm)
     return path
+
+
+def _error_code(e: "urllib.error.HTTPError") -> str:
+    """The machine-readable code of an API error (`invalid_api_key`, `insufficient_quota`),
+    never its message."""
+    try:
+        err = json.loads(e.read().decode("utf-8", "replace")).get("error") or {}
+        return str(err.get("code") or err.get("type") or "no code")
+    except Exception:
+        return "no code"
 
 
 def pcm_seconds(path: str) -> float:
