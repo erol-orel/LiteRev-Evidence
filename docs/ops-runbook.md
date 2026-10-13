@@ -398,7 +398,8 @@ GitHub holds the keys that reach the server through a workflow:
   `SEMANTIC_SCHOLAR_API_KEY` there although the key had been saved in that environment.
   If none of the usual names holds it, save it again under `SEMANTIC_SCHOLAR_API_KEY`
   (a run that serialises the whole secrets context to list the names waits for a manual
-  approval, so the step does not).
+  approval, so the step does not). Saved again, all three were found by the deploy of #359
+  (13 October 2026), each under its canonical name, and written to the canonical file.
 - the manual **server command** (`server-command.yml`) runs in the environment
   "production-admin": it sees `NCBI_API_KEY` and the SSH deploy secrets, and NOT the
   production environment's secrets. Its `set-s2-key` therefore finds the Semantic
@@ -407,3 +408,25 @@ GitHub holds the keys that reach the server through a workflow:
 Checking a key without seeing it: `GET /sources/health` (`config.*_api_key`: true or
 false), or on the server `sudo python3 scripts/env_audit.py --live`. A workflow log shows
 a secret it can read as `***`, and an empty one as blank.
+
+## 11. The official NUTS list (regions of the whole of Europe)
+
+Without it, the geography of a scenario names regions only in Germany (NUTS 1) and Italy
+(NUTS 1 and 2), from the built-in table in `api/geography.py`. To resolve the rest of
+Europe down to NUTS 3:
+
+1. Download Eurostat's NUTS attribute table, the codes, levels and names without the map
+   shapes: `NUTS_AT_2024.csv` from GISCO
+   (`https://gisco-services.ec.europa.eu/distribution/v2/nuts/csv/NUTS_AT_2024.csv`). NUTS
+   2024 is the version in force and the one Eurostat's regional tables use.
+2. Load it: on a scenario, Extraction, Geography, "Load the Eurostat NUTS file (CSV)" (the
+   browser needs the admin key), or `POST /geo/nuts/import` with the file as the body and
+   the `X-API-Key` header. The answer gives the regions loaded per level and the countries.
+   A new file replaces the one loaded before.
+3. Check: `GET /geo/nuts/status` says `loaded`; `GET /geo/resolve?place=...` shows what a
+   place resolves to.
+
+The list is read at query time: a later change to the matching rules applies to it with
+no second upload. The rules are in the docstring of `api/geography.py`: the official
+names are read only inside the country the place or the article names, never when they
+are only compass words, and the built-in English names (Bavaria, Lombardy) stay beside them.

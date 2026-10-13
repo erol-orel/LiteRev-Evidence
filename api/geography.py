@@ -24,17 +24,26 @@ What this does and does not know, said plainly:
   - Regions: only those this code is sure of, Germany's sixteen Laender (NUTS 1) and Italy's five
     macro-areas (NUTS 1) and twenty-one regions (NUTS 2). A wrong code is worse than a blank, so
     nothing else is guessed.
-  - The OFFICIAL list. An administrator loads Eurostat's NUTS file (`/geo/nuts/import`; the GISCO
-    attribute CSV has NUTS_ID, LEVL_CODE and NUTS_NAME) and the whole of Europe resolves to NUTS 3,
-    with no code change. Until then the built-in regions are what is used, and the API says which.
+  - The OFFICIAL list. An administrator loads Eurostat's NUTS attribute table (`/geo/nuts/import`;
+    GISCO's NUTS_AT_2024.csv has NUTS_ID, LEVL_CODE and NUTS_NAME) and the whole of Europe resolves
+    to NUTS 3, with no code change. Until then the built-in regions are what is used, and the API
+    says which. Loaded, its names are read only inside the country the place or the article names
+    (a district's name is often a town or a word elsewhere: "Guadalajara", "Lot"), each side of a
+    bilingual name and without its tags ("Valencia/València", "Limburg (NL)", "Prov. Antwerpen",
+    "München, Landkreis"), and never when they are only compass words ("West" and "Border" are
+    Irish regions, "Centro" an Italian, Spanish and Portuguese one) or a country's name ("Malta"
+    is also one of Malta's two NUTS 3). The built-in names stay beside it, English ones included:
+    Eurostat writes "Bayern" and "Lombardia", papers "Bavaria" and "Lombardy".
 
 Resolution is deterministic and conservative, and uses a static table, no network. A place name
 must match whole words, and the longest name found takes its words ("New Mexico" is not Mexico,
-"Northern Ireland" not Ireland, a guinea fowl not Guinea); the deepest NUTS match wins; a name that
-exists in several countries is taken only in the country the paper names (or the article's own
-country); a place that names two countries is "several countries", not a guess, unless it is a
-territory written with its country ("Hong Kong, China"); and what cannot be resolved is counted,
-listed and given its reason, so that it can be fixed.
+"Northern Ireland" not Ireland, a guinea fowl not Guinea); of the regions a place names, the deepest
+wins when it lies inside the others ("Sigmaringen, Baden-Württemberg"), and only what they share is
+kept when it does not ("Bavaria and Saxony" is Germany); a name that exists in several countries is
+taken only in the country the paper names (or the article's own country); a place that names two
+countries is "several countries", not a guess, unless it is a territory written with its country
+("Hong Kong, China"); and what cannot be resolved is counted, listed and given its reason, so that
+it can be fixed.
 """
 from __future__ import annotations
 
@@ -449,26 +458,70 @@ _BUILTIN: dict[str, tuple[int, str, tuple[str, ...]]] = {
     "ITF4": (2, "IT", ("Puglia", "Apulia", "Pouilles")), "ITF5": (2, "IT", ("Basilicata",)), "ITF6": (2, "IT", ("Calabria", "Calabre")),
     "ITG1": (2, "IT", ("Sicilia", "Sicily", "Sicile")), "ITG2": (2, "IT", ("Sardegna", "Sardinia", "Sardaigne")),
 }
-#: The Eurostat names of the same codes, so a loaded file overrides rather than duplicates them.
+
+#: Words that say where in a country, not which region. An official name made of nothing else is
+#: never read: Ireland's "West", "Border" and "Mid-East", "Centro (IT)", Spain's "Este" and "Sur",
+#: Romania's "Vest" would otherwise take "West Africa", "a border area" or "Centro de Investigacion".
+_COMPASS_WORDS = frozenset({
+    "north", "south", "east", "west", "northern", "southern", "eastern", "western", "northeast", "northwest", "southeast",
+    "southwest", "central", "centre", "center", "middle", "mid", "midland", "midlands", "border", "upper", "lower", "inner",
+    "outer", "coast", "coastal", "and", "of", "the", "region", "island", "islands",
+    "nord", "sud", "est", "ouest", "ovest", "centro", "centru", "vest", "norte", "sur", "este", "oeste", "noroeste", "noreste",
+    "nordeste", "sudeste", "sudoeste", "isole"})
+#: Belgium's prefixes for a province and an arrondissement: "Prov. Antwerpen", "Arr. de Bruxelles-Capitale".
+_NUTS_PREFIX = re.compile(r"^(?:prov|arr)\.\s*(?:(?:de|du|van)\s+)?", re.I)
+
+
+def _name_forms(name: str) -> set[str]:
+    """The ways a paper can write an official NUTS name, folded: each side of a bilingual name
+    ("Valencia/València"), without a tag in brackets ("Limburg (NL)"), without a Belgian "Prov." or
+    "Arr.", and without what follows a comma ("München, Landkreis"). A form that is only compass
+    words, or a country's name, is not one: see _COMPASS_WORDS and the module's docstring."""
+    forms: set[str] = set()
+    for part in {name, *name.split("/")}:
+        bare = re.sub(r"\([^)]*\)", " ", part)
+        for form in (fold(bare), fold(_NUTS_PREFIX.sub("", bare.split(",")[0].strip()))):
+            if form and not set(form.split()) <= _COMPASS_WORDS and form not in _NAME_TO_ISO:
+                forms.add(form)
+    return forms
 
 
 class NutsIndex:
-    """The NUTS names in use, ready for matching: folded name -> [(code, level, country)]."""
+    """The NUTS names in use, ready for matching: folded name -> [(code, level, country, curated)].
 
-    def __init__(self, entries: list[tuple[str, int, str, str]], source: str):
+    `entries` are the curated names, the built-in regions with their English and French ones: read
+    wherever the place is, as before any list was loaded. `loaded` are the official list's, read only
+    inside the country the place or the article names. The first name of a code is the one shown,
+    the official one when there is one."""
+
+    def __init__(self, entries: Iterable[tuple[str, int, str, str]], source: str,
+                 loaded: Iterable[tuple[str, int, str, str]] = ()):
         self.source = source
-        self.n = len({e[0] for e in entries})
-        self.by_name: dict[str, list[tuple[str, int, str]]] = {}
-        for code, level, country, name in entries:
-            self.by_name.setdefault(fold(name), []).append((code, level, country))
-        self.names_by_length = sorted((n for n in self.by_name if n), key=len, reverse=True)
+        self.by_name: dict[str, list[tuple[str, int, str, bool]]] = {}
         self.name_of: dict[str, str] = {}
-        for code, _l, _c, name in entries:                            # the first name listed is the one shown
-            self.name_of.setdefault(code, name)
+        for curated, rows in ((False, list(loaded)), (True, list(entries))):
+            for code, level, country, name in rows:
+                self.name_of.setdefault(code, name)
+                for form in ({fold(name)} if curated else _name_forms(name)):
+                    if (code, level, country, curated) not in self.by_name.setdefault(form, []):
+                        self.by_name[form].append((code, level, country, curated))
+        self.n = len(self.name_of)
+        self.max_words = max((len(n.split()) for n in self.by_name), default=1)
 
 
 def _builtin_entries() -> list[tuple[str, int, str, str]]:
     return [(code, lvl, c, n) for code, (lvl, c, names) in _BUILTIN.items() for n in names]
+
+
+def build_index(rows: Iterable[tuple[str, int, str, str, str | None]]) -> NutsIndex:
+    """The index for the official rows (code, level, country, name, Latin-script name) as stored,
+    with the built-in names beside them; the built-in names alone when there are none."""
+    loaded: list[tuple[str, int, str, str]] = []
+    for code, level, country, name, alt in rows:
+        loaded.append((code, level, country, name))
+        if alt and alt != name:
+            loaded.append((code, level, country, alt))
+    return NutsIndex(_builtin_entries(), "loaded" if loaded else "builtin", loaded)
 
 
 _cache: dict[str, Any] = {"key": None, "index": None}
@@ -487,22 +540,30 @@ def get_nuts_index() -> NutsIndex:
     except Exception as e:                                         # noqa: BLE001
         logger.warning(f"get_nuts_index: {e}")
         key, rows = ("error", ""), []
-    entries = _builtin_entries()
-    have = {r[0] for r in rows}
-    entries = [e for e in entries if e[0] not in have]            # the official name wins for a code it has
-    for code, level, country, name, alt in rows:
-        entries.append((code, level, country, name))
-        if alt and alt != name:
-            entries.append((code, level, country, alt))
-    idx = NutsIndex(entries, "loaded" if rows else "builtin")
+    idx = build_index(rows)
     _cache.update({"key": key, "index": idx})
     return idx
 
 
-def _words(folded: str, name: str) -> bool:
-    """Whole words only. Both sides are folded (letters, digits and single spaces), so padding
-    with a space is the word boundary, and it is much cheaper than a regex per name."""
-    return bool(name) and f" {name} " in f" {folded} "
+def _region_hits(words: list[str], index: NutsIndex, country: str | None) -> list[str]:
+    """The NUTS code each region name in a place points to, leftmost then longest, a name found
+    taking its words (Lower Saxony is not Saxony). Inside a known country every name counts; with
+    none, only the curated ones. A name several codes share points to what they have in common
+    ("Oldenburg": the town and the district are both in DE94), at its deepest level."""
+    hits: list[str] = []
+    i = 0
+    while i < len(words):
+        for j in range(min(len(words), i + index.max_words), i, -1):
+            cands = [(c, lvl) for c, lvl, cc, curated in index.by_name.get(" ".join(words[i:j]), ())
+                     if (cc == country if country else curated)]
+            if cands:
+                deepest = max(lvl for _c, lvl in cands)
+                hits.append(_common_prefix(sorted({c for c, lvl in cands if lvl == deepest})))
+                i = j
+                break
+        else:
+            i += 1
+    return hits
 
 
 def _common_prefix(codes: list[str]) -> str:
@@ -544,24 +605,24 @@ def resolve_location(place: Any, article_country: Any = None, index: NutsIndex |
         return out
     # "Europe" or "global" is not the article's country: a study across several stays unresolved.
     country = next(iter(named), None) or (None if area else hint)
-    # A place name in a NUTS list: longest first, restricted to the country when it is known.
-    best: list[tuple[str, int]] = []
-    for name in index.names_by_length:
-        if not _words(folded, name):
-            continue
-        cands = [(c, lvl) for c, lvl, cc in index.by_name[name] if country is None or cc == country]
-        if cands:
-            best = cands
-            break
-    if best:
-        deepest = max(lvl for _c, lvl in best)
-        codes = sorted({c for c, lvl in best if lvl == deepest})
-        code = codes[0] if len(codes) == 1 else _common_prefix(codes)
+    # The regions the place names: the deepest when it lies inside the others ("Sigmaringen,
+    # Baden-Württemberg"), else only what they share ("Bavaria and Saxony" is Germany).
+    hits = _region_hits(folded.split(), index, country)
+    if hits:
+        deepest = max(hits, key=len)
+        code = deepest if all(deepest.startswith(h) for h in hits) else _common_prefix(hits)
         if len(code) >= 3:
             iso = iso_of_nuts0(code[:2])
             out.update({"country": iso, "nuts0": code[:2], "method": "region", "level": len(code) - 2})
             for lvl in (1, 2, 3):
                 out[f"nuts{lvl}"] = code[: 2 + lvl] if len(code) >= 2 + lvl else None
+            return out
+        if not country and len(code) < 2:                          # regions of two countries, none named
+            out.update({"several_countries": True, "reason": "several_countries"})
+            return out
+        if not country:                                            # two regions of one country
+            iso = iso_of_nuts0(code)
+            out.update({"country": iso, "nuts0": code, "level": 0, "method": "region"})
             return out
     if country:
         out.update({"country": country, "nuts0": nuts0_of(country), "level": 0 if nuts0_of(country) else None,
