@@ -1,55 +1,95 @@
 WEBVTT
 
-00:00:00.000 --> 00:00:03.600
-LiteRev transforme une question de recherche en un scénario prédictif fondé sur les preuves. Voici le pipeline principal, étape par étape.
+00:00:00.000 --> 00:00:19.150
+LiteRev transforme une question de recherche en preuves revues et en scénario prédictif. Voici un cas réel : la grippe aviaire chez les personnes exposées au travail. Ce qu'écrit l'IA est un brouillon qu'un relecteur vérifie.
 
-00:00:03.600 --> 00:00:09.700
+00:00:19.150 --> 00:00:33.500
 Poser la question
-Écrivez la question de recherche en langage courant ou en requête booléenne. Avec les sources en direct, une seule recherche interroge PubMed, OpenAlex, Europe PMC, Crossref et sept autres bases.
+Écrivez la question en langage courant ou en requête booléenne. Avec les sources en direct, une seule recherche interroge onze bases, dont PubMed et OpenAlex.
 
-00:00:09.700 --> 00:00:15.900
+00:00:33.500 --> 00:00:45.800
 Chaque recherche devient un scénario
-Son corpus est dédoublonné entre les sources et enregistré, prêt à être trié, synthétisé et tenu à jour.
+Ses notices sont dédoublonnées entre les sources et enregistrées : 17 510 ici, prêtes à être triées, synthétisées et tenues à jour.
 
-00:00:15.900 --> 00:00:26.800
+00:00:45.800 --> 00:01:01.350
 Évaluer et sélectionner
-Chaque article reçoit un score de pertinence sémantique. Le seuil décide des articles qui alimentent les analyses. Ceux qui restent en dessous sont gardés, jamais supprimés.
+Chaque notice reçoit un score sémantique et un score Cohere face à la question. Le seuil retient celles qui alimentent les analyses : 1 079 ici. Les autres sont gardées.
 
-00:00:26.800 --> 00:00:32.100
+00:01:01.350 --> 00:01:15.000
+Les articles pertinents, classés
+Les articles pertinents, classés, à côté de la part de chaque base et des années de publication. Ils s'exportent en six formats, d'Excel et CSV à RIS et BibTeX.
+
+00:01:15.000 --> 00:01:28.500
 Lire et décider
-Ouvrez un article pour lire son résumé et son PICO, puis incluez-le ou excluez-le, avec un motif.
+Ouvrez un article pour lire son résumé et son PICO, puis incluez-le ou excluez-le avec un motif. Chaque décision est comptée dans le diagramme PRISMA.
 
-00:00:32.100 --> 00:00:42.400
+00:01:28.500 --> 00:01:45.750
 Trier selon PRISMA
-Le diagramme PRISMA 2020 compte chaque étape : notices par source, doublons, présélection par l'IA, décisions humaines et corpus final.
+Le diagramme PRISMA 2020 compte chaque étape : 34 626 notices de 11 bases, doublons retirés, présélection par l'IA, décisions humaines et corpus final.
 
-00:00:42.400 --> 00:00:51.000
+00:01:45.750 --> 00:01:59.800
+Base par base
+Chaque base montre son compte, le total annoncé et si un plafond l'a coupée. Quand l'une ne peut pas recevoir toute la requête booléenne, la carte donne celle reçue.
+
+00:01:59.800 --> 00:02:12.470
+La stratégie de recherche, conservée
+L'onglet Stratégie garde la requête telle qu'envoyée : la stratégie booléenne, sa version PubMed avec les termes MeSH et son explication, pour une section Méthodes.
+
+00:02:12.470 --> 00:02:23.920
 Synthétiser tout le corpus
-Devis d'étude, sources et niveaux GRADE sont calculés sur chaque article pertinent. Le résumé narratif et son PDF sont rédigés sur cette synthèse.
+Devis d'étude, sources et niveaux de preuve sont comptés sur les 1 079 articles pertinents, dans la base, jamais sur un échantillon.
 
-00:00:51.000 --> 00:00:56.300
+00:02:23.920 --> 00:02:37.470
+Paramètres épidémiologiques
+Des paramètres comme le R0, la létalité ou l'incubation sont mis en commun sur tous les articles qui en rapportent, pondérés par la qualité, avec intervalle et nombre d'études.
+
+00:02:37.470 --> 00:02:50.220
 Une extraction par article
-Population, intervention, comparateur, critère et résultat principal sont extraits une fois par article, puis agrégés sur tout le corpus, jamais sur un échantillon.
+Population, intervention, comparateur et critère sont extraits une fois par article, puis lus sur tout le corpus, jamais sur un échantillon.
 
-00:00:56.300 --> 00:01:03.500
-Explorer la littérature
-Les groupes thématiques montrent de quoi le corpus est fait. Sélectionnez un groupe pour y restreindre le corpus.
+00:02:50.220 --> 00:03:07.170
+Extraction structurée
+L'onglet Extraction remplit le modèle de la revue à partir de chaque article pertinent, en texte intégral s'il est ouvert : 1 076 articles, 17 489 valeurs, chacune citée.
 
-00:01:03.500 --> 00:01:11.300
+00:03:07.170 --> 00:03:20.670
+Ce que rapportent les articles
+Ces cartes donnent la part des articles extraits qui rapportent chaque thème : sexe, âge, profession, équipements de protection, vaccination, hôtes animaux. Un clic les liste.
+
+00:03:20.670 --> 00:03:33.200
+Cinq feuilles et un codebook
+Les valeurs remplissent les cinq feuilles du modèle, de la sensibilité humaine aux animaux et aux vecteurs. Leurs libellés suivent un codebook modifiable.
+
+00:03:33.200 --> 00:03:49.300
+Chaque valeur a sa citation
+Ouvrez un article : chaque ligne donne une valeur, ses cas, son effectif et la phrase exacte d'où elle vient, montrée dans l'article. Un relecteur accepte, corrige ou rejette.
+
+00:03:49.300 --> 00:04:01.850
+Emporter l'extraction
+L'extraction se télécharge dans le modèle Excel de la revue, en CSV ou en rapport PDF ou Word, et les lignes revues en jeu de données annoté.
+
+00:04:01.850 --> 00:04:14.900
+D'où viennent les preuves
+Le lieu de chaque étude est rattaché à un pays et, quand il est connu, à une région européenne NUTS. Les lieux non rattachés sont listés, jamais devinés.
+
+00:04:14.900 --> 00:04:32.000
+Estimations poolées et comparaisons
+Les estimations poolées combinent les comptes des études, libellé par libellé, dans un modèle à effets aléatoires avec un forest plot. Les comparaisons donnent des odds ratios entre groupes.
+
+00:04:32.000 --> 00:04:45.850
+Interroger le corpus
+L'assistant IA répond à partir des seuls articles pertinents, avec des comptes pris sur tout le corpus. Chaque réponse cite ses sources et est gardée avec sa date.
+
+00:04:45.850 --> 00:05:00.150
 Cartographier concepts et lacunes
-La carte des concepts relie pathogènes, expositions, critères et lieux, et liste les paires qu'aucune étude n'a encore examinées ensemble.
+La carte relie pathogènes, hôtes, expositions, critères et lieux. Un clic sur un concept montre ses liens et ses articles. Les paires jamais étudiées ensemble sont des lacunes.
 
-00:01:11.300 --> 00:01:16.200
-Des preuves au modèle
-Les variables que désigne la littérature deviennent une spécification de modèle. Branchez des données réelles, et entraînez.
-
-00:01:16.200 --> 00:01:24.200
-Entraîner, expliquer, surveiller
-Le modèle entraîné indique sa précision, ses facteurs et ses garde-fous, et déclenche une alerte quand une prédiction franchit son seuil.
-
-00:01:24.200 --> 00:01:29.100
+00:05:00.150 --> 00:05:09.550
 Une revue vivante
 Abonnez-vous aux alertes. La revue vivante interroge PubMed à intervalle régulier et ajoute les nouveaux articles au scénario.
 
-00:01:29.100 --> 00:01:35.300
+00:05:09.550 --> 00:05:21.800
+Tout ce que vous emportez
+Tout sort de l'application : les articles en six formats, le classeur d'extraction et son rapport, les estimations poolées, le jeu annoté, les groupes et les concepts.
+
+00:05:21.800 --> 00:05:32.350
 Cette vidéo est générée par du code à partir de l'interface réelle : elle se refait chaque fois que l'interface change.

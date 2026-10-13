@@ -1,55 +1,111 @@
 WEBVTT
 
-00:00:00.000 --> 00:00:03.600
-LiteRev turns a research question into an evidence-backed, predictive scenario. Here is the main pipeline, step by step.
+00:00:00.000 --> 00:00:16.850
+LiteRev turns a research question into reviewed evidence and a predictive scenario. Here is a real one: avian influenza in people exposed at work. What the AI writes is a draft that a reviewer checks.
 
-00:00:03.600 --> 00:00:09.700
+00:00:16.850 --> 00:00:30.200
 Ask
-Write the research question in plain words or as a Boolean query. With live sources ticked, one search federates PubMed, OpenAlex, Europe PMC, Crossref and seven more databases.
+Write the question in plain words or as a Boolean query. With live sources ticked, one search queries eleven databases, PubMed and OpenAlex among them.
 
-00:00:09.700 --> 00:00:15.900
+00:00:30.200 --> 00:00:43.150
 Every search becomes a scenario
-Its corpus is deduplicated across sources and saved, ready to be screened, synthesised and kept up to date.
+Its records are deduplicated across sources and saved: 17,510 here, ready to be screened, synthesised and kept up to date.
 
-00:00:15.900 --> 00:00:26.800
+00:00:43.150 --> 00:00:54.550
 Score and select
-Each article gets a semantic relevance score. The threshold decides which articles feed the analyses. Those below it are kept, never deleted.
+Each record gets a semantic score and a Cohere rerank against the question. The threshold picks those that feed the analyses: 1,079 here. The rest are kept.
 
-00:00:26.800 --> 00:00:32.100
+00:00:54.550 --> 00:01:08.950
+The relevant articles, ranked
+The relevant articles, ranked, beside each database's share and the years of publication. They export in six formats, from Excel and CSV to RIS and BibTeX.
+
+00:01:08.950 --> 00:01:21.700
 Read and decide
-Open an article to read its abstract and its PICO, then include or exclude it, with a reason.
+Open an article to read its abstract and its PICO, then include or exclude it with a reason. Each decision is counted in the PRISMA flow.
 
-00:00:32.100 --> 00:00:42.400
+00:01:21.700 --> 00:01:36.650
 Screen the PRISMA way
-The PRISMA 2020 flow counts every step: records per source, duplicates, AI pre-screening, human decisions and the final evidence set.
+The PRISMA 2020 flow counts each step: 34,626 records from 11 databases, duplicates removed, AI pre-screening, human decisions and the evidence set.
 
-00:00:42.400 --> 00:00:51.000
+00:01:36.650 --> 00:01:49.100
+Database by database
+Each database shows its count, the total it announced and whether a cap cut it. When one cannot take the whole Boolean query, the card gives the query it received.
+
+00:01:49.100 --> 00:02:01.500
+The search strategy, kept
+The Strategy tab keeps the query as it was sent: the Boolean strategy, its PubMed version with MeSH terms and its explanation, ready for a methods section.
+
+00:02:01.500 --> 00:02:13.150
 Synthesise the whole corpus
-Study designs, sources and GRADE levels are computed over every relevant article. The narrative brief and its PDF are written over this digest.
+Study designs, sources and levels of evidence are counted over all 1,079 relevant articles, in the database, never on a sample.
 
-00:00:51.000 --> 00:00:56.300
+00:02:13.150 --> 00:02:25.450
+Epidemiological parameters
+Parameters such as R0, case fatality and incubation are pooled over every article that reports one, weighted by quality, with their interval and number of studies.
+
+00:02:25.450 --> 00:02:38.600
+An evidence brief, as a draft
+The AI drafts a brief over the whole corpus, with a level of evidence and a GRADE rating, for a reviewer to check. It exports as a PDF or a citable report.
+
+00:02:38.600 --> 00:02:56.150
+Claims, actions and gaps
+Each claim cites its articles; its strength comes from their designs, not from the model. Actions and research gaps follow, beside a gap matrix computed without AI.
+
+00:02:56.150 --> 00:03:08.300
 One extraction per article
-Population, intervention, comparator, outcome and main finding are extracted once per article, then aggregated over the whole corpus, never over a sample.
+Population, intervention, comparator and outcome are extracted once per article, then read across the whole corpus, never over a sample.
 
-00:00:56.300 --> 00:01:03.500
+00:03:08.300 --> 00:03:24.600
+Structured extraction
+The Extraction tab fills the review's template from every relevant article, in full text when it is open: 1,076 articles, 17,489 values, each with its quote.
+
+00:03:24.600 --> 00:03:37.850
+What the papers report
+These cards give the share of extracted articles that report each topic: sex, age, occupation, protective equipment, vaccination, animal hosts. A click lists them.
+
+00:03:37.850 --> 00:03:50.150
+Five sheets and a codebook
+The values fill the template's five sheets, from human susceptibility to animals and vectors. Their labels follow a codebook a reviewer can edit.
+
+00:03:50.150 --> 00:04:06.250
+Every value has its quote
+Open an article: each row gives a value, its cases and group size, and the exact sentence behind it, shown in the paper. A reviewer accepts, edits or rejects it.
+
+00:04:06.250 --> 00:04:18.750
+Take the extraction away
+The extraction downloads as the review's Excel template, a flat CSV or a report in PDF or Word, and the reviewed rows as an annotated dataset.
+
+00:04:18.750 --> 00:04:30.950
+Where the evidence comes from
+Each study's place resolves to a country and, when it is known, to a European NUTS region. Places that do not resolve are listed, never guessed.
+
+00:04:30.950 --> 00:04:48.050
+Pooled estimates and comparisons
+Pooled estimates combine the counts the studies report, label by label, in a random-effects model with a forest plot. Comparisons give odds ratios between groups.
+
+00:04:48.050 --> 00:04:59.390
+Ask the corpus
+The AI Assistant answers from the relevant articles only, with counts taken from the whole corpus. Each answer cites its sources and is kept with its date.
+
+00:04:59.390 --> 00:05:12.290
 Explore the literature
-Topic clusters show what the corpus is made of. Select a group to narrow the corpus to it.
+Topic clusters show what the corpus is made of. Each gets an AI summary, its key words and its most representative article, and its articles export.
 
-00:01:03.500 --> 00:01:11.300
+00:05:12.290 --> 00:05:26.190
 Map concepts and gaps
-The concept map links pathogens, exposures, outcomes and places, and lists the pairs that no study has examined together.
+The concept map links pathogens, hosts, exposures, outcomes and places. Click one to see its links and articles. Pairs never studied together are gaps.
 
-00:01:11.300 --> 00:01:16.200
+00:05:26.190 --> 00:05:38.090
 From evidence to a model
-The variables the literature points to become a model specification. Plug in real data, and train.
+The variables the literature points to become a model specification: an outcome, predictors with their sources and an algorithm. Plug in real data, and train.
 
-00:01:16.200 --> 00:01:24.200
-Train, explain, monitor
-The trained model reports its accuracy, its drivers and its guardrails, and raises an alert when a prediction crosses its threshold.
-
-00:01:24.200 --> 00:01:29.100
+00:05:38.090 --> 00:05:46.690
 Keep it living
 Subscribe to alerts. The living review queries PubMed on a schedule and adds the new articles to the scenario.
 
-00:01:29.100 --> 00:01:35.300
+00:05:46.690 --> 00:05:59.640
+Everything you can take away
+Everything leaves the app: articles in six formats, the extraction workbook and its report, pooled estimates, the annotated dataset, clusters and concepts.
+
+00:05:59.640 --> 00:06:08.040
 This video is generated by code from the real interface, so it is rebuilt whenever the interface changes.
