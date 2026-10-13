@@ -430,3 +430,7 @@ The list is read at query time: a later change to the matching rules applies to 
 no second upload. The rules are in the docstring of `api/geography.py`: the official
 names are read only inside the country the place or the article names, never when they
 are only compass words, and the built-in English names (Bavaria, Lombardy) stay beside them.
+
+Production: `NUTS_AT_2024.csv` loaded on 13 October 2026 (1,932 regions in 39 countries:
+123 at NUTS 1, 326 at NUTS 2, 1,483 at NUTS 3). NUTS 2024 has no United Kingdom: its papers
+keep their country.

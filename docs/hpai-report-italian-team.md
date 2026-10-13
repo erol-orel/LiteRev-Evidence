@@ -2,6 +2,8 @@
 
 Prepared for the Italian partner team. State of production on 2026-10-12, scenario HPAI_last (`usr-b1e16a5d9c38`), live at https://literev-scenario.com/?scenario=usr-b1e16a5d9c38. The team receives the same material as a shared document with a user guide; this file is the repository's record of it. It replaces the version of 8 October, which described the earlier scenario `usr-4757684f5462` (640 articles, threshold 0.30). Updated on 12 October after an audit of every cap and fixed value in LiteRev: the search was run again, the relevance score now reads the title and abstract, and a work found under several DOIs counts once.
 
+**Update, 13 October 2026.** The refresh of 12 and 13 October changed HPAI_last's figures: 593 of its 1,079 relevant articles are now read in full (426 before), into 17,489 observations, 91.7% of them with their quote found in the text; the pooled odds ratios leave out the rows that only give the composition of a sample, Cohere's rerank scored every article with an abstract (threshold 0, so the relevant set did not move), and regions are named across Europe from Eurostat's NUTS 2024 list. The three records left unextracted have no text to read (a PLOS table record and two thesis notices). The shared HPAI evidence report has these figures, with the two T2.4 scenarios; the sections below are as of 12 October.
+
 ## 1. In one page
 
 - **Search** (12 October 2026, exhaustive mode, 11 databases): 34,626 records identified (28,123 from the databases, 6,503 from LiteRev's library), 15,447 duplicates removed (the same article, or the same work under another DOI), 1,669 removed for not matching the full query, 17,510 screened, 1,820 of them without an abstract (kept, screened by title).
