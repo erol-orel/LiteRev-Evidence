@@ -52,6 +52,18 @@ def test_trailing_star_is_a_prefix_query():
     assert params["tq_1"] == "wastewater"
 
 
+def test_a_stop_word_truncation_falls_back_to_the_unstemmed_prefix_from_4_letters():
+    """The english configuration drops a stop word whatever its prefix flag. From
+    PubMed's floor of 4 characters the leaf falls back to the 'simple' prefix, decided in
+    SQL by the database's own dictionary; below it the leaf compiles as it always did."""
+    params: dict = {}
+    sql = lex.ast_to_tsquery_sql(_ast("over*"), params)
+    assert sql.startswith("(CASE WHEN numnode(to_tsquery('english'") and "to_tsquery('simple'" in sql
+    assert params == {"tq_0": "over"} and "over" not in sql     # bound, never interpolated
+    assert lex.ast_to_tsquery_sql(_ast("out*"), {}) == (
+        "to_tsquery('english', quote_literal(CAST(:tq_0 AS text)) || ':*')")
+
+
 def test_an_empty_ast_matches_nothing_never_everything():
     assert lex.ast_to_tsquery_sql(_ast(""), {}) is None
     assert lex.match_sql(_ast("[tiab]"), {}) is None
@@ -266,6 +278,35 @@ def test_what_the_searcher_will_notice(corpus):
     assert _search("the") == set()                               # stop words match nothing alone…
     assert _search("the AND ambulance") == _search("ambulance")  # …and are dropped inside AND
     assert lex.stopword_terms(["the", "ambulance", "of"]) == ["the", "of"]
+
+
+def test_a_truncated_stop_word_is_a_prefix_from_4_letters_and_named_below(corpus, monkeypatch, caplog):
+    """`to_tsquery('english', ...)` drops a stop word whatever its prefix flag: `out*` and
+    `over*` compiled to an EMPTY tsquery, not to prefixes of "outbreak" and "overweight"
+    (PostgreSQL's english list holds out, over, under, off, own, her, here, once,
+    further...). From PubMed's floor of 4 characters before the wildcard, the truncation
+    of a stop word is the unstemmed prefix and reaches overweight and overall as PubMed's
+    over* does. Below it (`out*`, which PubMed refuses) the term is still dropped, and the
+    warning, which skipped every term ending in a star, names it. The LIKE path reads
+    `%out%` and does match: there the two engines differ."""
+    import logging
+    with corpus.cursor() as cur:
+        cur.execute("INSERT INTO literature_document (id, title, abstract, year) VALUES "
+                    "(6, 'Outbreak report', 'An influenza outbreak over the winter and its outcomes.', 2024), "
+                    "(7, 'Overweight children', 'Overall, obesity and influenza vaccination in schools.', 2024)")
+    lex.refresh_once()
+    _reset_state()
+    assert lex.stopword_terms(["out*", "influenz*", "the", "over*", "under*", "ambulance", "out of*"]) == [
+        "out*", "the", "out of*"]                          # a quoted "out of*" is a phrase
+    assert _search("over*") == {7}                         # overweight, overall; "over" is not indexed
+    assert _search("over* AND influenza") == {7}           # a real condition inside AND
+    assert _search("forecasts*") == {1}                    # any other truncation stays stemmed
+    with caplog.at_level(logging.INFO, logger="literev-api"):
+        assert _search("out*") == set()                    # alone: nothing, not even doc 6
+        assert _search("out* AND influenza") == _search("influenza") == {3, 6, 7}   # dropped
+    assert "ignored by PostgreSQL: ['out*'] - 'out* AND influenza'" in caplog.text
+    monkeypatch.setenv("LEXICAL_SEARCH_ENGINE", "like")
+    assert _search("out*") == {6} == _search("out* AND influenza")
 
 
 def test_health_reports_the_engine(corpus):

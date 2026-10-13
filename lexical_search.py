@@ -25,9 +25,12 @@ saved queries answer in milliseconds instead of minutes (scripts/compare_fts.py)
 What changes for the person searching: stemming (forecast = forecasting = forecasts),
 no more substrings (`ai` no longer matches "chain"), stop words ignored ("the", "it",
 "of" - PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
-so), `word*` is a real prefix, accents are kept. Punctuation inside a word separates it
-the same way in the query and in the text (SEPARATOR_PATTERN): A(H5N1), A/H5N1 and
-"A H5N1" are one phrase, and 2.3.4.4b is found where it is written.
+so), `word*` is a real prefix, accents are kept. The truncation of a stop word is an
+unstemmed prefix from 4 letters, PubMed's floor (`over*` reaches overweight and
+overall); below it, `out*` included, PubMed refuses the wildcard and the term is
+dropped like `out`. Punctuation inside a word separates it the same way in the query
+and in the text (SEPARATOR_PATTERN): A(H5N1), A/H5N1 and "A H5N1" are one phrase, and
+2.3.4.4b is found where it is written.
 
 HOW IT STAYS CURRENT
 --------------------
@@ -57,7 +60,19 @@ logger = logging.getLogger("literev-api")
 
 #: Same configuration in the stored vectors and in every query. If these diverge the
 #: match silently degrades (a stem on one side only), so it lives in exactly one place.
+#: One deliberate exception on the query side: the truncation of a stop word
+#: (STOPWORD_PREFIX_MIN).
 TS_CONFIG = "english"
+
+#: PubMed's floor for a truncation: at least 4 characters before the wildcard. The
+#: english configuration drops a stop word whatever its prefix flag, so `over*` compiled
+#: to an EMPTY tsquery, not to a prefix of overweight. From this length the truncation of
+#: a stop word falls back to the unstemmed prefix of the 'simple' configuration, which
+#: still meets the stored stems (a stem keeps the beginning of its word: overal,
+#: overweight). Below it (`out*`, `her*`, `a*`, `in*`) PubMed refuses the wildcard, and a
+#: prefix of one or two letters would match nearly every document: the term stays dropped
+#: and `stopword_terms` names it.
+STOPWORD_PREFIX_MIN = 4
 
 #: The punctuation that SEPARATES two words, in a search term and in the text the term
 #: is matched against, written once for both sides and both engines. It used to be
@@ -285,14 +300,18 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
                           words dropped, a hyphenated word ("sars-cov-2") becoming the
                           same phrase of parts that to_tsvector produced when indexing;
       word*               to_tsquery(quote_literal(word) || ':*') - a prefix match, the
-                          PubMed truncation the tokenizer preserves.
+                          PubMed truncation the tokenizer preserves; for a stop word of
+                          STOPWORD_PREFIX_MIN letters or more (`over*`), which the
+                          english configuration would drop, the unstemmed 'simple' prefix.
     AND / OR / NOT become the tsquery operators && / || / !!, parenthesised, so the
     whole boolean is one index condition regardless of term count.
 
-    A leaf whose term is only stop words compiles to an EMPTY tsquery, which PostgreSQL
-    ignores inside && / || (a NOTICE, not an error) and which matches nothing on its
-    own - see `stopword_terms`. Returns None for an empty AST: the caller treats that as
-    "matches nothing", never as "matches everything".
+    A leaf whose term is only stop words compiles to an EMPTY tsquery, and so does the
+    truncation of a stop word shorter than STOPWORD_PREFIX_MIN (`out*`): `to_tsquery`
+    drops a stop word whatever its prefix flag. PostgreSQL ignores an empty tsquery
+    inside && / || / !! (a NOTICE, not an error) and it matches nothing on its own - see
+    `stopword_terms`. Returns None for an empty AST: the caller treats that as "matches
+    nothing", never as "matches everything".
     """
     if idx is None:
         idx = [0]
@@ -310,7 +329,13 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
             if not stem:
                 return None
             params[key] = stem
-            return f"to_tsquery('{TS_CONFIG}', quote_literal(CAST(:{key} AS text)) || ':*')"
+            english = f"to_tsquery('{TS_CONFIG}', quote_literal(CAST(:{key} AS text)) || ':*')"
+            if len(stem) < STOPWORD_PREFIX_MIN:
+                return english
+            # Empty only for a stop word, as the database's own dictionary says. The CASE
+            # holds no column, so it stays one GIN index condition.
+            simple = f"to_tsquery('simple', quote_literal(CAST(:{key} AS text)) || ':*')"
+            return f"(CASE WHEN numnode({english}) = 0 THEN {simple} ELSE {english} END)"
         params[key] = term.replace("*", "")
         return f"phraseto_tsquery('{TS_CONFIG}', CAST(:{key} AS text))"
     if typ == "not":
@@ -447,23 +472,32 @@ def use_fts(refresh: bool = True) -> bool:
 
 
 def stopword_terms(terms: list[str]) -> list[str]:
-    """The terms PostgreSQL would silently ignore: only stop words ("the", "it", "of").
+    """The terms PostgreSQL would silently ignore: only stop words ("the", "it", "of"),
+    and the truncation of a stop word shorter than STOPWORD_PREFIX_MIN (`out*`, `off*`,
+    `her*`: `to_tsquery` drops a stop word whatever its prefix flag, so `out*` is not a
+    prefix of outbreak, it is nothing).
 
-    Inside AND/OR an empty tsquery is dropped, so `IT AND infection` means `infection`;
-    alone it matches nothing. Best-effort (an error yields []): this is for the log
-    line and the person reading it, never for the result. Prefix terms are excluded -
-    `to_tsquery` keeps them.
+    Inside AND/OR an empty tsquery is dropped, so `IT AND infection` means `infection`
+    and `out* AND influenza` means `influenza`; alone it matches nothing. Each term is
+    tested with the very tsquery `ast_to_tsquery_sql` compiles it to, and named as
+    written, star included. Best-effort (an error yields []): this is for the log line
+    and the person reading it, never for the result.
     """
-    plain = [t.replace("*", "") for t in terms if not t.endswith("*")]
-    if _engine is None or not plain:
+    if _engine is None:
         return []
     from sqlalchemy import text
     try:
+        params: dict = {}
+        idx = [0]
+        leaves = [(i, ast_to_tsquery_sql(("term", t), params, idx)) for i, t in enumerate(terms)]
+        values = ", ".join(f"({i}, {q})" for i, q in leaves if q)
+        if not values:
+            return []
         with _engine.connect() as c:
-            return [r[0] for r in c.execute(text(
-                f"SELECT t FROM unnest(CAST(:terms AS text[])) AS t "
-                f"WHERE numnode(phraseto_tsquery('{TS_CONFIG}', t)) = 0"),
-                {"terms": plain}).all()]
+            empty = c.execute(text(
+                f"SELECT i FROM (VALUES {values}) AS v(i, q) WHERE numnode(q) = 0 ORDER BY i"),
+                params).scalars().all()
+        return [terms[i] for i in empty]
     except Exception:                                      # noqa: BLE001
         return []
 
