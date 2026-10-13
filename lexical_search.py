@@ -25,9 +25,11 @@ saved queries answer in milliseconds instead of minutes (scripts/compare_fts.py)
 What changes for the person searching: stemming (forecast = forecasting = forecasts),
 no more substrings (`ai` no longer matches "chain"), stop words ignored ("the", "it",
 "of" - PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
-so), `word*` is a real prefix, accents are kept. Punctuation inside a word separates it
-the same way in the query and in the text (SEPARATOR_PATTERN): A(H5N1), A/H5N1 and
-"A H5N1" are one phrase, and 2.3.4.4b is found where it is written.
+so), `word*` is a real prefix except of a stop word (`out*` and `over*` are dropped like
+`out`, they reach neither outbreak nor overweight), accents are kept. Punctuation
+inside a word separates it the same way in the query and in the text
+(SEPARATOR_PATTERN): A(H5N1), A/H5N1 and "A H5N1" are one phrase, and 2.3.4.4b is
+found where it is written.
 
 HOW IT STAYS CURRENT
 --------------------
@@ -289,8 +291,10 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
     AND / OR / NOT become the tsquery operators && / || / !!, parenthesised, so the
     whole boolean is one index condition regardless of term count.
 
-    A leaf whose term is only stop words compiles to an EMPTY tsquery, which PostgreSQL
-    ignores inside && / || (a NOTICE, not an error) and which matches nothing on its
+    A leaf whose term is only stop words compiles to an EMPTY tsquery, and so does the
+    truncation of one: `to_tsquery` drops a stop word whatever its prefix flag, so `out*`
+    and `over*` are no prefix of outbreak or overweight. PostgreSQL ignores an empty
+    tsquery inside && / || / !! (a NOTICE, not an error) and it matches nothing on its
     own - see `stopword_terms`. Returns None for an empty AST: the caller treats that as
     "matches nothing", never as "matches everything".
     """
@@ -447,23 +451,31 @@ def use_fts(refresh: bool = True) -> bool:
 
 
 def stopword_terms(terms: list[str]) -> list[str]:
-    """The terms PostgreSQL would silently ignore: only stop words ("the", "it", "of").
+    """The terms PostgreSQL would silently ignore: only stop words ("the", "it", "of"),
+    truncated ones included (`out*`, `over*`, `under*`: `to_tsquery` drops a stop word
+    whatever its prefix flag, so `out*` is not a prefix of outbreak, it is nothing).
 
-    Inside AND/OR an empty tsquery is dropped, so `IT AND infection` means `infection`;
-    alone it matches nothing. Best-effort (an error yields []): this is for the log
-    line and the person reading it, never for the result. Prefix terms are excluded -
-    `to_tsquery` keeps them.
+    Inside AND/OR an empty tsquery is dropped, so `IT AND infection` means `infection`
+    and `out* AND influenza` means `influenza`; alone it matches nothing. Each term is
+    tested with the very tsquery `ast_to_tsquery_sql` compiles it to, and named as
+    written, star included. Best-effort (an error yields []): this is for the log line
+    and the person reading it, never for the result.
     """
-    plain = [t.replace("*", "") for t in terms if not t.endswith("*")]
-    if _engine is None or not plain:
+    if _engine is None:
         return []
     from sqlalchemy import text
     try:
+        params: dict = {}
+        idx = [0]
+        leaves = [(i, ast_to_tsquery_sql(("term", t), params, idx)) for i, t in enumerate(terms)]
+        values = ", ".join(f"({i}, {q})" for i, q in leaves if q)
+        if not values:
+            return []
         with _engine.connect() as c:
-            return [r[0] for r in c.execute(text(
-                f"SELECT t FROM unnest(CAST(:terms AS text[])) AS t "
-                f"WHERE numnode(phraseto_tsquery('{TS_CONFIG}', t)) = 0"),
-                {"terms": plain}).all()]
+            empty = c.execute(text(
+                f"SELECT i FROM (VALUES {values}) AS v(i, q) WHERE numnode(q) = 0 ORDER BY i"),
+                params).scalars().all()
+        return [terms[i] for i in empty]
     except Exception:                                      # noqa: BLE001
         return []
 

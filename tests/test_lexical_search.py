@@ -268,6 +268,28 @@ def test_what_the_searcher_will_notice(corpus):
     assert lex.stopword_terms(["the", "ambulance", "of"]) == ["the", "of"]
 
 
+def test_a_truncated_stop_word_is_dropped_and_the_warning_names_it(corpus, monkeypatch, caplog):
+    """`to_tsquery` drops a stop word whatever its prefix flag: `out*` compiles to an
+    EMPTY tsquery, not to a prefix of "outbreak" (PostgreSQL's english list holds out,
+    over, under, off, own, her, here, once, further...). The warning skipped every term
+    ending in a star, so the log never said why `out* AND influenza` meant `influenza`.
+    The LIKE path reads `%out%` and does match: there the two engines differ."""
+    import logging
+    with corpus.cursor() as cur:
+        cur.execute("INSERT INTO literature_document (id, title, abstract, year) VALUES "
+                    "(6, 'Outbreak report', 'An influenza outbreak over the winter and its outcomes.', 2024)")
+    lex.refresh_once()
+    _reset_state()
+    assert lex.stopword_terms(["out*", "influenz*", "the", "over*", "ambulance", "out of*"]) == [
+        "out*", "the", "over*", "out of*"]                 # a quoted "out of*" is a phrase
+    with caplog.at_level(logging.INFO, logger="literev-api"):
+        assert _search("out*") == set()                    # alone: nothing, not even doc 6
+        assert _search("out* AND influenza") == _search("influenza") == {3, 6}   # dropped
+    assert "ignored by PostgreSQL: ['out*'] - 'out* AND influenza'" in caplog.text
+    monkeypatch.setenv("LEXICAL_SEARCH_ENGINE", "like")
+    assert _search("out*") == {6} == _search("out* AND influenza")
+
+
 def test_health_reports_the_engine(corpus):
     from fastapi.testclient import TestClient
     lex.refresh_once()
