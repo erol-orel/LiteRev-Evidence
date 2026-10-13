@@ -256,7 +256,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
   deferred `print()` (`ScenarioDetailPage.tsx:3667-3670`) → blank tab; no URL router
   (back/refresh/deep-link broken). Fixes per item.
 - **M10 - Unrestricted root SSH + arbitrary `custom` command channel**: the single
-  `DEPLOY_SSH_KEY` is unrestricted root (`INFRASTRUCTURE.md:27,37`) and `server-command.yml`
+  `DEPLOY_SSH_KEY` is unrestricted root (`docs/INFRASTRUCTURE.md:27,37`) and `server-command.yml`
   exposes a `custom` arbitrary-bash-as-root path. Audit-logged but not prevented. Fix:
   non-root deploy user, forced-command whitelist, drop `custom`, rotate key, `from=` allowlist.
 
@@ -272,7 +272,7 @@ Legend for each: **What / Why / Evidence / Location / Fix / Verify.**
 - **L3 - `generate_schema.py:99` emits invalid `ALTER TABLE … ADD CONSTRAINT IF NOT EXISTS`**
   (Postgres rejects `IF NOT EXISTS` on ADD CONSTRAINT) → regenerated schema won't replay.
 - **L4 - Bad defaults / docs:** `quality_score DEFAULT 0.0` (NULL would distinguish "unscored");
-  `INFRASTRUCTURE.md` claims PostgreSQL 15 but it's **14.23**; `updated_at` columns have
+  `docs/INFRASTRUCTURE.md` claims PostgreSQL 15 but it's **14.23**; `updated_at` columns have
   `DEFAULT now()` but no auto-update trigger; README is the default Vite template.
 
 ---
