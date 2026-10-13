@@ -34,7 +34,10 @@ jobs:
   production:
     name: Environment "production"
     runs-on: ubuntu-latest
-    environment: production
+    # Its secrets, without recording a deployment to production.
+    environment:
+      name: production
+      deployment: false
     steps:
       - name: Which names hold a value (true or false only)
         env:
