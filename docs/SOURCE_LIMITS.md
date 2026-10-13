@@ -10,18 +10,21 @@ Line references point at `main.py` / `data_connectors.py` so this stays verifiab
 
 - **12 literature sources are queried in parallel** on every search/populate
   (`ThreadPoolExecutor(max_workers=12)`, `main.py:8215`).
-- **Fetch ceiling: `LIVE_MAX_PER_SOURCE = 2000` documents per source per search**
-  (default; **env-configurable** - set it to e.g. `100000` to effectively remove the cap,
-  after which the time budget below is the real governor). This is the *fetch* cap, before
-  boolean filtering. ⚠ raising it multiplies API calls (429 risk) and OpenAI embedding cost
-  on every search.
-- **Wall-clock budget: `POPULATE_FEDERATION_BUDGET = 600 s`** (`api/core.py`, default;
-  set the env var higher - e.g. `1800` - for a more complete corpus). Populate runs in a
+- **Every search is exhaustive** (since 13 October 2026; the "standard" search, which kept
+  each source's most relevant records, was removed): every database that applies the boolean
+  returns everything it matches, up to a guard rail, the larger of `EXHAUSTIVE_MAX_PER_SOURCE`
+  (20 000 by default) and `LIVE_MAX_PER_SOURCE` (2000 by default; production sets 100 000).
+  Crossref and OpenAlex's full-text pass, which rank by relevance and never run dry, keep
+  `RANKED_PASS_MAX` (2000). This is the *fetch* cap, before boolean filtering. ⚠ raising it
+  multiplies API calls (429 risk) and OpenAI embedding cost on every search. The search
+  screen reads these numbers from `GET /search/limits`.
+- **Wall-clock budget: the larger of `EXHAUSTIVE_FEDERATION_BUDGET` (2700 s, 45 minutes)
+  and `POPULATE_FEDERATION_BUDGET` (600 s)** (`api/core.py`, defaults). Populate runs in a
   **background thread**, so a larger budget doesn't block the request; it only delays the
   scenario reaching "done". Not unbounded on purpose: a truly stuck source would otherwise
   keep the job alive forever. When it expires, slow sources stop paginating mid-stream and
   the corpus is built from whatever arrived - so a slow source (arXiv, deep Crossref/
-  OpenAlex) may not reach its 2000 cap.
+  OpenAlex) may not reach its cap.
 - **Corpus membership = boolean/lexical only.** After fetching, membership is
   recomputed with the *same* boolean query on `local DB ∪ freshly-ingested`
   (`_boolean_corpus_ids` / `_multi_query_corpus_ids`, `main.py:8276`). The 2000
@@ -75,8 +78,8 @@ returned 457 on the same search. The bioRxiv API is still used by the full-text 
 **Source-union** (`main.py:_link_to_scenario(boolean_native=True)`): the ✅ sources applied the *real*
 boolean, so their hits enter the corpus **directly** (not re-filtered locally). The URL-limited sources
 (OpenAlex, ClinicalTrials.gov, arXiv, OpenAIRE) receive the whole boolean when its URL-encoded form fits
-`URL_QUERY_MAX_ENCODED` (1 800 bytes); otherwise a reduced form re-filtered locally, or, in an
-exhaustive search, the whole boolean split into parts whose union is the strategy (as DOAJ). CORE
+`URL_QUERY_MAX_ENCODED` (1 800 bytes); otherwise the whole boolean split into parts whose union is
+the strategy (as DOAJ), or, past `SPLIT_MAX_PARTS` parts, a reduced form re-filtered locally. CORE
 receives it in a POST body and PubMed always gets the union "(MeSH) OR (portable boolean)" (POST past
 the URL limit), whatever their length. That's why per-source counts differ for the same search.
 
@@ -94,24 +97,25 @@ the corpus count itself stays pure lexical.
 
 ## 1. Literature sources - quick table
 
-| # | Source | Page size | Standard search keeps | Exhaustive search keeps | Key needed |
-|---|--------|-----------|-----------------------|-------------------------|-----------|
-| 1 | **PubMed** | 200 | 2000, by relevance | every match (past 10 000, read in year slices) | optional (`NCBI_API_KEY`) |
-| 2 | **OpenAlex** | 200 | 2000, by relevance | every title/abstract match + its 2000 most relevant | recommended (`OPENALEX_API_KEY`, free) |
-| 3 | **Crossref** | 1000 | 2000, by relevance | **2000, by relevance** (keywords only) | none (polite email) |
-| 4 | **Europe PMC** | 1000 | 2000, by relevance | every match | none |
-| 5 | **Preprints (Europe PMC)** | 100 | 2000, by relevance | every match | none |
-| 6 | **Semantic Scholar** | bulk | 2000, **unranked** (ID order) | every match | optional (`SEMANTIC_SCHOLAR_API_KEY`) |
-| 7 | **DOAJ** | 100 | 2000 | every match (strategy split in parts) | none |
-| 8 | **ClinicalTrials.gov** | 100 | 2000 (trials, not papers) | every match | none |
-| 9 | **CORE** | 100 | 2000 | every match | **required (`CORE_API_KEY`, free)** |
-| 10 | **arXiv** | 100 | 2000 (3 s/request) | every match | none |
-| 11 | **OpenAIRE** | 50 | 2000 (4-operator query) | every match | none |
+| # | Source | Page size | A search keeps | Key needed |
+|---|--------|-----------|----------------|-----------|
+| 1 | **PubMed** | 200 | every match (past 10 000, read in year slices) | optional (`NCBI_API_KEY`) |
+| 2 | **OpenAlex** | 200 | every title/abstract match + its 2000 most relevant full-text matches | recommended (`OPENALEX_API_KEY`, free) |
+| 3 | **Crossref** | 1000 | **2000, by relevance** (keywords only) | none (polite email) |
+| 4 | **Europe PMC** | 1000 | every match | none |
+| 5 | **Preprints (Europe PMC)** | 100 | every match | none |
+| 6 | **Semantic Scholar** | bulk | every match (classic endpoint, 1000 at most, when the strategy has a NOT) | optional (`SEMANTIC_SCHOLAR_API_KEY`) |
+| 7 | **DOAJ** | 100 | every match (strategy split in parts) | none |
+| 8 | **ClinicalTrials.gov** | 100 | every match (trials, not papers) | none |
+| 9 | **CORE** | 100 | every match | **required (`CORE_API_KEY`, free)** |
+| 10 | **arXiv** | 100 | every match (3 s/request) | none |
+| 11 | **OpenAIRE** | 50 | every match (strategy split in 4-operator parts when it fits) | none |
 
-> `2000` is the default `LIVE_MAX_PER_SOURCE`; "every match" stops at `EXHAUSTIVE_MAX_PER_SOURCE`
-> (20 000, a guard rail). The federation budget (`POPULATE_FEDERATION_BUDGET`, or
-> `EXHAUSTIVE_FEDERATION_BUDGET` in exhaustive mode) governs how long sources may page. The PRISMA
-> card names every source that kept fewer records than it announced ("capped").
+> "Every match" stops at the guard rail above (the larger of `EXHAUSTIVE_MAX_PER_SOURCE` and
+> `LIVE_MAX_PER_SOURCE`). The federation budget governs how long sources may page. The PRISMA
+> card names every source that kept fewer records than it announced ("capped"). Cards of
+> searches run before 13 October 2026 may say "standard search": at most `LIVE_MAX_PER_SOURCE`
+> records per source, in each source's relevance order.
 > bioRxiv and medRxiv are no longer a source of their own: see footnote ² above.
 
 ---
@@ -134,8 +138,8 @@ the corpus count itself stays pure lexical.
 - Uses the translated **PubMed boolean** query. Extracts authors, journal, DOI.
 
 ### 2. OpenAlex - `api.openalex.org/works` (`main.py:7716`)
-- `per-page` up to **200**, `sort=relevance_score:desc`, cap 2000 (exhaustive: every
-  title/abstract match by cursor, plus the standard pass).
+- `per-page` up to **200**: every title/abstract match by cursor, plus its 2000 best full-text
+  matches (`sort=relevance_score:desc`).
 - `mailto` on every call, and `api_key` when `OPENALEX_API_KEY` is set (`openalex_params`).
   OpenAlex meters its API: without a key a call draws on a small free daily budget shared
   by every client behind the server's IP address, and once it is spent every call answers
@@ -190,9 +194,8 @@ the corpus count itself stays pure lexical.
 
 ### 10. arXiv - `export.arxiv.org/api/query` (`main.py:8121`)
 - `max_results = 100`/page, `start` pagination, Atom XML.
-- **arXiv requires ≥ 3 s between requests** (`main.py:8142`), retries included. The 600 s
-  federation budget leaves room for the standard cap of 2000 (20 pages); an exhaustive
-  search pages further within its own budget. Keyless.
+- **arXiv requires ≥ 3 s between requests** (`main.py:8142`), retries included. The 45-minute
+  federation budget leaves room for about 900 pages. Keyless.
 - Coverage skew: physics / CS / math / **quantitative biology** preprints.
 
 ### 11. OpenAIRE - `api.openaire.eu/search/publications` (`main.py:8147`)

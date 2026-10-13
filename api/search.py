@@ -1599,13 +1599,16 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              soumise à chaque base. Sur le scénario HPAI, arXiv et CORE
                              ont ainsi rapporté 12 438 notices à une requête de huit mots
                              dont aucun ne nommait la grippe.
-    search_mode            : « standard » (au plus `per_source_cap` notices par source, dans
-                             l'ordre de pertinence de la source) ou « exhaustive » (toutes
-                             les notices que chaque base appariant le booléen renvoie).
+    search_mode            : « exhaustive » (toutes les notices que chaque base appariant
+                             le booléen renvoie), le seul mode d'une recherche depuis le
+                             13 octobre 2026 ; « standard » (au plus `per_source_cap`
+                             notices par source, dans l'ordre de pertinence de la source)
+                             reste celui des cartes des recherches d'avant.
     source_caps            : le plafond APPLIQUÉ à chaque source quand il n'est pas le même
-                             pour toutes : en mode exhaustif, Crossref, qui classe des
-                             mots-clés au lieu d'appliquer le booléen, garde le plafond
-                             standard. « Plafonnée » se juge contre le plafond de la source.
+                             pour toutes : Crossref, qui classe des mots-clés au lieu
+                             d'appliquer le booléen, garde ses RANKED_PASS_MAX plus
+                             pertinentes. « Plafonnée » se juge contre le plafond de la
+                             source.
     title_abstract_sources : les sources dont TOUTES les correspondances sur titre et résumé
                              ont été prises (OpenAlex en mode exhaustif : sa recherche par
                              défaut lit aussi le texte intégral, 43 181 notices sur HPAI

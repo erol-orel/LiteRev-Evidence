@@ -397,8 +397,7 @@ def federation(monkeypatch):
     def run(filters=None, **kw):
         P._run_user_scenario_populate(SID, HPAI, filters or {}, max_results=kw.pop("max_results", 100_000),
                                       include_live=True, auto_pipeline=False,
-                                      force_live=kw.pop("force_live", True),
-                                      exhaustive=kw.pop("exhaustive", False), **kw)
+                                      force_live=kw.pop("force_live", True), **kw)
         job = P._user_scenario_populate_jobs.get(SID) or {}
         return job.get("prisma_identification") or {}
 
@@ -442,11 +441,14 @@ def test_a_query_under_the_ceiling_is_not_split(federation):
     assert (fig.get("records_by_source") or {}).get("pubmed") == 70
 
 
-def test_a_capped_search_is_not_split(federation):
+def test_a_capped_search_is_not_split(federation, monkeypatch):
     """Under a per-source cap the ceiling already covers, the most relevant are the first
-    page of the whole query: nothing to split."""
+    page of the whole query: nothing to split. Every search is exhaustive, so the cap is
+    its guard rail, set low here."""
+    from api import pipeline as P
     build, run = federation
     fake = build(_records(SMALL_GROWTH))
+    monkeypatch.setattr(P, "EXHAUSTIVE_MAX_PER_SOURCE", 50)
     fig = run(max_results=50)
     assert len(fake.esearch) == 1 and "[dp]" not in fake.terms()[0]
     assert (fig.get("records_by_source") or {}).get("pubmed") == 50

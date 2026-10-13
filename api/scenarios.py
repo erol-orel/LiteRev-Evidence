@@ -29,11 +29,9 @@ from .scenario_store import (
     relevance_order_sql,
     relevant_gate_sql,
     scenario_counts,
-    scenario_search_mode,
     scenario_threshold_info,
     screening_status_sql,
     set_scenario_exclude_preprints,
-    set_scenario_search_mode,
 )
 from .schema_boot import _exec_ddl_isolated
 from .search import (
@@ -192,11 +190,12 @@ def _ensure_user_scenarios_table() -> None:
             # et pour les lignes antérieures à la colonne : l'inconnu se dit, il ne
             # s'invente pas.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS created_ip VARCHAR(45)",
-            # Le MODE de la recherche : NULL ou 'standard' (au plus LIVE_MAX_PER_SOURCE
-            # notices par source, par pertinence), 'exhaustive' (toutes les notices que
-            # chaque base appariant le booléen renvoie). Porté par le scénario et non par
-            # un appel : une relance (bouton, pipeline, redémarrage) refait la MÊME
-            # recherche, au lieu de ramener en silence un corpus exhaustif au plafond.
+            # Le MODE de la recherche, quand il y en avait deux : NULL ou 'standard' (au
+            # plus LIVE_MAX_PER_SOURCE notices par source, par pertinence), 'exhaustive'
+            # (toutes les notices que chaque base appariant le booléen renvoie). Toute
+            # recherche est exhaustive depuis le 13 octobre 2026 : l'API ne lit plus cette
+            # colonne, gardée pour les bases et les scripts qui l'ont. La carte PRISMA de
+            # chaque recherche porte son propre mode.
             "ALTER TABLE user_scenarios ADD COLUMN IF NOT EXISTS search_mode VARCHAR(16)",
             "CREATE INDEX IF NOT EXISTS ix_user_scenarios_owner ON user_scenarios (owner_email)",
             # Scénarios GESICA : _list_db_gesica_scenarios (main.py:3720-3727) filtre sur
@@ -1214,8 +1213,7 @@ _user_scenario_pipeline_jobs: dict[str, dict] = {}
 
 def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_results: int,
                          include_live: bool = True, lang: str | None = None,
-                         force_live: bool = False, exhaustive: bool | None = None,
-                         auto_pipeline: bool = True) -> str:
+                         force_live: bool = False, auto_pipeline: bool = True) -> str:
     """
     Démarre un job d'ingestion en arrière-plan pour un scénario, en garantissant
     qu'un seul job tourne à la fois (verrou partagé). Renvoie l'état : "started"
@@ -1253,7 +1251,7 @@ def _launch_populate_job(scenario_id: str, query: str, filters: dict, max_result
         try:
             _run_user_scenario_populate(scenario_id, query, filters or {}, max_results, None, include_live,
                                         _norm_lang(lang) or "fr", force_live=force_live,
-                                        exhaustive=exhaustive, auto_pipeline=auto_pipeline)
+                                        auto_pipeline=auto_pipeline)
         except BaseException as _e:                          # noqa: BLE001
             logger.error(f"Populate {scenario_id} crashed before its own error handling: {_e}", exc_info=True)
             _job = _user_scenario_populate_jobs.get(scenario_id)
@@ -1285,7 +1283,6 @@ def populate_user_scenario(
     include_live: bool = True,
     lang: str | None = Query(None),
     force_live: bool = False,
-    exhaustive: bool | None = None,
     auto_pipeline: bool = True,
     exclude_preprints: bool | None = None,
     _: None = Depends(require_api_key),
@@ -1294,19 +1291,17 @@ def populate_user_scenario(
     Construit le corpus du scénario = requête booléenne sur (base locale ∪ live).
     Plafond LIVE_MAX_PER_SOURCE par source. include_live=False : base locale seule.
     force_live=True : ignorer le cache des réponses des sources (SOURCE_CACHE_TTL_S).
-    exhaustive=true : recherche EXHAUSTIVE (toutes les notices que chaque base appariant
-    le booléen renvoie) ; false : standard. Le choix est ENREGISTRÉ sur le scénario, et
-    toute relance le reprend ; absent, c'est le mode déjà enregistré qui s'applique.
+    La recherche est EXHAUSTIVE : toutes les notices que chaque base appariant le booléen
+    renvoie (cf. _run_user_scenario_populate). Il n'y a plus de recherche standard, et un
+    paramètre `exhaustive` d'un ancien appelant est ignoré.
     auto_pipeline=false : ne pas enchaîner le pipeline complet après cette recherche.
     exclude_preprints=true : recherche SANS préprints (serveurs de préprints non
     interrogés, préprints rendus par les autres bases retirés avant le screening, et dits
-    sur la carte PRISMA) ; false : avec. Enregistré dans les filtres du scénario, comme le
-    mode ; absent, c'est le choix déjà enregistré qui s'applique.
+    sur la carte PRISMA) ; false : avec. Enregistré dans les filtres du scénario ; absent,
+    c'est le choix déjà enregistré qui s'applique.
     """
     row = _get_user_scenario_or_404(scenario_id)
     query = row["query"]
-    if exhaustive is not None:
-        set_scenario_search_mode(scenario_id, "exhaustive" if exhaustive else "standard")
     if exclude_preprints is not None:
         set_scenario_exclude_preprints(scenario_id, bool(exclude_preprints))
         row = _get_user_scenario_or_404(scenario_id)
@@ -1314,7 +1309,7 @@ def populate_user_scenario(
     # `lang` : la langue de l'interface qui lance la recherche : les résumés de clusters
     # précalculés à la fin le sont dans cette langue (plus de première ouverture qui attend).
     if _launch_populate_job(scenario_id, query, row.get("filters") or {}, max_results, include_live,
-                            _norm_lang(lang), force_live=force_live, exhaustive=exhaustive,
+                            _norm_lang(lang), force_live=force_live,
                             auto_pipeline=auto_pipeline) == "already_running":
         job = _user_scenario_populate_jobs.get(scenario_id) or {}
         return {
@@ -1329,7 +1324,7 @@ def populate_user_scenario(
         "status": "started",
         "query": query,
         "max_results": max_results,
-        "search_mode": scenario_search_mode(scenario_id),
+        "search_mode": "exhaustive",
         "exclude_preprints": excludes_preprints(row.get("filters")),
         "message": f"Ingestion multi-sources lancée en arrière-plan pour '{row['name']}' "
                    + ("(DB Cache + PubMed + OpenAlex + Crossref + EuropePMC + "
@@ -1412,7 +1407,6 @@ def start_user_scenario_pipeline(
     scenario_id: str,
     max_results: int = LIVE_MAX_PER_SOURCE,
     lang: str | None = Query(None),
-    exhaustive: bool | None = None,
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     """
@@ -1420,13 +1414,9 @@ def start_user_scenario_pipeline(
     ingest → fulltext → embed → rerank → PICO → métadonnées → clustering →
     knowledge graph → evidence brief → variables & modèle.
     Appelé dès qu'une recherche est sauvegardée en scénario, et par « tout recalculer ».
-    `exhaustive` : le mode de la recherche, ENREGISTRÉ sur le scénario avant le lancement,
-    comme le fait /populate ; il sert quand le corpus reste à construire. Absent, le
-    scénario garde le sien (standard par défaut).
+    Quand le corpus reste à construire, sa recherche est exhaustive, comme toute recherche.
     """
     row = _get_user_scenario_or_404(scenario_id)
-    if exhaustive is not None:
-        set_scenario_search_mode(scenario_id, "exhaustive" if exhaustive else "standard")
     status = _launch_full_pipeline(scenario_id, max_results, lang)
     if status == "already_running":
         job = _user_scenario_pipeline_jobs.get(scenario_id) or {}

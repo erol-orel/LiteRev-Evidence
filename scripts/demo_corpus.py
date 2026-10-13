@@ -934,13 +934,14 @@ def finish_search(engine, sid: str, records: list[Record]) -> dict:
     by_source["preprint"] = by_source.pop("preprint", 0)
     figures = _prisma_identification_figures(
         by_source, unique_records=len(records), duplicate_rows_removed=0, corpus_total=len(records),
-        method="populate", source_outcomes=outcomes, per_source_cap=2000, search_mode="standard")
+        method="populate", source_outcomes=outcomes, per_source_cap=20000, search_mode="exhaustive",
+        source_caps={"crossref": 2000})
     with engine.begin() as c:
         c.execute(text("""
             UPDATE user_scenarios
             SET article_count = :n, result_count = :n, populate_status = 'done',
                 pipeline_status = 'done', pipeline_step = 'done', pipeline_progress = 100,
-                search_mode = 'standard', prisma_identification = CAST(:f AS jsonb), updated_at = NOW()
+                search_mode = 'exhaustive', prisma_identification = CAST(:f AS jsonb), updated_at = NOW()
             WHERE id = :sid
         """), {"n": len(records), "f": json.dumps(figures), "sid": sid})
     return figures

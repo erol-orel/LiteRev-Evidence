@@ -165,7 +165,7 @@ def rate_limited(db_conn, monkeypatch):
 
 def _search(P):
     P._run_user_scenario_populate(SID, "avian influenza exposure", {}, max_results=50, include_live=True,
-                                  auto_pipeline=False, force_live=True, exhaustive=True)
+                                  auto_pipeline=False, force_live=True)
     return (P._user_scenario_populate_jobs.get(SID) or {}).get("prisma_identification") or {}
 
 

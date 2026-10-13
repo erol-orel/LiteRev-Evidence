@@ -1210,13 +1210,14 @@ export interface ScenarioPrisma {
      *  were capped on a production run and nothing said so. */
     source_totals?: Record<string, number>;
     sources_capped?: string[];
-    /** "standard": at most `per_source_cap` records per source, in each source's relevance
-     *  order. "exhaustive": every record each database applying the boolean returned.
-     *  Absent on figures stored before the mode existed (they are standard). */
+    /** "exhaustive": every record each database applying the boolean returned, the only
+     *  search since 13 October 2026. "standard": at most `per_source_cap` records per
+     *  source, in each source's relevance order, on figures of earlier searches (absent on
+     *  figures stored before the modes existed, which are standard too). */
     search_mode?: "standard" | "exhaustive";
     /** The cap actually applied to a source when it differs from `per_source_cap`: the
-     *  relevance-ranked passes keep their own (RANKED_PASS_MAX, 2,000 by default), Crossref
-     *  in both modes and OpenAlex in a standard search. PubMed has none of its own: past the
+     *  relevance-ranked passes keep their own (RANKED_PASS_MAX, 2,000 by default): Crossref,
+     *  and OpenAlex in an earlier standard search. PubMed has none of its own: past the
      *  10,000 records eutils returns per query, it is read in year slices (`year_slices`). */
     source_caps?: Record<string, number>;
     /** Sources searched in titles and abstracts only (OpenAlex in an exhaustive search). */
@@ -2827,18 +2828,14 @@ export async function patchUserScenario(
 }
 
 /** Lance le pipeline complet. `maxResults` absent : le serveur applique son plafond par
- *  source (LIVE_MAX_PER_SOURCE), le même que la recherche. `exhaustive` : le mode de la
- *  recherche, enregistré sur le scénario avant que le corpus ne soit construit ; absent,
- *  le scénario garde le sien. */
+ *  source (LIVE_MAX_PER_SOURCE), le même que la recherche, toujours exhaustive. */
 export async function startUserScenarioPipeline(
   scenarioId: string,
   maxResults?: number,
-  opts?: { exhaustive?: boolean },
 ): Promise<{ scenario_id: string; status: string; message: string; steps: string[] }> {
   const params = new URLSearchParams();
   if (maxResults !== undefined) params.set('max_results', String(maxResults));
   params.set('lang', currentLang());
-  if (opts?.exhaustive !== undefined) params.set('exhaustive', String(opts.exhaustive));
   const r = await safeFetch(
     `${API_BASE_URL}/user-scenarios/${scenarioId}/pipeline?${params}`,
     { method: 'POST', headers: authHeaders() },
@@ -2940,19 +2937,16 @@ export async function fetchActivity(): Promise<{ running: ActivityItem[]; count:
   return r.json();
 }
 
-/** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan.
- *  `exhaustive` : le mode de la recherche (true : toutes les notices que chaque base
- *  apparie, jusqu'à 20 000 par base ; false : les 2 000 plus pertinentes par base),
- *  enregistré sur le scénario par le serveur ; absent, le scénario garde le sien.
- *  `maxResults` absent : le serveur applique son plafond par source (LIVE_MAX_PER_SOURCE). */
-/** The per-source caps this server applies to a search launched from the screen: they
- *  come from its environment (production lifts the standard cap to 100,000), so the
- *  screen reads them instead of writing 2,000 and 20,000. */
+/** The per-source caps and the time budget this server applies to a search launched from
+ *  the screen: they come from its environment (production sets the cap to 100,000), so the
+ *  screen reads them instead of writing 2,000 and 20,000. Every search is exhaustive. */
 export interface SearchLimits {
-  standard_per_source: number;
-  exhaustive_per_source: number;
+  /** Every record each database matches, up to this guard rail. */
+  per_source: number;
   /** Crossref and OpenAlex's full-text pass, which rank by relevance and never run dry. */
   ranked_per_source: number;
+  /** How long the databases are given to return everything, in seconds. */
+  budget_s: number;
 }
 
 /** null when the server cannot say (older API, network): the screen keeps its defaults. */
@@ -2962,7 +2956,7 @@ export async function fetchSearchLimits(): Promise<SearchLimits | null> {
     if (!r.ok) return null;
     const j = await r.json();
     const ok = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v > 0;
-    if (!ok(j?.standard_per_source) || !ok(j?.exhaustive_per_source) || !ok(j?.ranked_per_source)) {
+    if (!ok(j?.per_source) || !ok(j?.ranked_per_source) || !ok(j?.budget_s)) {
       return null;
     }
     return j as SearchLimits;
@@ -2971,15 +2965,18 @@ export async function fetchSearchLimits(): Promise<SearchLimits | null> {
   }
 }
 
+/** Construit le corpus (= requête booléenne sur base locale ∪ live) en arrière-plan, par
+ *  une recherche exhaustive : toutes les notices que chaque base apparie, jusqu'au plafond
+ *  de `fetchSearchLimits`. `maxResults` absent : le serveur applique son plafond par source
+ *  (LIVE_MAX_PER_SOURCE). */
 export async function populateUserScenario(
   scenarioId: string,
-  opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean; exhaustive?: boolean },
+  opts?: { includeLive?: boolean; maxResults?: number; excludePreprints?: boolean },
 ): Promise<{ scenario_id: string; status: string; message?: string }> {
   const params = new URLSearchParams();
   if (opts?.maxResults !== undefined) params.set('max_results', String(opts.maxResults));
   params.set('include_live', String(opts?.includeLive ?? true));
   params.set('lang', currentLang());          // cluster summaries precomputed in this language
-  if (opts?.exhaustive !== undefined) params.set('exhaustive', String(opts.exhaustive));
   // Saved on the scenario by the server, so a pinned scenario searched again with the
   // toggle changed is rebuilt with it. Absent: the scenario keeps its recorded choice.
   if (opts?.excludePreprints !== undefined) {

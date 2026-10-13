@@ -13,6 +13,7 @@ import {
   fetchGesicaScenarios,
   fetchScenarioCorpus,
   fetchScenarioDetail,
+  fetchSearchLimits,
   fetchThresholdCurve,
   applyScenarioSubset,
   previewScenarioSubset,
@@ -198,32 +199,34 @@ describe("calls that start server-side work carry the interface language", () =>
     expect(urls[2]).toBe("/api/user-scenarios/usr-abc/populate?max_results=2000&include_live=true&lang=en");
   });
 
-  it("sends the search mode and leaves the per-source cap to the server", async () => {
+  it("sends no search mode and leaves the per-source cap to the server", async () => {
     localStorage.setItem("literev-lang", "en");
     setApiKey("secret");
-    const fetchMock = stubFetch(reply(200, {}), reply(200, {}), reply(200, {}), reply(200, {}));
-    // What the search screen sends: the mode chosen, never a cap of its own.
-    await populateUserScenario("usr-abc", { includeLive: true, excludePreprints: false, exhaustive: true });
-    await populateUserScenario("usr-abc", { includeLive: false, exhaustive: false });
+    const fetchMock = stubFetch(reply(200, {}), reply(200, {}), reply(200, {}));
+    // What the search screen sends: never a cap of its own, and no mode: every search is
+    // exhaustive.
+    await populateUserScenario("usr-abc", { includeLive: true, excludePreprints: false });
+    await populateUserScenario("usr-abc", { includeLive: false });
     // A pipeline started without a cap: the server applies LIVE_MAX_PER_SOURCE, as the
     // search does. The old default sent max_results=100000.
     await startUserScenarioPipeline("usr-abc");
-    await startUserScenarioPipeline("usr-abc", undefined, { exhaustive: true });
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
-    expect(urls[0]).toBe("/api/user-scenarios/usr-abc/populate?include_live=true&lang=en&exhaustive=true&exclude_preprints=false");
-    expect(urls[1]).toBe("/api/user-scenarios/usr-abc/populate?include_live=false&lang=en&exhaustive=false");
+    expect(urls[0]).toBe("/api/user-scenarios/usr-abc/populate?include_live=true&lang=en&exclude_preprints=false");
+    expect(urls[1]).toBe("/api/user-scenarios/usr-abc/populate?include_live=false&lang=en");
     expect(urls[2]).toBe("/api/user-scenarios/usr-abc/pipeline?lang=en");
-    expect(urls[3]).toBe("/api/user-scenarios/usr-abc/pipeline?lang=en&exhaustive=true");
-    for (const u of urls) expect(u).not.toContain("max_results");
+    for (const u of urls) {
+      expect(u).not.toContain("max_results");
+      expect(u).not.toContain("exhaustive");
+    }
   });
 
-  it("keeps the scenario's recorded mode when none is given", async () => {
-    localStorage.setItem("literev-lang", "fr");
-    const fetchMock = stubFetch(reply(200, {}));
-    await populateUserScenario("usr-abc");
-    const url = String(fetchMock.mock.calls[0][0]);
-    expect(url).toBe("/api/user-scenarios/usr-abc/populate?include_live=true&lang=fr");
-    expect(url).not.toContain("exhaustive");
+  it("reads the server's caps and time budget for the search screen", async () => {
+    const fetchMock = stubFetch(reply(200, { per_source: 100000, ranked_per_source: 2000, budget_s: 2700 }),
+                                reply(200, { standard_per_source: 2000, exhaustive_per_source: 20000, ranked_per_source: 2000 }));
+    expect(await fetchSearchLimits()).toEqual({ per_source: 100000, ranked_per_source: 2000, budget_s: 2700 });
+    // An older server's answer: the screen keeps its defaults.
+    expect(await fetchSearchLimits()).toBeNull();
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/search/limits");
   });
 });
 

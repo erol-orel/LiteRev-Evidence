@@ -57,17 +57,19 @@ curl -s "$BASE/sources/health" | jq .
 
 ## Build a corpus
 
-The corpus of a scenario = the boolean query over (local library ∪ live sources), capped at
-`LIVE_MAX_PER_SOURCE` (default 2000) per source in a standard search, or every record each
-database matches (up to 20000 per database) in an exhaustive one, within the
-`POPULATE_FEDERATION_BUDGET` time budget. This is the full federation (12 fetchers / 13 sources).
+The corpus of a scenario = the boolean query over (local library ∪ live sources). Every search
+is exhaustive: each database returns every record it matches, up to the larger of
+`EXHAUSTIVE_MAX_PER_SOURCE` (20000) and `LIVE_MAX_PER_SOURCE` per database (Crossref, which only
+ranks keywords, keeps its `RANKED_PASS_MAX` most relevant), within the larger of
+`EXHAUSTIVE_FEDERATION_BUDGET` (2700 s) and `POPULATE_FEDERATION_BUDGET`. `GET /search/limits`
+returns these caps and the budget. This is the full federation (12 fetchers / 13 sources).
 
 | Method | Path | Auth | Key params |
 |--------|------|------|-----------|
-| POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `include_live` (default true), `exhaustive` (true/false, recorded on the scenario; absent = the recorded mode, standard by default; the search screen sends true by default), `exclude_preprints` |
+| POST | `/user-scenarios/{id}/populate` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `include_live` (default true), `exclude_preprints`. The search is always exhaustive; an `exhaustive` parameter from an older caller is ignored |
 | GET | `/user-scenarios/{id}/populate/status` | open | `{status, phase, ingested, sources, rerank_status}` - poll until `status=done` |
 | POST | `/scenarios/{id}/rebuild-corpus` | ✅ | re-run boolean membership on the existing library (no live fetch) |
-| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`), `exhaustive` (recorded on the scenario, used when the corpus is still to be built) - full pipeline (populate → embed → scores → full text → PICO → metadata → views). Full text, PICO and metadata cover the relevant articles (`PIPELINE_ENRICH_SCOPE`, default `relevant`; `all` for the whole scenario) and wait until a person has chosen the threshold: the status then carries `waiting_threshold: true` |
+| POST | `/user-scenarios/{id}/pipeline` | ✅ | `max_results` (default `LIVE_MAX_PER_SOURCE`) - full pipeline (populate → embed → scores → full text → PICO → metadata → views). Full text, PICO and metadata cover the relevant articles (`PIPELINE_ENRICH_SCOPE`, default `relevant`; `all` for the whole scenario) and wait until a person has chosen the threshold: the status then carries `waiting_threshold: true` |
 | GET | `/user-scenarios/{id}/pipeline/status` | open | pipeline phase/progress |
 
 ```bash
@@ -147,8 +149,9 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 | Var | Default | Effect |
 |-----|---------|--------|
 | `WRITE_API_KEY` | - | admin key (required) |
-| `LIVE_MAX_PER_SOURCE` | 2000 | max docs fetched **per source** during populate |
-| `POPULATE_FEDERATION_BUDGET` | 600 | seconds the live federation runs before slow sources are cut off |
+| `LIVE_MAX_PER_SOURCE` | 2000 | floor of the per-source cap of a search (the larger of it and `EXHAUSTIVE_MAX_PER_SOURCE`), and ceiling of the ranked passes |
+| `EXHAUSTIVE_MAX_PER_SOURCE` | 20000 | the per-source guard rail of a search |
+| `POPULATE_FEDERATION_BUDGET` / `EXHAUSTIVE_FEDERATION_BUDGET` | 600 / 2700 | seconds the live federation runs (the larger of the two) before slow sources are cut off |
 | `NCBI_API_KEY` / `SEMANTIC_SCHOLAR_API_KEY` / `CORE_API_KEY` | - | raise per-source rate limits / enable CORE |
 | `OPENAI_API_KEY` | - | embeddings + LLM extraction |
 | `RAG_MIN_SIMILARITY` | 0.18 | RAG passage-match floor |

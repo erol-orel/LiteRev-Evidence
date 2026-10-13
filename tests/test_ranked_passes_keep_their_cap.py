@@ -1,7 +1,8 @@
 """Les passages classés par pertinence gardent leur plafond, quel que soit LIVE_MAX_PER_SOURCE.
 
-En production, LIVE_MAX_PER_SOURCE est réglé très haut pour lever le plafond d'une recherche
-standard, et l'écran envoyait de toute façon 2 000. Depuis que l'écran laisse le serveur
+En production, LIVE_MAX_PER_SOURCE est réglé très haut (il levait le plafond de l'ancienne
+recherche standard, et reste le plancher du plafond de la recherche exhaustive), et l'écran
+envoyait de toute façon 2 000. Depuis que l'écran laisse le serveur
 décider, ce plafond s'appliquait aussi aux deux passages qui ne s'arrêtent jamais d'eux-mêmes,
 parce qu'ils classent tout par pertinence : Crossref (des mots-clés, 2,6 millions de réponses
 sur la question HPAI) et le passage « meilleures correspondances en texte intégral »
@@ -140,11 +141,11 @@ def federation(db_conn, monkeypatch):
         c.execute(text("INSERT INTO user_scenarios (id, name, query, article_count) "
                        "VALUES (:s, 'ranked caps', :q, 0)"), {"s": SID, "q": QUERY})
 
-    def run(exhaustive: bool):
+    def run():
         # 100 000 : la valeur de LIVE_MAX_PER_SOURCE en production, que l'écran ne ramène
         # plus à 2 000.
         P._run_user_scenario_populate(SID, QUERY, {}, max_results=100000, include_live=True,
-                                      auto_pipeline=False, force_live=True, exhaustive=exhaustive)
+                                      auto_pipeline=False, force_live=True)
         return P._user_scenario_populate_jobs.get(SID) or {}
 
     yield run, fake, P
@@ -154,41 +155,37 @@ def federation(db_conn, monkeypatch):
             cur.execute("DROP TABLE document_chunk")
 
 
-@pytest.mark.parametrize("exhaustive", [False, True])
-def test_crossref_stops_at_its_ranked_cap_and_never_errors(federation, exhaustive):
+def test_crossref_stops_at_its_ranked_cap_and_never_errors(federation):
     run, fake, P = federation
-    job = run(exhaustive)
+    job = run()
     assert fake.crossref_offsets, "Crossref n'a pas été interrogé"
     assert max(fake.crossref_offsets) < RANKED_DEFAULT, fake.crossref_offsets
     assert (job.get("source_outcomes") or {}).get("crossref") != "error", job.get("source_outcomes")
 
 
-@pytest.mark.parametrize("exhaustive", [False, True])
-def test_the_openalex_full_text_pass_stops_at_its_ranked_cap(federation, exhaustive):
+def test_the_openalex_full_text_pass_stops_at_its_ranked_cap(federation):
     run, fake, P = federation
-    job = run(exhaustive)
+    job = run()
     fetched = sum(per for _page, per in fake.openalex_pages)
     assert 0 < fetched <= RANKED_DEFAULT, fake.openalex_pages
     assert all(page * per <= 10000 for page, per in fake.openalex_pages), fake.openalex_pages
     assert (job.get("source_outcomes") or {}).get("openalex") != "error", job.get("source_outcomes")
 
 
-@pytest.mark.parametrize("exhaustive", [False, True])
-def test_the_prisma_card_says_which_passes_keep_their_own_cap(federation, monkeypatch, exhaustive):
+def test_the_prisma_card_says_which_passes_keep_their_own_cap(federation, monkeypatch):
     run, _fake, P = federation
-    job = run(exhaustive)
+    job = run()
     ident = job.get("prisma_identification") or {}
     caps = ident.get("source_caps") or {}
     assert caps.get("crossref") == RANKED_DEFAULT, caps
-    # En standard, le seul passage d'OpenAlex est le passage classé ; en exhaustif, son
-    # passage titre et résumé a le plafond commun.
-    assert caps.get("openalex") == (None if exhaustive else RANKED_DEFAULT), caps
+    # Le passage titre et résumé d'OpenAlex a le plafond commun : pas de plafond propre.
+    assert caps.get("openalex") is None, caps
+    assert ident.get("search_mode") == "exhaustive", ident.get("search_mode")
     # Et l'écran de recherche annonce, avant la recherche, ce que la carte dira après.
     from api import sources as S
     monkeypatch.setattr(S, "LIVE_MAX_PER_SOURCE", P.LIVE_MAX_PER_SOURCE)
     limits = S.search_limits()
-    assert ident.get("per_source_cap") == limits["exhaustive_per_source" if exhaustive
-                                                 else "standard_per_source"], (ident, limits)
+    assert ident.get("per_source_cap") == limits["per_source"], (ident, limits)
     assert caps.get("crossref") == limits["ranked_per_source"], (caps, limits)
 
 

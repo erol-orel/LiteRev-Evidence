@@ -1,5 +1,5 @@
-"""Une stratégie longue n'est plus amputée : en recherche exhaustive, chaque base que l'URL
-limite la reçoit ENTIÈRE, découpée en requêtes dont l'union est le booléen.
+"""Une stratégie longue n'est plus amputée : chaque base que l'URL limite la reçoit ENTIÈRE,
+découpée en requêtes dont l'union est le booléen (toute recherche est exhaustive).
 
 Avant : au-delà de 1 200 caractères, OpenAlex, DOAJ, CORE, ClinicalTrials.gov, arXiv et
 OpenAIRE recevaient la requête réduite (chaque bloc OU tronqué à ses premiers termes, les
@@ -187,13 +187,12 @@ def federation(db_conn, monkeypatch):
                       {"s": SID, "st": json.dumps({"general": general, "pubmed": pubmed,
                                                    "explanation": "", "synonyms": []})})
 
-    def run(general: str = LONG_Q, pubmed: str = MESH_Q, exhaustive: bool = True):
+    def run(general: str = LONG_Q, pubmed: str = MESH_Q):
         _reset(general, pubmed)
         fake.gets.clear()
         fake.posts.clear()
         P._run_user_scenario_populate(SID, "avian influenza in poultry workers", {}, max_results=50,
-                                      include_live=True, auto_pipeline=False, force_live=True,
-                                      exhaustive=exhaustive)
+                                      include_live=True, auto_pipeline=False, force_live=True)
         return (P._user_scenario_populate_jobs.get(SID) or {}).get("prisma_identification") or {}
 
     yield run, fake
@@ -208,7 +207,7 @@ def federation(db_conn, monkeypatch):
 
 def test_an_exhaustive_search_splits_the_strategy_for_every_url_limited_database(federation):
     run, fake = federation
-    fig = run(exhaustive=True)
+    fig = run()
     parts = _split_boolean(LONG_Q, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len)
     split = fig.get("split_queries") or {}
     assert split.get("openalex") == parts and split.get("clinicaltrials") == parts, split
@@ -226,29 +225,18 @@ def test_an_exhaustive_search_splits_the_strategy_for_every_url_limited_database
     assert all(_count_operators(q) <= OPENAIRE_MAX_OPERATORS for q in fake.params("openaire", "search"))
 
 
-def test_core_gets_the_whole_strategy_in_both_modes(federation):
+def test_core_gets_the_whole_strategy(federation):
     run, fake = federation
     whole = _clean_boolean(LONG_Q)
-    for exhaustive in (True, False):
-        fig = run(exhaustive=exhaustive)
-        core = [p for u, p in fake.posts if "core.ac.uk" in u]
-        assert core and all(p.get("q") == whole for p in core), (exhaustive, core[:1])
-        assert "core" not in (fig.get("keyword_fallback_sources") or []), exhaustive
-
-
-def test_a_standard_search_still_sends_the_reduced_query_and_says_so(federation):
-    run, fake = federation
-    fig = run(exhaustive=False)
-    short = _shorten_boolean(LONG_Q, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len)
-    assert set(fake.params("clinicaltrials", "query.term")) == {short}
-    assert set(fake.params("openalex", "search")) == {short}
-    assert (fig.get("split_queries") or {}) == {}
-    assert {"openalex", "clinicaltrials", "arxiv", "doaj", "openaire"} <= set(fig.get("keyword_fallback_sources") or [])
+    fig = run()
+    core = [p for u, p in fake.posts if "core.ac.uk" in u]
+    assert core and all(p.get("q") == whole for p in core), core[:1]
+    assert "core" not in (fig.get("keyword_fallback_sources") or [])
 
 
 def test_pubmed_always_gets_the_union_and_a_long_one_goes_out_as_post(federation):
     run, fake = federation
-    run(exhaustive=False)
+    run()
     esearch_posts = [p for u, p in fake.posts if "esearch.fcgi" in u]
     esearch_gets = [p for u, p in fake.gets if "esearch.fcgi" in u]
     assert esearch_posts and not esearch_gets, "une union de plus de 1 800 caractères part dans le corps"
@@ -258,7 +246,7 @@ def test_pubmed_always_gets_the_union_and_a_long_one_goes_out_as_post(federation
 
 def test_openaire_gets_a_short_strategy_split_by_operators(federation):
     run, fake = federation
-    fig = run(general=SHORT_Q, pubmed=SHORT_Q, exhaustive=True)
+    fig = run(general=SHORT_Q, pubmed=SHORT_Q)
     parts = _split_boolean(SHORT_Q, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len,
                            max_operators=OPENAIRE_MAX_OPERATORS)
     assert (fig.get("split_queries") or {}).get("openaire") == parts

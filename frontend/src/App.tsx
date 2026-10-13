@@ -2029,15 +2029,12 @@ export default function App() {
   const [includeLive, setIncludeLive] = useState(false);
   // Recherche sans préprints : enregistrée dans les filtres du scénario par le serveur.
   const [excludePreprints, setExcludePreprints] = useState(false);
-  // Le mode de la recherche, enregistré sur le scénario par le serveur. Exhaustive par
-  // défaut : toutes les notices que chaque base apparie ; standard : les plus pertinentes
-  // de chaque base, plus vite.
-  const [exhaustiveSearch, setExhaustiveSearch] = useState(true);
-  // Les plafonds de ces deux modes viennent de l'environnement du serveur (la production
-  // lève celui du standard à 100 000) : l'écran les lit au lieu d'écrire 2 000 et 20 000.
-  // Les défauts du serveur tant qu'il n'a pas répondu.
+  // Une seule recherche, exhaustive : toutes les notices que chaque base apparie. Son
+  // plafond par base et son budget de temps viennent de l'environnement du serveur (la
+  // production met le plafond à 100 000) : l'écran les lit au lieu de les écrire. Les
+  // défauts du serveur tant qu'il n'a pas répondu.
   const [searchLimits, setSearchLimits] = useState<SearchLimits>({
-    standard_per_source: 2000, exhaustive_per_source: 20000, ranked_per_source: 2000,
+    per_source: 20000, ranked_per_source: 2000, budget_s: 2700,
   });
   useEffect(() => {
     let alive = true;
@@ -2505,8 +2502,8 @@ export default function App() {
       // ── LA recherche CONSTRUIT le corpus, puis l'affiche ─────────────────────
       // Le nombre affiché == la taille du corpus du scénario (même opération, même
       // helper booléen). On crée le scénario, on construit le corpus (requête
-      // booléenne sur base locale ∪ sources live, dans le mode choisi : exhaustive ou
-      // standard), puis on lit le corpus et on l'affiche. Plus de "preview" divergente.
+      // booléenne sur base locale ∪ sources live, toujours exhaustive), puis on lit le
+      // corpus et on l'affiche. Plus de "preview" divergente.
       const _sub = buildSubQueries(usedQuery);
       const newScenario = await createUserScenario({
         // Nom par défaut = l'expression COMPLÈTE (facettes + ET/OU), pas seulement
@@ -2524,8 +2521,8 @@ export default function App() {
       setCurrentSearchSid(sid);   // → indicateur global (« Voir les résultats » revient ici)
       // Le choix part AUSSI avec la recherche : un scénario épinglé de même requête est
       // renvoyé tel quel à la création, filtres compris, et serait sinon relancé sans lui.
-      // Pas de plafond envoyé : le mode le fixe, et le serveur applique le sien.
-      await populateUserScenario(sid, { includeLive, excludePreprints, exhaustive: exhaustiveSearch });
+      // Pas de plafond envoyé : le serveur applique le sien.
+      await populateUserScenario(sid, { includeLive, excludePreprints });
       // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
       // On construit tout le corpus (base locale ∪ sources en direct), on le score,
       // puis on l'affiche EN UNE FOIS. `renderCorpus` lit le corpus FINAL ; il
@@ -2770,14 +2767,13 @@ export default function App() {
     pipelinePollRef.current[scenarioId] = pollInterval;
   }
 
-  function _launchPipelineForScenario(scenarioId: string, exhaustive?: boolean) {
+  function _launchPipelineForScenario(scenarioId: string) {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé. Pas de plafond
     // explicite : le serveur applique LIVE_MAX_PER_SOURCE (2000 par défaut), le MÊME
     // que le populate lancé depuis l'API - 500 ici donnait un corpus différent pour
-    // la même requête selon le point d'entrée. `exhaustive` : le mode d'un scénario
-    // NEUF, dont le corpus reste à construire (recherche multi-facettes) ; absent, le
-    // scénario garde le mode avec lequel sa recherche l'a construit.
-    startUserScenarioPipeline(scenarioId, undefined, exhaustive === undefined ? undefined : { exhaustive })
+    // la même requête selon le point d'entrée. Un corpus qui reste à construire
+    // (recherche multi-facettes) l'est par une recherche exhaustive, comme toute recherche.
+    startUserScenarioPipeline(scenarioId)
       .then(() => _pollPipelineStatus(scenarioId))
       .catch(err => console.warn('Pipeline launch failed:', err));
   }
@@ -2828,7 +2824,7 @@ export default function App() {
           combinator: newScenario.combinator ?? null,
           excludePreprints: newScenario.filters?.exclude_preprints === true,
         }, ...prev]);
-        _launchPipelineForScenario(newScenario.id, exhaustiveSearch);
+        _launchPipelineForScenario(newScenario.id);
       }).catch(err => console.warn('Create user_scenario failed:', err));
     }
     setShowSaveDialog(false);
@@ -3231,7 +3227,16 @@ export default function App() {
                   />
                   <span>
                     <span>{t("search.includeLive")}</span>
-                    <span className="block text-forest-500 mt-0.5">{t("search.includeLiveHint")}</span>
+                    {/* Une seule recherche, exhaustive : ce qu'elle prend et combien de temps
+                        elle peut durer, chiffres du serveur. Il y avait un choix entre
+                        « exhaustive » et « standard » ; avec le plafond de production, la
+                        standard ne différait plus que par ce qu'elle laissait de côté. */}
+                    <span className="block text-forest-500 mt-0.5">
+                      {t("search.includeLiveHint")
+                        .replace("{n}", searchLimits.per_source.toLocaleString())
+                        .replace("{ranked}", searchLimits.ranked_per_source.toLocaleString())
+                        .replace("{minutes}", Math.round(searchLimits.budget_s / 60).toLocaleString())}
+                    </span>
                   </span>
                 </label>
 
@@ -3251,36 +3256,6 @@ export default function App() {
                     <span className="block text-forest-500 mt-0.5">{t("search.excludePreprintsHint")}</span>
                   </span>
                 </label>
-
-                {/* Le mode de la recherche, enregistré sur le scénario : exhaustive (par
-                    défaut) ou standard. Une ligne d'explication pour chacun. */}
-                <div role="radiogroup" aria-label={t("search.depthLabel")}
-                     className="mt-2 space-y-1.5 text-xs text-forest-300">
-                  {([true, false] as const).map((ex) => (
-                    <label key={ex ? "exhaustive" : "standard"}
-                           className="flex items-start gap-2 cursor-pointer select-none">
-                      <input
-                        type="radio"
-                        name="search-depth"
-                        checked={exhaustiveSearch === ex}
-                        onChange={() => setExhaustiveSearch(ex)}
-                        className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
-                      />
-                      <span>
-                        <span>{t(ex ? "search.depthExhaustive" : "search.depthStandard")}</span>
-                        <span className="block text-forest-500 mt-0.5">
-                          {ex
-                            ? t("search.depthExhaustiveHint")
-                                .replace("{n}", searchLimits.exhaustive_per_source.toLocaleString())
-                            : t(searchLimits.ranked_per_source < searchLimits.standard_per_source
-                                  ? "search.depthStandardHintRanked" : "search.depthStandardHint")
-                                .replace("{n}", searchLimits.standard_per_source.toLocaleString())
-                                .replace("{ranked}", searchLimits.ranked_per_source.toLocaleString())}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
 
                 {/* Recherche multi-sous-requêtes (avancé) : combine la requête
                     principale ci-dessus avec des sous-requêtes additionnelles, par
