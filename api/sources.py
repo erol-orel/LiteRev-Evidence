@@ -49,6 +49,32 @@ _NCBI_LOCK = _threading_ncbi.Lock()
 _NCBI_LAST = [0.0]
 _NCBI_MIN_INTERVAL = 0.4  # ~2.5 req/s, sous la limite de 3/s
 
+#: Semantic Scholar avec une clé : UNE requête par seconde, tous points d'accès et tous appelants
+#: confondus. Les recherches et le téléchargement des textes partagent la clé : sans espacement
+#: commun, trois tâches simultanées se la disputaient, et la recherche de l'exposition du
+#: 13 octobre 2026 s'est arrêtée sur cinq 429 d'affilée après 299 des 10 257 notices.
+_S2_LOCK = _threading_ncbi.Lock()
+_S2_LAST = [0.0]
+S2_MIN_INTERVAL_S = float(os.getenv("S2_MIN_INTERVAL_S", "1.1") or 1.1)
+
+
+def s2_headers_paced() -> dict:
+    """Les en-têtes d'un appel à Semantic Scholar, rendus quand l'appel peut partir : avec la
+    clé du serveur, un départ toutes les `S2_MIN_INTERVAL_S` secondes pour tout le processus
+    (l'API tourne en un seul processus), comme `_ncbi_get` pour NCBI. Sans clé, rien n'est
+    espacé ici : le quota anonyme est partagé avec tous les clients du monde, et ses 429
+    restent attendus par les appelants."""
+    import time as _time
+    key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
+    if not key:
+        return {}
+    with _S2_LOCK:
+        wait = S2_MIN_INTERVAL_S - (_time.time() - _S2_LAST[0])
+        if wait > 0:
+            _time.sleep(wait)
+        _S2_LAST[0] = _time.time()
+    return {"x-api-key": key}
+
 
 #: L'URL de base de la recherche Europe PMC, écrite une fois : quatre appels la répétaient.
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"

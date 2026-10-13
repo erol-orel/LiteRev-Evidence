@@ -84,6 +84,7 @@ from .sources import (
     epmc_query,
     openalex_params,
     pubmed_esearch_by_years,
+    s2_headers_paced,
     pubmed_year_bounds,
     pubmed_years_term,
     _parse_arxiv,
@@ -600,11 +601,11 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
                   else _ext_id[3:] if _ext_id.startswith("s2:") and len(_ext_id) > 3 else None)
         if _ss_id:
             # La clé de Semantic Scholar quand le serveur en a une, comme la recherche :
-            # sans elle, l'appel puise dans le quota anonyme, souvent épuisé (429).
-            _s2_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip()
+            # sans elle, l'appel puise dans le quota anonyme, souvent épuisé (429). Avec
+            # elle, l'appel attend son tour (une requête par seconde pour tout le serveur).
             _r_ss = _ft_get(f"https://api.semanticscholar.org/graph/v1/paper/{_ss_id}",
                             params={"fields": "openAccessPdf,abstract"},
-                            headers=({"x-api-key": _s2_key} if _s2_key else None))
+                            headers=s2_headers_paced() or None)
             if _r_ss and _r_ss.status_code == 200:
                 try:
                     _oa_pdf = _r_ss.json().get("openAccessPdf")
@@ -2188,8 +2189,8 @@ def _run_user_scenario_populate(
 
     def _fetch_semantic_scholar():
         count = 0
-        _s2_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-        _hdrs = {"x-api-key": _s2_key} if _s2_key else {}
+        # Les en-têtes (la clé) se demandent à chaque tentative : avec une clé, chaque requête
+        # attend son tour, une par seconde pour tout le serveur (`s2_headers_paced`).
         _fields = "title,abstract,year,externalIds,url"
         # Vrai booléen → endpoint BULK (opérateurs AND/OR + jusqu'à 10M via token) +
         # source-union. Sinon → endpoint classique (relevance, offset≤1000) + mots-clés.
@@ -2207,7 +2208,7 @@ def _run_user_scenario_populate(
                         _p["token"] = _tok
                     _r = _with_retries(lambda: _requests.get(
                         "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
-                        params=_p, headers=_hdrs, timeout=25), "Semantic Scholar", retry_429=False)
+                        params=_p, headers=s2_headers_paced(), timeout=25), "Semantic Scholar", retry_429=False)
                     if _r.status_code == 429:
                         _wait_out_rate_limit(_r, _429, "Semantic Scholar")
                         _429 += 1
@@ -2233,7 +2234,7 @@ def _run_user_scenario_populate(
                     _r = _with_retries(lambda: _requests.get(
                         "https://api.semanticscholar.org/graph/v1/paper/search",
                         params={"query": _plain_q, "offset": _off, "limit": _bulk, "fields": _fields},
-                        headers=_hdrs, timeout=20,
+                        headers=s2_headers_paced(), timeout=20,
                     ), "Semantic Scholar", retry_429=False)
                     if _r.status_code == 429:
                         _wait_out_rate_limit(_r, _429, "Semantic Scholar")
