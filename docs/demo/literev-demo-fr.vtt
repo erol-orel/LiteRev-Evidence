@@ -1,0 +1,55 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.600
+LiteRev transforme une question de recherche en un scénario prédictif fondé sur les preuves. Voici le pipeline principal, étape par étape.
+
+00:00:03.600 --> 00:00:09.700
+Poser la question
+Écrivez la question de recherche en langage courant ou en requête booléenne. Avec les sources en direct, une seule recherche interroge PubMed, OpenAlex, Europe PMC, Crossref et sept autres bases.
+
+00:00:09.700 --> 00:00:15.900
+Chaque recherche devient un scénario
+Son corpus est dédoublonné entre les sources et enregistré, prêt à être trié, synthétisé et tenu à jour.
+
+00:00:15.900 --> 00:00:26.800
+Évaluer et sélectionner
+Chaque article reçoit un score de pertinence sémantique. Le seuil décide des articles qui alimentent les analyses. Ceux qui restent en dessous sont gardés, jamais supprimés.
+
+00:00:26.800 --> 00:00:32.100
+Lire et décider
+Ouvrez un article pour lire son résumé et son PICO, puis incluez-le ou excluez-le, avec un motif.
+
+00:00:32.100 --> 00:00:42.400
+Trier selon PRISMA
+Le diagramme PRISMA 2020 compte chaque étape : notices par source, doublons, présélection par l'IA, décisions humaines et corpus final.
+
+00:00:42.400 --> 00:00:51.000
+Synthétiser tout le corpus
+Devis d'étude, sources et niveaux GRADE sont calculés sur chaque article pertinent. Le résumé narratif et son PDF sont rédigés sur cette synthèse.
+
+00:00:51.000 --> 00:00:56.300
+Une extraction par article
+Population, intervention, comparateur, critère et résultat principal sont extraits une fois par article, puis agrégés sur tout le corpus, jamais sur un échantillon.
+
+00:00:56.300 --> 00:01:03.500
+Explorer la littérature
+Les groupes thématiques montrent de quoi le corpus est fait. Sélectionnez un groupe pour y restreindre le corpus.
+
+00:01:03.500 --> 00:01:11.300
+Cartographier concepts et lacunes
+La carte des concepts relie pathogènes, expositions, critères et lieux, et liste les paires qu'aucune étude n'a encore examinées ensemble.
+
+00:01:11.300 --> 00:01:16.200
+Des preuves au modèle
+Les variables que désigne la littérature deviennent une spécification de modèle. Branchez des données réelles, et entraînez.
+
+00:01:16.200 --> 00:01:24.200
+Entraîner, expliquer, surveiller
+Le modèle entraîné indique sa précision, ses facteurs et ses garde-fous, et déclenche une alerte quand une prédiction franchit son seuil.
+
+00:01:24.200 --> 00:01:29.100
+Une revue vivante
+Abonnez-vous aux alertes. La revue vivante interroge PubMed à intervalle régulier et ajoute les nouveaux articles au scénario.
+
+00:01:29.100 --> 00:01:35.300
+Cette vidéo est générée par du code à partir de l'interface réelle : elle se refait chaque fois que l'interface change.

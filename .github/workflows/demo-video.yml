@@ -1,0 +1,92 @@
+name: Demo video
+
+# Records the demo video of the main pipeline (docs/demo-video.md) and keeps it as an
+# artifact of the run: from the Actions tab whenever the interface has changed, and on a
+# pull request that changes the demo's own files. Nothing is committed and nothing is
+# deployed. The video is narrated when the repository holds a DEMO_TTS_API_KEY secret.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "frontend/demo/**"
+      - "frontend/playwright.demo.config.ts"
+      - "scripts/demo_video.py"
+      - "scripts/demo_render.py"
+      - "scripts/demo_corpus.py"
+      - ".github/workflows/demo-video.yml"
+
+jobs:
+  render:
+    name: Record and render
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # The API as the browser smoke test runs it, plus what the demo shows: the model
+      # the demo scenario trains at startup (scikit-learn, optuna), the clustering
+      # (umap-learn, hdbscan), and Pillow for the frames.
+      - name: Backend dependencies
+        run: |
+          pip install fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
+            uvicorn requests openpyxl reportlab numpy pandas scikit-learn scipy optuna joblib \
+            lightgbm xgboost statsmodels umap-learn hdbscan pillow
+
+      # ffmpeg encodes; Inter is the font the interface is designed with.
+      - name: ffmpeg and fonts
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-inter
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend dependencies and browser
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Record and render (English and French)
+        env:
+          DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+          DEMO_TTS_API_KEY: ${{ secrets.DEMO_TTS_API_KEY }}
+        run: python scripts/demo_video.py --lang en --lang fr --out-dir demo-video --keep-work --work demo-work
+
+      - name: Upload the videos
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-video
+          path: demo-video/
+          if-no-files-found: error
+
+      - name: Upload the recording, on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-work
+          path: |
+            demo-work/api.log
+            demo-work/*/manifest.json
+            demo-work/*/frames/
+            frontend/test-results/
+          if-no-files-found: ignore

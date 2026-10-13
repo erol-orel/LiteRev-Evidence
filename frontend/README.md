@@ -32,6 +32,10 @@ Unit tests live next to the code they cover. The browser test lives in `e2e/` an
 runs against the built bundle (`vite preview`), so `npm run build` first when running
 Playwright by hand.
 
+`demo/` is not a test: it is the tour that records the demo video
+(`playwright.demo.config.ts`), run by `python3 scripts/demo_video.py` from the
+repository root. Its captions are in `demo/storyboard.json`; see `docs/demo-video.md`.
+
 ## Layout
 
 - `src/App.tsx` - shell, navigation, search page, scenario list

@@ -572,6 +572,11 @@ graph TD
   scenario page (header, corpus, PRISMA, clustering), and a two-facet search on the
   local corpus whose saved scenario carries the AND. CI runs both on every pull
   request; see `docs/ops-runbook.md` §8.
+- **Demo video (Playwright)** - `frontend/demo/tour.spec.ts`, configuration in
+  `frontend/playwright.demo.config.ts`: not a test but a recording. `scripts/demo_video.py`
+  boots the API on a throwaway database with a synthetic corpus, the tour films the main
+  pipeline and `scripts/demo_render.py` turns the screenshots into the video in
+  `docs/demo/`; see `docs/demo-video.md`.
 
 ## 7. Deploy & ops
 
