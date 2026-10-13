@@ -461,13 +461,50 @@ def _note_oa_link(doc_id: int, url: str) -> None:
 
 #: Le lien de téléchargement de CORE, que sa notice porte en `url` : le PDF en accès ouvert.
 _CORE_DOWNLOAD_RE = re.compile(r"^https?://core\.ac\.uk/download/", re.I)
+#: L'API de CORE (v3), que la recherche interroge déjà avec la même clé (`CORE_API_KEY`).
+_CORE_API = "https://api.core.ac.uk/v3"
+
+
+def _core_fulltext(ext_id: str, doi: str) -> tuple[str | None, str | None]:
+    """Le texte que CORE a déjà extrait de sa copie en dépôt (`fullText`), lu par son API avec
+    la clé de la recherche : par son identifiant pour une notice venue de CORE, sinon par le DOI,
+    et un résultat dont le DOI diffère n'est pas pris. Rend (texte, raison d'un échec)."""
+    key = (os.getenv("CORE_API_KEY") or "").strip()
+    if not key:
+        return None, "core_api:no_key"
+    headers = {"Authorization": f"Bearer {key}"}
+    cid = ext_id[5:] if ext_id.startswith("core:") else ""
+    if cid.isdigit():
+        r = _ft_get(f"{_CORE_API}/works/{cid}", headers=headers, timeout=30)
+    elif doi:
+        r = _ft_get(f"{_CORE_API}/search/works", params={"q": f'doi:"{doi}"', "limit": 3},
+                    headers=headers, timeout=30)
+    else:
+        return None, "core_api:no_identifier"
+    if r is None:
+        return None, "core_api:timeout"
+    if r.status_code != 200:
+        return None, f"core_api:http_{r.status_code}"
+    try:
+        body = r.json()
+    except ValueError:
+        return None, "core_api:not_json"
+    items = [body] if cid.isdigit() else (body.get("results") or []) if isinstance(body, dict) else []
+    for it in items:
+        if not isinstance(it, dict) or (not cid.isdigit()
+                                        and (_normalize_doi(it.get("doi") or "") or "").lower() != doi.lower()):
+            continue                                             # un DOI ne distingue pas la casse
+        text = str(it.get("fullText") or "").strip()
+        if len(text) > 500:
+            return text, None
+    return None, "core_api:no_text"
 
 
 def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
     """Le texte intégral en accès ouvert d'un article, sa provenance, et pourquoi chaque
     source a échoué : PMC (Europe PMC puis NCBI, en XML), Unpaywall, bioRxiv/medRxiv,
-    Semantic Scholar, OpenAlex, puis la copie de CORE pour une notice venue de CORE (PDF lus
-    par pdftotext)."""
+    Semantic Scholar, OpenAlex, puis la copie de CORE, son texte par son API ou son PDF (les
+    PDF lus par pdftotext)."""
     _ext_id = row["external_id"] or ""
     _doi = _normalize_doi(row["doi"] or "") or ""
     _pmid = row["pmid"] or ""
@@ -610,10 +647,17 @@ def _fulltext_of(row) -> tuple[str | None, str | None, list[str]]:
         elif _r_oa:
             _fail.append(f"openalex:http_{_r_oa.status_code}")
 
-    # Source 6 : la copie que CORE a moissonnée, pour une notice venue de CORE. CORE agrège
-    # des dépôts en accès ouvert et son lien de téléchargement est le PDF lui-même ; ces
-    # notices n'ont souvent ni DOI ni PMID, si bien qu'aucune source ci-dessus ne les
-    # trouvait (41 des 536 articles pertinents sans texte de HPAI_last, le 12 octobre 2026).
+    # Source 6 : la copie que CORE a moissonnée. CORE agrège des dépôts en accès ouvert, et son
+    # API rend le texte qu'il en a déjà extrait : par son identifiant pour une notice venue de
+    # CORE (elles n'ont souvent ni DOI ni PMID : 41 des 536 articles pertinents sans texte de
+    # HPAI_last, le 12 octobre 2026), par le DOI pour les autres. Son lien de téléchargement,
+    # le PDF lui-même, ne se lisait pas depuis le serveur (1 sur 41) : il reste le dernier recours.
+    if not _fulltext and (_ext_id.startswith("core:") or _doi):
+        _core_text, _core_why = _core_fulltext(_ext_id, _doi)
+        if _core_text:
+            _fulltext, _source_used = _core_text, "core"
+        elif _core_why != "core_api:no_key":
+            _fail.append(_core_why)
     _own_url = str((row.get("url") if hasattr(row, "get") else None) or "")
     if not _fulltext and _CORE_DOWNLOAD_RE.match(_own_url):
         _fulltext = _extract_pdf_text_ft(_own_url)
