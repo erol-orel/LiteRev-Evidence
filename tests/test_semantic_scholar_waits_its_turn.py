@@ -103,12 +103,26 @@ class _TwoPagesOfS2(_EmptySources):
                                      "abstract": "Poultry workers exposed to H5N1. " * 3, "year": 2020}]})
 
 
+class _AlwaysRateLimited(_EmptySources):
+    """Semantic Scholar answers 429 to every call; every other base answers nothing."""
+
+    def __init__(self):
+        super().__init__()
+        self.s2 = 0
+
+    def get(self, url, params=None, **kw):
+        if "semanticscholar" not in str(url):
+            return super().get(url, params, **kw)
+        self.s2 += 1
+        return _Resp(429, {})
+
+
 SID = "usr-s2pacer0001"
 QUERY = '(h5n1 OR "avian influenza") AND exposure'
 
 
-@pytest.fixture
-def two_pages(db_conn, monkeypatch):
+def _federation(db_conn, monkeypatch, fake):
+    """The real federation against `fake`, for scenario SID; yields (fake, pipeline module)."""
     import requests as _real_requests
 
     from api import pipeline as P
@@ -119,7 +133,6 @@ def two_pages(db_conn, monkeypatch):
     monkeypatch.setattr(R, "_run_cross_encoder_rerank", lambda *a, **k: {})
     monkeypatch.setattr(P, "_run_clustering_background", lambda *a, **k: None)
     monkeypatch.setattr(P, "_precompute_user_kg", lambda *a, **k: None)
-    fake = _TwoPagesOfS2()
     monkeypatch.setattr(_real_requests, "get", fake.get)
     monkeypatch.setattr(_real_requests, "post", fake.post)
     with main.engine.begin() as c:
@@ -140,9 +153,38 @@ def two_pages(db_conn, monkeypatch):
             cur.execute("DROP TABLE document_chunk")
 
 
-def test_each_page_of_the_search_waits_its_turn(paced, two_pages):
-    fake, P = two_pages
+@pytest.fixture
+def two_pages(db_conn, monkeypatch):
+    yield from _federation(db_conn, monkeypatch, _TwoPagesOfS2())
+
+
+@pytest.fixture
+def rate_limited(db_conn, monkeypatch):
+    yield from _federation(db_conn, monkeypatch, _AlwaysRateLimited())
+
+
+def _search(P):
     P._run_user_scenario_populate(SID, "avian influenza exposure", {}, max_results=50, include_live=True,
                                   auto_pipeline=False, force_live=True, exhaustive=True)
+    return (P._user_scenario_populate_jobs.get(SID) or {}).get("prisma_identification") or {}
+
+
+def test_each_page_of_the_search_waits_its_turn(paced, two_pages):
+    fake, P = two_pages
+    _search(P)
     assert len(fake.s2) == 2, fake.s2
     assert fake.s2 == [{"x-api-key": "paced-1"}, {"x-api-key": "paced-2"}] and paced == ["paced-1", "paced-2"]
+
+
+def test_with_the_key_a_429_is_waited_out_longer_and_still_bounded(rate_limited, monkeypatch):
+    """With the key, the waits are KEYED_429_WAITS_S (here shortened): one attempt more than
+    there are waits, then the source ends in error and says the key did not lift the limit."""
+    fake, P = rate_limited
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", KEY)
+    monkeypatch.setattr(S, "S2_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(P, "KEYED_429_WAITS_S", (0.01, 0.02, 0.03))
+    fig = _search(P)
+    assert fake.s2 == 4, fake.s2
+    assert (fig.get("source_outcomes") or {}).get("semantic_scholar") == "error"
+    reason = (fig.get("source_error_reasons") or {}).get("semantic_scholar") or ""
+    assert "429 après 4 tentatives" in reason and "malgré la clé" in reason, reason
