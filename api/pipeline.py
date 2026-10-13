@@ -1124,11 +1124,10 @@ def _run_user_scenario_populate(
         du serveur, et les attentes sont celles de `KEYED_429_WAITS_S`.
         """
         _waits = KEYED_429_WAITS_S if keyed else ()
-        _attempts = len(_waits) + 1 if keyed else _RATE_LIMIT_ATTEMPTS
-        if attempt + 1 >= _attempts:
-            raise RuntimeError(f"{source} : 429 après {_attempts} tentatives "
-                               + ("malgré la clé d'API (limite de débit de la source)" if keyed
-                                  else "(limite de débit ; une clé d'API la relèverait)"))
+        if attempt + 1 >= (len(_waits) + 1 if keyed else _RATE_LIMIT_ATTEMPTS):
+            raise RuntimeError(f"{source} : 429 après {len(_waits) + 1 if keyed else _RATE_LIMIT_ATTEMPTS} "
+                               "tentatives " + ("malgré la clé d'API (limite de débit de la source)" if keyed
+                                                else "(limite de débit ; une clé d'API la relèverait)"))
         try:
             _after = float((getattr(resp, "headers", None) or {}).get("Retry-After") or 0)
         except (TypeError, ValueError):
