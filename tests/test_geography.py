@@ -330,10 +330,87 @@ def test_a_bad_file_says_what_is_wrong():
 
 
 def test_a_loaded_list_resolves_the_district_the_builtin_one_cannot():
-    idx = G.NutsIndex(G._builtin_entries() + [(c, l, k, n) for c, l, k, n, _a in G.parse_nuts_csv(GISCO)], "loaded")
+    idx = G.build_index(G.parse_nuts_csv(GISCO))
     r = G.resolve_location("Sigmaringen, Germany", None, idx)
     assert (r["nuts1"], r["nuts2"], r["nuts3"], r["level"]) == ("DE1", "DE13", "DE139", 3)
     assert G.resolve_location("Sigmaringen", None, BUILTIN)["country"] is None            # the built-in list does not know it
+    assert idx.source == "loaded" and G.build_index([]).source == "builtin"
+
+
+# ── The official list, loaded: read as papers write places, never wider than they do ──
+#: Rows in GISCO's shape, names as Eurostat writes them: in the country's language, bilingual with
+#: a slash, tagged with a country in brackets, prefixed in Belgium, suffixed for German districts.
+OFFICIAL = G.build_index(G.parse_nuts_csv(
+    "NUTS_ID,LEVL_CODE,CNTR_CODE,NAME_LATN,NUTS_NAME\n"
+    "DE1,1,DE,Baden-Württemberg,Baden-Württemberg\nDE14,2,DE,Tübingen,Tübingen\nDE149,3,DE,Sigmaringen,Sigmaringen\n"
+    "DE2,1,DE,Bayern,Bayern\nDE21,2,DE,Oberbayern,Oberbayern\n"
+    'DE212,3,DE,"München, Kreisfreie Stadt","München, Kreisfreie Stadt"\nDE21H,3,DE,"München, Landkreis","München, Landkreis"\n'
+    "DE9,1,DE,Niedersachsen,Niedersachsen\nDE94,2,DE,Weser-Ems,Weser-Ems\nDE948,3,DE,Cloppenburg,Cloppenburg\n"
+    "DE94A,3,DE,Friesland (DE),Friesland (DE)\n"
+    "ITH3,2,IT,Veneto,Veneto\nITH31,3,IT,Verona,Verona\nITC4,2,IT,Lombardia,Lombardia\n"
+    "IE0,1,IE,Ireland,Ireland\nIE04,2,IE,Northern and Western,Northern and Western\nIE041,3,IE,Border,Border\nIE042,3,IE,West,West\n"
+    "ES3,1,ES,Comunidad de Madrid,Comunidad de Madrid\nES300,3,ES,Madrid,Madrid\nES4,1,ES,Centro (ES),Centro (ES)\n"
+    "ES523,3,ES,Valencia/València,Valencia/València\n"
+    "NL12,2,NL,Friesland (NL),Friesland (NL)\nNL42,2,NL,Limburg (NL),Limburg (NL)\n"
+    "BE21,2,BE,Prov. Antwerpen,Prov. Antwerpen\nBE211,3,BE,Arr. Antwerpen,Arr. Antwerpen\nBE22,2,BE,Prov. Limburg (BE),Prov. Limburg (BE)\n"
+    "FRJ25,3,FR,Lot,Lot\nFRI14,3,FR,Lot-et-Garonne,Lot-et-Garonne\n"
+    "MT0,1,MT,Malta,Malta\nMT00,2,MT,Malta,Malta\nMT001,3,MT,Malta,Malta\nRO42,2,RO,Vest,Vest\n"))
+
+
+def _o(place, hint=None):
+    return G.resolve_location(place, hint, OFFICIAL)
+
+
+def test_the_english_names_stay_beside_the_official_ones():
+    # Eurostat writes Bayern and Lombardia, papers Bavaria and Lombardy: loading the list used to drop the second.
+    for place, level, code in (("Bavaria, Germany", 1, "DE2"), ("Bavaria", 1, "DE2"), ("Lower Saxony", 1, "DE9"),
+                               ("Lombardy, northern Italy", 2, "ITC4"), ("Tuscany", 2, "ITI1"), ("Bayern", 1, "DE2")):
+        r = _o(place)
+        assert (r[f"nuts{level}"], r["method"]) == (code, "region"), place
+    assert OFFICIAL.name_of["DE1"] == "Baden-Württemberg" and OFFICIAL.name_of["ITI1"] == "Toscana"   # the official name is shown
+
+
+def test_a_district_resolves_inside_its_state_and_a_shared_name_to_what_it_shares():
+    r = _o("Sigmaringen, Baden-Württemberg, Germany")
+    assert (r["nuts1"], r["nuts2"], r["nuts3"], r["level"]) == ("DE1", "DE14", "DE149", 3)
+    assert _o("Cloppenburg, Lower Saxony, Germany")["nuts3"] == "DE948"
+    # The town and the district of Munich share a name: Upper Bavaria, not a guess between them.
+    r = _o("München, Germany")
+    assert (r["nuts2"], r["nuts3"], r["level"]) == ("DE21", None, 2)
+    # Two regions of one country, no country named: the country; of two countries: several.
+    r = _r("Bavaria and Saxony")
+    assert (r["country"], r["nuts1"], r["level"], r["method"]) == ("DE", None, 0, "region")
+    assert _r("Bavaria and Lombardy")["several_countries"] is True
+
+
+def test_an_official_name_is_read_only_inside_a_country_the_place_or_the_article_names():
+    # A district's name is often a word or a town elsewhere: Lot, Verona (Wisconsin).
+    for place in ("Sigmaringen", "Lot", "a lot of backyard flocks", "Verona"):
+        assert _o(place)["country"] is None, place
+    assert _o("Sigmaringen", "DE")["nuts3"] == "DE149" and _o("Verona", "IT")["nuts3"] == "ITH31"
+    assert _o("Lot, France")["nuts3"] == "FRJ25" and _o("Lot-et-Garonne, France")["nuts3"] == "FRI14"
+    assert _o("Verona, Wisconsin, USA")["country"] == "US"
+
+
+def test_a_compass_word_or_a_countrys_name_is_not_a_region():
+    # Ireland's West and Border, Spain's Centro, Romania's Vest: a direction, not a place.
+    for place, hint in (("West Africa", None), ("West Africa", "IE"), ("a border area", None)):
+        assert _o(place, hint)["nuts0"] is None, (place, hint)
+    for place, iso in (("West of Ireland", "IE"), ("border area, Ireland", "IE"), ("Vest, Romania", "RO")):
+        r = _o(place)
+        assert (r["country"], r["level"], r["nuts1"]) == (iso, 0, None), place
+    assert _o("Centro de Investigacion en Sanidad Animal, Madrid, Spain")["nuts3"] == "ES300"
+    # Malta is also the name of one of Malta's two NUTS 3: the country, not the island.
+    r = _o("Malta")
+    assert (r["country"], r["level"]) == ("MT", 0)
+
+
+def test_bilingual_tagged_and_prefixed_official_names_match_as_papers_write_them():
+    for place, level, code in (("Valencia, Spain", 3, "ES523"), ("València, Spain", 3, "ES523"),
+                               ("Limburg, the Netherlands", 2, "NL42"), ("Limburg, Belgium", 2, "BE22"),
+                               ("Friesland, the Netherlands", 2, "NL12"), ("Friesland, Germany", 3, "DE94A"),
+                               ("Antwerpen, Belgium", 3, "BE211")):
+        assert _o(place)[f"nuts{level}"] == code, place
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────────

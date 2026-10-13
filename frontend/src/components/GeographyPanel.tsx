@@ -115,7 +115,7 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
         ) : <span>{T("needsKey")}</span>}
         {msg && <span className="text-gold-300/80">{msg}</span>}
       </div>
-      {g.nuts_source === "builtin" && <p className="text-[10px] text-white/35 max-w-[680px] leading-4">{T("builtinHint")}</p>}
+      <p className="text-[10px] text-white/35 max-w-[680px] leading-4">{T(g.nuts_source === "loaded" ? "loadedHint" : "builtinHint")}</p>
 
       {g.n_unresolved > 0 && (
         <div>
