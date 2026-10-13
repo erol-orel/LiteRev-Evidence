@@ -2014,6 +2014,9 @@ export default function App() {
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
   // La vidéo de démonstration, ouverte depuis l'en-tête.
   const [showDemo, setShowDemo] = useState(false);
+  // The length of the video being played, read from the file itself once it has loaded:
+  // the title never announces a length the file does not have.
+  const [demoMinutes, setDemoMinutes] = useState<number | null>(null);
   const handleManageApiKey = () => {
     if (apiKeySet) {
       if (window.confirm(t("header.removeKeyConfirm"))) {
@@ -3046,7 +3049,7 @@ export default function App() {
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={t("header.demoVideoTitle")}
+          aria-label={t("header.demoVideoTitleShort")}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
           onClick={() => setShowDemo(false)}
         >
@@ -3055,7 +3058,11 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between gap-4">
-              <h2 className="text-sm font-semibold text-white">{t("header.demoVideoTitle")}</h2>
+              <h2 className="text-sm font-semibold text-white">
+                {demoMinutes
+                  ? t("header.demoVideoTitle").replace("{minutes}", String(demoMinutes))
+                  : t("header.demoVideoTitleShort")}
+              </h2>
               <button
                 type="button"
                 onClick={() => setShowDemo(false)}
@@ -3072,6 +3079,10 @@ export default function App() {
               controls
               autoPlay
               playsInline
+              onLoadedMetadata={(e) => {
+                const seconds = e.currentTarget.duration;
+                setDemoMinutes(Number.isFinite(seconds) && seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : null);
+              }}
               className="w-full rounded-xl bg-black"
             />
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/50">

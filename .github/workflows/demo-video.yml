@@ -2,12 +2,33 @@ name: Demo video
 
 # Records the demo video of the main pipeline (docs/demo-video.md) and keeps it as an
 # artifact of the run: from the Actions tab whenever the interface has changed, and on a
-# pull request that changes the demo's own files. Nothing is committed and nothing is
-# deployed. The video is narrated when a DEMO_TTS_API_KEY secret is set (in the
-# "production" environment, or for the repository).
+# pull request that changes the demo's own files. Nothing is deployed.
+#
+# From the Actions tab, three inputs:
+#   base_url  a deployment to film, read-only (https://literev-scenario.com); empty for the
+#             local demo on its synthetic corpus
+#   scenario  the scenario to film on that deployment (required with base_url)
+#   commit    put the six files the site plays into docs/demo/ and push them to the branch
+#             the workflow was started on (a separate job: see "commit" below)
+#
+# The video is narrated when a DEMO_TTS_API_KEY secret is set (in the "production"
+# environment, or for the repository). Only the render step receives it.
 
 on:
   workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Deployment to film, read-only (empty: the local demo on its synthetic corpus)"
+        type: string
+        default: ""
+      scenario:
+        description: "Scenario to film on that deployment (e.g. usr-b1e16a5d9c38)"
+        type: string
+        default: ""
+      commit:
+        description: "Commit the videos into docs/demo/ on this branch"
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     paths:
@@ -18,11 +39,18 @@ on:
       - "scripts/demo_corpus.py"
       - ".github/workflows/demo-video.yml"
 
+# One recording at a time per branch: two runs would push over each other.
+concurrency:
+  group: demo-video-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   render:
     name: Record and render
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
+    permissions:
+      contents: read
     # DEMO_TTS_API_KEY is kept with the other keys, as a secret of the "production"
     # environment (a repository secret works too). The job reads it there without
     # recording a deployment: nothing here deploys.
@@ -41,21 +69,45 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    env:
+      # The inputs reach the scripts as variables, never pasted into a command.
+      BASE_URL: ${{ inputs.base_url }}
+      SCENARIO: ${{ inputs.scenario }}
     steps:
+      - name: Check the inputs
+        run: |
+          if [ -n "$BASE_URL" ]; then
+            case "$BASE_URL" in
+              https://*) ;;
+              *) echo "::error::base_url must be an https:// address"; exit 1 ;;
+            esac
+            if ! printf '%s' "$SCENARIO" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+              echo "::error::a scenario id (letters, digits, - and _) is required with base_url"
+              exit 1
+            fi
+            echo "Filming $BASE_URL, scenario $SCENARIO, read-only"
+          else
+            echo "Filming the local demo on its synthetic corpus"
+          fi
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      # The API as the browser smoke test runs it, plus what the demo shows: the model
-      # the demo scenario trains at startup (scikit-learn, optuna), the clustering
-      # (umap-learn, hdbscan), and Pillow for the frames.
+      # The local demo: the API as the browser smoke test runs it, plus what the demo shows:
+      # the model the demo scenario trains at startup (scikit-learn, optuna), the clustering
+      # (umap-learn, hdbscan), and Pillow for the frames. A deployment needs Pillow only.
       - name: Backend dependencies
         run: |
-          pip install fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
-            uvicorn requests openpyxl reportlab numpy pandas scikit-learn scipy optuna joblib \
-            lightgbm xgboost statsmodels umap-learn hdbscan pillow
+          if [ -n "$BASE_URL" ]; then
+            pip install pillow
+          else
+            pip install fastapi pydantic "sqlalchemy>=2.0" python-dotenv python-multipart "psycopg[binary]" \
+              uvicorn requests openpyxl reportlab numpy pandas scikit-learn scipy optuna joblib \
+              lightgbm xgboost statsmodels umap-learn hdbscan pillow
+          fi
 
       # ffmpeg encodes; Inter is the font the interface is designed with.
       - name: ffmpeg and fonts
@@ -73,11 +125,18 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
 
+      # The only step that sees the narration key.
       - name: Record and render (English and French)
         env:
           DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
           DEMO_TTS_API_KEY: ${{ secrets.DEMO_TTS_API_KEY }}
-        run: python scripts/demo_video.py --lang en --lang fr --out-dir demo-video --keep-work --work demo-work
+        run: |
+          if [ -n "$BASE_URL" ]; then
+            set -- --base-url "$BASE_URL" --scenario "$SCENARIO"
+          else
+            set --
+          fi
+          python scripts/demo_video.py "$@" --lang en --lang fr --out-dir demo-video --keep-work --work demo-work
 
       - name: Upload the videos
         uses: actions/upload-artifact@v4
@@ -97,3 +156,67 @@ jobs:
             demo-work/*/frames/
             frontend/test-results/
           if-no-files-found: ignore
+
+  # Writes the videos into docs/demo/ on the branch the workflow was started on. A job of
+  # its own: it takes the files from the render job's artifact, holds the only write token,
+  # never sees the narration key and runs no third-party code. A push made with the
+  # workflow's token starts no other workflow: the site plays the new video after the next
+  # deploy.
+  commit:
+    name: Commit the videos
+    needs: render
+    if: github.event_name == 'workflow_dispatch' && inputs.commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      SCENARIO: ${{ inputs.scenario }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: demo-video
+          path: ${{ runner.temp }}/demo-video
+
+      - name: Commit and push exactly the six files
+        env:
+          FROM: ${{ runner.temp }}/demo-video
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "branch" ]; then
+            echo "::error::start the workflow on a branch to commit the videos (not on $GITHUB_REF)"
+            exit 1
+          fi
+          files=""
+          for lang in en fr; do
+            for ext in mp4 vtt jpg; do
+              name="literev-demo-$lang.$ext"
+              if [ ! -s "$FROM/$name" ]; then
+                echo "::error::$name is missing from the render job's artifact"
+                exit 1
+              fi
+              cp "$FROM/$name" "docs/demo/$name"
+              files="$files docs/demo/$name"
+            done
+          done
+          git add -- $files
+          if git diff --cached --quiet; then
+            echo "The videos are unchanged: nothing to commit"
+            exit 0
+          fi
+          if [ -n "$BASE_URL" ]; then
+            source="$BASE_URL, scenario $SCENARIO, read-only"
+          else
+            source="the local demo on its synthetic corpus"
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Demo video recorded by the workflow" \
+                     -m "Recorded by the Demo video workflow from $source." \
+                     -m "Run: $RUN_URL"
+          git push origin "HEAD:$GITHUB_REF_NAME"

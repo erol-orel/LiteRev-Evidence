@@ -34,7 +34,8 @@ Playwright by hand.
 
 `demo/` is not a test: it is the tour that records the demo video
 (`playwright.demo.config.ts`), run by `python3 scripts/demo_video.py` from the
-repository root. Its captions are in `demo/storyboard.json`; see `docs/demo-video.md`.
+repository root. Its captions and narration are in `demo/storyboard.json`; see
+`docs/demo-video.md`.
 
 ## Layout
 

@@ -574,9 +574,11 @@ graph TD
   request; see `docs/ops-runbook.md` §8.
 - **Demo video (Playwright)** - `frontend/demo/tour.spec.ts`, configuration in
   `frontend/playwright.demo.config.ts`: not a test but a recording. `scripts/demo_video.py`
-  boots the API on a throwaway database with a synthetic corpus, the tour films the main
-  pipeline and `scripts/demo_render.py` turns the screenshots into the video in
-  `docs/demo/`; see `docs/demo-video.md`.
+  films the live site read-only (`--base-url`, `--scenario`; a guard in the browser aborts
+  every request that is not a read), or boots the API on a throwaway database with a
+  synthetic corpus; the tour walks the whole pipeline and `scripts/demo_render.py` turns
+  the screenshots into the narrated video in `docs/demo/`, which the Demo video workflow
+  can commit; see `docs/demo-video.md`.
 
 ## 7. Deploy & ops
 
