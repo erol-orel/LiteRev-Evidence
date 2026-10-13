@@ -15,6 +15,11 @@ export const fr = {
     adminKeySetTooltip:
       "Définir la clé admin (X-API-Key) pour activer les écritures",
     languageLabel: "Langue",
+    demoVideo: "Vidéo de démonstration",
+    demoVideoTitle: "LiteRev en 95 secondes environ",
+    demoVideoNote: "Les écrans sont ceux de l'application ; les 200 articles sont fictifs.",
+    demoVideoOpen: "Ouvrir le fichier vidéo",
+    demoVideoClose: "Fermer",
     removeKeyConfirm:
       "Retirer la clé admin de cet appareil ? Les écritures seront désactivées (lecture seule).",
     setKeyPrompt:

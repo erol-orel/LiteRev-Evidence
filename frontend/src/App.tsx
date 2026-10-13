@@ -3,7 +3,7 @@ import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDeta
 import { fetchActivity } from "./lib/api";
 import type { ActivityItem } from "./lib/api";
 import { useI18n } from "./i18n/LanguageProvider";
-import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, Search, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, Search, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2, PlayCircle, X } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -2012,6 +2012,8 @@ export default function App() {
   // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
   // navigateur - jamais dans le bundle public (cf. authHeaders dans lib/api).
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
+  // La vidéo de démonstration, ouverte depuis l'en-tête.
+  const [showDemo, setShowDemo] = useState(false);
   const handleManageApiKey = () => {
     if (apiKeySet) {
       if (window.confirm(t("header.removeKeyConfirm"))) {
@@ -2951,6 +2953,15 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-6">
+              {/* The demo video (docs/demo-video.md), served under /demo/ by the build. */}
+              <button
+                type="button"
+                onClick={() => setShowDemo(true)}
+                className="flex items-center gap-1.5 rounded-xl border border-gold-400/30 bg-gold-400/10 px-3 py-1.5 text-xs font-medium text-gold-400 transition hover:bg-gold-400/20"
+              >
+                <PlayCircle size={14} />
+                {t("header.demoVideo")}
+              </button>
               <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs" title={t("header.languageLabel")}>
                 {(["fr", "en"] as const).map((l) => (
                   <button
@@ -3030,6 +3041,53 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {showDemo && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("header.demoVideoTitle")}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setShowDemo(false)}
+        >
+          <div
+            className="w-full max-w-5xl rounded-2xl border border-white/10 bg-forest-950 p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold text-white">{t("header.demoVideoTitle")}</h2>
+              <button
+                type="button"
+                onClick={() => setShowDemo(false)}
+                aria-label={t("header.demoVideoClose")}
+                className="rounded-lg p-1 text-white/60 hover:bg-white/10 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <video
+              key={lang}
+              src={`/demo/literev-demo-${lang}.mp4`}
+              poster={`/demo/literev-demo-${lang}.jpg`}
+              controls
+              autoPlay
+              playsInline
+              className="w-full rounded-xl bg-black"
+            />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/50">
+              <span>{t("header.demoVideoNote")}</span>
+              <a
+                href={`/demo/literev-demo-${lang}.mp4`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand-300 hover:text-brand-200"
+              >
+                {t("header.demoVideoOpen")}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 

@@ -17,6 +17,11 @@ export const en: Translations = {
     adminKeySetTooltip:
       "Set the admin key (X-API-Key) to enable writes",
     languageLabel: "Language",
+    demoVideo: "Demo video",
+    demoVideoTitle: "LiteRev in about 95 seconds",
+    demoVideoNote: "The screens are the real application; the 200 articles are synthetic.",
+    demoVideoOpen: "Open the video file",
+    demoVideoClose: "Close",
     removeKeyConfirm:
       "Remove the admin key from this device? Writes will be disabled (read-only).",
     setKeyPrompt:
