@@ -8,6 +8,10 @@ English and in French:
 | English | [literev-demo-en.mp4](demo/literev-demo-en.mp4) | [.vtt](demo/literev-demo-en.vtt) | [.jpg](demo/literev-demo-en.jpg) |
 | Français | [literev-demo-fr.mp4](demo/literev-demo-fr.mp4) | [.vtt](demo/literev-demo-fr.vtt) | [.jpg](demo/literev-demo-fr.jpg) |
 
+On the site, the **Demo video** button in the header plays the one in the interface's
+language: the frontend build copies `docs/demo/` into its output under `/demo/`
+(`frontend/vite.config.ts`), so the files are not committed twice.
+
 The video is code. A script drives the real interface in a browser, takes the
 screenshots, frames and captions them, and encodes the result. When the interface
 changes, run the script again and the video follows.

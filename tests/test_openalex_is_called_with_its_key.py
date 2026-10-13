@@ -175,7 +175,7 @@ def test_the_search_sends_the_key_and_the_stored_reason_of_a_refusal_does_not_ca
     fake, P = refusing
     with caplog.at_level(logging.WARNING, logger="literev-api"):
         P._run_user_scenario_populate(SID, "avian influenza exposure", {}, max_results=50, include_live=True,
-                                      auto_pipeline=False, force_live=True, exhaustive=True)
+                                      auto_pipeline=False, force_live=True)
     asked = [p for u, p in fake.gets if "openalex" in u]
     assert asked and all(p.get("api_key") == KEY and p.get("mailto") == OPENALEX_MAILTO for p in asked)
     fig = (P._user_scenario_populate_jobs.get(SID) or {}).get("prisma_identification") or {}

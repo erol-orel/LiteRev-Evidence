@@ -6,11 +6,12 @@ Semantic Scholar 1 961 of 3 341 (and not the most relevant ones: its bulk endpoi
 Boolean matches in record-ID order), DOAJ 428 of the 514 the whole strategy matches,
 because DOAJ does not page through a long query and received a shortened one.
 
-So a search mode, stored on the scenario:
+So an exhaustive search, the only one since 13 October 2026 (the standard search it sat
+beside, stored on the scenario, only ever left records out once production lifted its cap):
 
 - every database that applies the Boolean strategy returns everything (a guard rail, not a
   sample, at EXHAUSTIVE_MAX_PER_SOURCE), with a longer federation budget;
-- Crossref, which ranks keywords instead of applying the strategy, keeps the standard cap;
+- Crossref, which ranks keywords instead of applying the strategy, keeps its ranked cap;
 - OpenAlex is searched in titles and abstracts: its default search also reads full texts;
 - DOAJ gets the whole strategy split into queries short enough to page, whose union is the
   strategy (the distributive law, exclusions kept in every part).
@@ -153,7 +154,7 @@ def test_in_an_exhaustive_search_only_a_source_over_its_own_cap_is_capped():
     assert f["split_queries"] == {"doaj": ["(a) AND (x)", "(b) AND (x)"]}
 
 
-def test_a_standard_search_is_described_as_before():
+def test_an_earlier_standard_search_is_described_as_before():
     f = _figures(per_source_cap=2000)
     assert f["search_mode"] == "standard"
     assert f["sources_capped"] == ["crossref", "europepmc", "openalex"]
@@ -338,24 +339,24 @@ def federation(monkeypatch):
 
 def test_an_exhaustive_search_takes_every_record_the_strategy_matches(federation):
     run, fake = federation
-    job = run(force_live=True, exhaustive=True)
+    job = run(force_live=True)
     fig = job.get("prisma_identification") or {}
     by = fig.get("records_by_source") or {}
     assert job.get("search_mode") == "exhaustive" or fig.get("search_mode") == "exhaustive"
-    # Semantic Scholar: all three bulk pages, where the standard cap of 150 stops at two.
+    # Semantic Scholar: all three bulk pages, where a cap of 150 would stop at two.
     assert by.get("semantic_scholar") == 300, by
-    # Crossref ranks keywords: it keeps the standard cap.
+    # Crossref ranks keywords: it keeps its ranked cap (`max_results`, here 150).
     assert by.get("crossref") == 150, by
     assert all(int(p.get("rows") or 0) <= 150 for _, p in fake.urls("crossref"))
-    # OpenAlex: every title/abstract match (cursor paging), THEN the standard pass, so an
-    # exhaustive search never finds less than a standard one; a record both return counts once.
+    # OpenAlex: every title/abstract match (cursor paging), THEN its best full-text matches,
+    # which the old standard search kept alone; a record both return counts once.
     oa = fake.urls("openalex")
     assert oa and oa[0][1].get("filter", "").startswith("title_and_abstract.search:"), oa[0]
     assert oa[0][1].get("cursor") == "*" and "page" not in oa[0][1] and "search" not in oa[0][1]
     assert any(p.get("search") and p.get("page") == 1 and p.get("sort") == "relevance_score:desc"
                for _, p in oa), oa
     assert by.get("openalex") == 3, by
-    # Its total is the exhaustive pass's: the standard pass is an addition, not the search.
+    # Its total is the title and abstract pass's: the full-text pass is an addition.
     assert (fig.get("source_totals") or {}).get("openalex") == 2
     assert "openalex" not in (fig.get("sources_capped") or [])
     # DOAJ: the whole strategy in several queries, a record found by two of them counted once.
@@ -370,45 +371,27 @@ def test_an_exhaustive_search_takes_every_record_the_strategy_matches(federation
     assert "doaj" not in (fig.get("keyword_fallback_sources") or [])
 
 
-def test_a_standard_search_is_unchanged(federation):
+def test_a_scenario_once_searched_in_standard_mode_is_searched_exhaustively(federation):
+    """The mode a scenario recorded when there were two is no longer read: a scenario
+    saved as standard is searched again like any other, exhaustively."""
     run, fake = federation
-    job = run(force_live=True, exhaustive=False)
+    with main.engine.begin() as c:
+        c.execute(text("UPDATE user_scenarios SET search_mode = 'standard' WHERE id = :s"), {"s": SID})
+    job = run(force_live=True)
     fig = job.get("prisma_identification") or {}
-    by = fig.get("records_by_source") or {}
-    assert by.get("semantic_scholar") == 200, by           # stops past the cap, as before
-    oa = fake.urls("openalex")
-    assert oa and "search" in oa[0][1] and "filter" not in oa[0][1] and oa[0][1].get("page") == 1
-    assert not any("filter" in p for _, p in oa)
-    assert by.get("openalex") == 2, by
-    assert "openalex" in (fig.get("sources_capped") or [])  # 43 181 announced, 150 kept
-    assert len({u for u, p in fake.urls("doaj.org")}) == 1   # the shortened query, as before
-    assert "doaj" in (fig.get("keyword_fallback_sources") or [])
-    assert fig.get("search_mode") == "standard"
-    # The bulk endpoint's order is said even in a standard search: capped, it keeps an
-    # arbitrary subset.
-    assert fig.get("unranked_sources") == ["semantic_scholar"]
-
-
-def test_the_mode_is_read_from_the_scenario(federation):
-    from api.scenario_store import scenario_search_mode, set_scenario_search_mode
-    run, fake = federation
-    assert scenario_search_mode(SID) == "standard"
-    set_scenario_search_mode(SID, "exhaustive")
-    assert scenario_search_mode(SID) == "exhaustive"
-    job = run(force_live=True)                              # no explicit mode
-    assert (job.get("prisma_identification") or {}).get("search_mode") == "exhaustive"
-    with pytest.raises(ValueError):
-        set_scenario_search_mode(SID, "everything")
+    assert fig.get("search_mode") == "exhaustive"
+    assert fig.get("title_abstract_sources") == ["openalex"]
+    assert (fig.get("records_by_source") or {}).get("semantic_scholar") == 300
 
 
 def test_a_cached_replay_still_says_a_source_was_capped(federation):
     run, fake = federation
     fake.epmc_total, fake.epmc_rows = 13810, 60
-    first = run(force_live=True, exhaustive=False, max_results=50)
+    first = run(force_live=True, max_results=50)
     fig1 = first.get("prisma_identification") or {}
     assert "europepmc" in (fig1.get("sources_capped") or []), fig1.get("sources_capped")
     calls_before = len(fake.urls("europepmc")) + len(fake.urls("ebi.ac.uk"))
-    second = run(exhaustive=False, max_results=50)        # same query: replayed from the cache
+    second = run(max_results=50)                          # same query: replayed from the cache
     fig2 = second.get("prisma_identification") or {}
     assert (fig2.get("source_outcomes") or {}).get("europepmc") == "cached"
     assert len(fake.urls("europepmc")) + len(fake.urls("ebi.ac.uk")) == calls_before
@@ -445,6 +428,6 @@ def test_counts_are_not_inflated_by_the_fake(federation):
     """Guard on the harness itself: every DOAJ part answers its own three records plus the
     shared one, so a regression in the dedup shows up as a count, not as a silent pass."""
     run, fake = federation
-    run(force_live=True, exhaustive=True)
+    run(force_live=True)
     parts = collections.Counter(u for u, p in fake.urls("doaj.org"))
     assert all(n == 1 for n in parts.values()), parts

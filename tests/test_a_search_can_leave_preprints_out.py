@@ -139,9 +139,9 @@ def test_the_preprint_facet_ranks_by_relevance_and_says_its_total():
 def test_the_search_form_has_the_toggle_and_sends_it():
     app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "checked={excludePreprints}" in app
-    # Le mode de la recherche part avec elle (exhaustive par défaut), et plus aucun
-    # plafond : le serveur applique le sien.
-    assert "populateUserScenario(sid, { includeLive, excludePreprints, exhaustive: exhaustiveSearch })" in app
+    # Plus aucun plafond ni mode : la recherche est exhaustive, et le serveur applique son
+    # plafond.
+    assert "populateUserScenario(sid, { includeLive, excludePreprints })" in app
     assert "exclude_preprints: true" in app
     assert '"bioRxiv", "medRxiv"' not in app
     api_ts = (ROOT / "frontend" / "src" / "lib" / "api.ts").read_text(encoding="utf-8")

@@ -13,7 +13,8 @@ from typing import Any
 from fastapi import Depends, Query
 from sqlalchemy import text
 
-from .core import RELIEFWEB_APPNAME, app, engine, logger, redact_keys, require_api_key
+from .core import (EXHAUSTIVE_FEDERATION_BUDGET, POPULATE_FEDERATION_BUDGET, RELIEFWEB_APPNAME, app,
+                   engine, logger, redact_keys, require_api_key)
 from .documents import _normalize_doi, _normalize_title, same_work_doi_match, sanitize_db_text
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              has_abstract_sql, relevant_gate_tail_sql)
@@ -981,20 +982,23 @@ def search_live(
 
 @app.get("/search/limits")
 def search_limits() -> dict[str, Any]:
-    """Les plafonds par source qu'applique CE serveur, pour l'écran de recherche.
+    """Les plafonds et le budget de temps qu'applique CE serveur, pour l'écran de recherche.
 
     L'écran les écrivait en dur (« les 2 000 plus pertinentes », « jusqu'à 20 000 ») alors
     qu'ils viennent de l'environnement : la production règle LIVE_MAX_PER_SOURCE à
     100 000, et l'écran annonçait 2 000. Mêmes formules que `_run_user_scenario_populate`
     pour une recherche lancée de l'écran (sans `max_results`, donc LIVE_MAX_PER_SOURCE) :
-    ce que la carte PRISMA dira après la recherche. Lecture seule, aucune clé requise.
+    ce que la carte PRISMA dira après la recherche. Il n'y a plus qu'une recherche, la
+    recherche exhaustive. Lecture seule, aucune clé requise.
     """
-    standard = int(LIVE_MAX_PER_SOURCE)
+    live = int(LIVE_MAX_PER_SOURCE)
     return {
-        "standard_per_source": standard,
-        "exhaustive_per_source": max(standard, int(EXHAUSTIVE_MAX_PER_SOURCE)),
+        # Toutes les notices que chaque base apparie, jusqu'à ce garde-fou.
+        "per_source": max(live, int(EXHAUSTIVE_MAX_PER_SOURCE)),
         # Crossref et le passage en texte intégral d'OpenAlex, classés par pertinence.
-        "ranked_per_source": max(1, min(standard, int(RANKED_PASS_MAX))),
+        "ranked_per_source": max(1, min(live, int(RANKED_PASS_MAX))),
+        # Le temps laissé aux bases pour tout rendre, en secondes.
+        "budget_s": int(max(POPULATE_FEDERATION_BUDGET, EXHAUSTIVE_FEDERATION_BUDGET)),
     }
 
 

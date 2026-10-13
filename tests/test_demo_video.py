@@ -349,3 +349,28 @@ def test_a_narration_clip_is_asked_once_then_read_from_the_cache(tmp_path, monke
     assert abs(render.pcm_seconds(first) - 1.0) < 1e-9
     render.speak("Another sentence.", render.Voice(api_key="k", model="tts-1"), str(tmp_path))
     assert "instructions" not in calls[-1][2]                       # tts-1 refuses them
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The site plays it: the build serves docs/demo/ under /demo/, the header opens it
+# ─────────────────────────────────────────────────────────────────────────────
+def test_the_site_serves_the_video_and_the_header_plays_it():
+    """The video lived in the repository only (the README links docs/demo/), and nothing
+    put it on the site. The frontend build copies docs/demo/ into its output under /demo/,
+    without a second copy in git, and the header's "Demo video" button plays the one in
+    the interface's language."""
+    with open(os.path.join(ROOT, "frontend", "vite.config.ts"), encoding="utf-8") as f:
+        vite = f.read()
+    assert "'../docs/demo/'" in vite and "demoVideo()" in vite and "closeBundle" in vite
+    for ext in (".mp4", ".vtt", ".jpg"):
+        assert f"'{ext}'" in vite, ext
+    with open(os.path.join(ROOT, "frontend", "src", "App.tsx"), encoding="utf-8") as f:
+        app = f.read()
+    assert "`/demo/literev-demo-${lang}.mp4`" in app and "`/demo/literev-demo-${lang}.jpg`" in app
+    assert 't("header.demoVideo")' in app
+    for lang in ("en", "fr"):
+        assert os.path.isfile(os.path.join(ROOT, "docs", "demo", f"literev-demo-{lang}.mp4")), lang
+        with open(os.path.join(ROOT, "frontend", "src", "i18n", "locales", f"{lang}.ts"), encoding="utf-8") as f:
+            locale = f.read()
+        for key in ("demoVideo:", "demoVideoTitle:", "demoVideoNote:", "demoVideoOpen:", "demoVideoClose:"):
+            assert key in locale, (lang, key)

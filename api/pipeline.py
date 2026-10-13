@@ -25,8 +25,7 @@ from .documents import (
     sanitize_db_text,
 )
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404, has_abstract_sql,
-                             pipeline_enrich_scope, scenario_scope_sql, scenario_search_mode,
-                             scenario_threshold_info)
+                             pipeline_enrich_scope, scenario_scope_sql, scenario_threshold_info)
 from .search import (
     DOAJ_MAX_QUERY_CHARS,
     EXHAUSTIVE_MAX_PER_SOURCE,
@@ -808,8 +807,9 @@ def _source_query_hash(query: str, filters: dict | None, max_results: int,
                        mode: str = "standard") -> str:
     """Clé de cache : même requête, mêmes filtres, même plafond par source, même mode.
 
-    Le mode n'entre dans la clé que s'il n'est pas `standard` : les entrées déjà en cache
-    gardent leur clé, et une recherche exhaustive ne rejoue jamais une réponse plafonnée."""
+    Le mode n'entre dans la clé que s'il n'est pas `standard`, celui des recherches d'avant
+    le mode exhaustif : une recherche, désormais toujours exhaustive, ne rejoue jamais la
+    réponse plafonnée d'une recherche standard."""
     import hashlib
     _p = {"q": (query or "").strip(), "f": filters or {}, "m": int(max_results)}
     if mode and mode != "standard":
@@ -890,7 +890,6 @@ def _run_user_scenario_populate(
     include_live: bool = True,
     lang: str | None = None,
     force_live: bool = False,
-    exhaustive: bool | None = None,
     auto_pipeline: bool = True,
 ) -> int:
     """
@@ -901,18 +900,21 @@ def _run_user_scenario_populate(
     Plafond : LIVE_MAX_PER_SOURCE articles par source. include_live=False = base
     locale seulement. Retourne le nombre total d'articles ingérés.
 
-    `exhaustive` : None lit le mode enregistré sur le scénario. En mode exhaustif, chaque
-    base qui applique le booléen renvoie TOUT ce qu'elle apparie (jusqu'à
-    EXHAUSTIVE_MAX_PER_SOURCE, garde-fou et non échantillon), avec le budget
-    EXHAUSTIVE_FEDERATION_BUDGET ; Crossref, qui classe des mots-clés au lieu d'appliquer
-    le booléen et dont la liste complète est l'index entier, garde le plafond standard ;
-    OpenAlex rend toutes ses correspondances sur titre et résumé (sa recherche par défaut
-    lit le texte intégral : 43 181 notices sur la question HPAI, contre 1 648 pour PubMed),
-    plus le passage de la recherche standard, pour qu'une recherche exhaustive ne trouve
-    jamais moins qu'une standard ; DOAJ reçoit le booléen entier découpé en requêtes
-    courtes, qu'elle sait paginer, et chaque base que la longueur d'URL ou le nombre
-    d'opérateurs limite (OpenAlex, ClinicalTrials.gov, arXiv, OpenAIRE) le reçoit découpé
-    de même au lieu de sa forme réduite, quand il tient en SPLIT_MAX_PARTS requêtes.
+    Toute recherche est EXHAUSTIVE (la recherche « standard », qui gardait les notices les
+    plus pertinentes de chaque base, a été retirée : avec le plafond de production, elle ne
+    différait plus que par ce qu'elle laissait de côté). Chaque base qui applique le booléen
+    renvoie TOUT ce qu'elle apparie (jusqu'à EXHAUSTIVE_MAX_PER_SOURCE, ou
+    LIVE_MAX_PER_SOURCE s'il est plus haut : un garde-fou, non un échantillon), avec le
+    budget EXHAUSTIVE_FEDERATION_BUDGET (POPULATE_FEDERATION_BUDGET s'il est plus long) ;
+    Crossref, qui classe des mots-clés au lieu d'appliquer le booléen et dont la liste
+    complète est l'index entier, garde ses RANKED_PASS_MAX plus pertinentes ; OpenAlex rend
+    toutes ses correspondances sur titre et résumé (sa recherche par défaut lit le texte
+    intégral : 43 181 notices sur la question HPAI, contre 1 648 pour PubMed), plus ses
+    RANKED_PASS_MAX meilleures correspondances en texte intégral ; DOAJ reçoit le booléen
+    entier découpé en requêtes courtes, qu'elle sait paginer, et chaque base que la longueur
+    d'URL ou le nombre d'opérateurs limite (OpenAlex, ClinicalTrials.gov, arXiv, OpenAIRE)
+    le reçoit découpé de même au lieu de sa forme réduite, quand il tient en
+    SPLIT_MAX_PARTS requêtes.
     `auto_pipeline=False` : ne pas enchaîner le pipeline complet après la recherche.
     """
     from .relevance import _backfill_title_abstract_chunks, _run_cross_encoder_rerank, _run_semantic_rerank_inline  # lazy: relevance is loaded after this module
@@ -928,18 +930,15 @@ def _run_user_scenario_populate(
 
     # Plafond par source identique pour recherche et corpus (déterminisme).
     max_results = min(max_results, LIVE_MAX_PER_SOURCE)
-    # Le mode de la recherche : celui du scénario, sauf demande explicite. En exhaustif, le
-    # plafond des bases qui appliquent le booléen devient un garde-fou ; Crossref (mots-clés)
-    # garde `max_results`.
-    if exhaustive is None:
-        exhaustive = scenario_search_mode(scenario_id) == "exhaustive"
-    _search_mode = "exhaustive" if exhaustive else "standard"
-    _cap_strategy = max(int(max_results), EXHAUSTIVE_MAX_PER_SOURCE) if exhaustive else int(max_results)
+    # Une seule recherche, exhaustive : le plafond des bases qui appliquent le booléen est
+    # un garde-fou. Le mode reste écrit sur la carte PRISMA et dans la clé du cache des
+    # sources, où les recherches standard d'avant gardent le leur.
+    _search_mode = "exhaustive"
+    _cap_strategy = max(int(max_results), EXHAUSTIVE_MAX_PER_SOURCE)
     # Les passages classés par pertinence (Crossref, le texte intégral d'OpenAlex) gardent
     # leur plafond propre, quel que soit `max_results` : cf. RANKED_PASS_MAX.
     _cap_ranked = max(1, min(int(max_results), RANKED_PASS_MAX))
-    _fed_budget = max(POPULATE_FEDERATION_BUDGET, EXHAUSTIVE_FEDERATION_BUDGET) if exhaustive \
-        else POPULATE_FEDERATION_BUDGET
+    _fed_budget = max(POPULATE_FEDERATION_BUDGET, EXHAUSTIVE_FEDERATION_BUDGET)
     # Ce que la carte PRISMA doit dire de ce run, source par source : interrogée sur titre
     # et résumé seulement, gardée dans un ordre qui n'est pas la pertinence, ou interrogée
     # avec le booléen découpé.
@@ -1292,8 +1291,8 @@ def _run_user_scenario_populate(
     _openaire_q = query
     _fallback_queries: dict[str, str] = {}
     # Liés ICI, hors du try, pour la même raison que `_kw_fallback` : les fetchers les lisent.
-    _doaj_parts: list[str] = []                 # DOAJ, recherche exhaustive : le booléen découpé
-    # Les autres bases que l'URL limite, en recherche exhaustive : le booléen découpé.
+    _doaj_parts: list[str] = []                 # DOAJ : le booléen découpé
+    # Les autres bases que l'URL limite : le booléen découpé.
     _openalex_parts: list[str] = []
     _ct_parts: list[str] = []
     _arxiv_parts: list[str] = []
@@ -1427,10 +1426,10 @@ def _run_user_scenario_populate(
                                                  render=_boolean_to_arxiv, measure=_url_encoded_len)
                     if _ax_short:
                         _arxiv_q = _ax_short
-                    # Recherche EXHAUSTIVE : le booléen entier en morceaux qui tiennent dans
-                    # l'URL, au lieu de synonymes en moins (impossible devant un NOT, qu'arXiv
-                    # ne sait pas écrire seul).
-                    if exhaustive and _ax:
+                    # Le booléen entier en morceaux qui tiennent dans l'URL, au lieu de
+                    # synonymes en moins (impossible devant un NOT, qu'arXiv ne sait pas
+                    # écrire seul).
+                    if _ax:
                         _ax_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED,
                                                    render=_boolean_to_arxiv, measure=_url_encoded_len)
                         if _ax_parts:
@@ -1439,11 +1438,11 @@ def _run_user_scenario_populate(
                             _split_queries["arxiv"] = list(_ax_parts)
             except Exception:
                 pass
-        # Recherche EXHAUSTIVE, booléen trop long pour l'URL : OpenAlex et ClinicalTrials.gov
-        # le reçoivent découpé en requêtes dont l'union est le booléen (exclusions attachées
-        # à chaque morceau), comme DOAJ, au lieu de sa forme réduite. Leurs notices sont
-        # alors natives. Au-delà de SPLIT_MAX_PARTS morceaux, la forme réduite reste.
-        if exhaustive and _bool_is_real and _clean_bool and not _send_bool:
+        # Booléen trop long pour l'URL : OpenAlex et ClinicalTrials.gov le reçoivent découpé
+        # en requêtes dont l'union est le booléen (exclusions attachées à chaque morceau),
+        # comme DOAJ, au lieu de sa forme réduite. Leurs notices sont alors natives. Au-delà
+        # de SPLIT_MAX_PARTS morceaux, la forme réduite reste.
+        if _bool_is_real and _clean_bool and not _send_bool:
             _url_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len)
             if _url_parts:
                 _ct_parts[:] = _url_parts
@@ -1452,7 +1451,7 @@ def _run_user_scenario_populate(
         # 60 opérateurs du scénario T2.4 exposition/transmission (400), quand ceux de 23 à 47
         # passaient. Ses morceaux sont donc bornés en longueur ET en opérateurs, et un booléen
         # qui tient dans l'URL mais dépasse OPENALEX_MAX_OPERATORS est découpé lui aussi.
-        if exhaustive and _bool_is_real and _clean_bool and (
+        if _bool_is_real and _clean_bool and (
                 not _send_bool or _count_operators(_clean_bool) > OPENALEX_MAX_OPERATORS):
             _oa_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len,
                                        max_operators=OPENALEX_MAX_OPERATORS, max_parts=OPENALEX_SPLIT_MAX_PARTS)
@@ -1472,10 +1471,10 @@ def _run_user_scenario_populate(
         _openaire_q = (_shorten_boolean(_portable_bool, URL_QUERY_MAX_ENCODED,
                                         max_operators=OPENAIRE_MAX_OPERATORS, measure=_url_encoded_len)
                        if _bool_is_real else "") or _plain_q
-        # Recherche EXHAUSTIVE : le booléen entier en morceaux de quatre opérateurs au plus
-        # chacun, quand il en faut SPLIT_MAX_PARTS au plus (une stratégie de revue en demande
-        # d'ordinaire bien davantage, et garde alors la réduction ci-dessus).
-        if exhaustive and _clean_bool:
+        # Le booléen entier en morceaux de quatre opérateurs au plus chacun, quand il en faut
+        # SPLIT_MAX_PARTS au plus (une stratégie de revue en demande d'ordinaire bien
+        # davantage, et garde alors la réduction ci-dessus).
+        if _clean_bool:
             _oaire_parts = _split_boolean(_portable_bool, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len,
                                           max_operators=OPENAIRE_MAX_OPERATORS)
             if _oaire_parts:
@@ -1487,10 +1486,10 @@ def _run_user_scenario_populate(
         if _bool_is_real and len(_doaj_q) > DOAJ_MAX_QUERY_CHARS:
             _doaj_q = _shorten_boolean(_portable_bool, DOAJ_MAX_QUERY_CHARS) or _plain_q
             _doaj_native = False
-        # Recherche EXHAUSTIVE : au lieu de synonymes en moins, le booléen ENTIER découpé en
-        # requêtes que DOAJ pagine. Leur union est le booléen, exclusions comprises : les
-        # notices sont donc natives, comme celles d'une requête entière.
-        if exhaustive and _bool_is_real and not _doaj_native:
+        # Au lieu de synonymes en moins, le booléen ENTIER découpé en requêtes que DOAJ
+        # pagine. Leur union est le booléen, exclusions comprises : les notices sont donc
+        # natives, comme celles d'une requête entière.
+        if _bool_is_real and not _doaj_native:
             _parts = _split_boolean(_portable_bool, DOAJ_MAX_QUERY_CHARS)
             if _parts:
                 _doaj_parts[:] = _parts
@@ -1520,10 +1519,11 @@ def _run_user_scenario_populate(
             # contre lui. Comparé au plafond commun de 2 000, un total entre 1 001 et 2 000
             # passait pour complet.
             _source_caps_run["semantic_scholar"] = min(int(max_results), 1000)
-        # OpenAlex en mode exhaustif : TOUTES ses correspondances sur titre et résumé (filtre
-        # title_and_abstract.search, qui accepte le booléen), plus le passage standard. Sa
-        # recherche par défaut lit aussi le texte intégral, d'où 43 181 notices sur HPAI.
-        if exhaustive and (_send_bool or _openalex_parts):
+        # OpenAlex : TOUTES ses correspondances sur titre et résumé (filtre
+        # title_and_abstract.search, qui accepte le booléen), plus ses meilleures en texte
+        # intégral. Sa recherche par défaut lit aussi le texte intégral, d'où 43 181 notices
+        # sur HPAI.
+        if _send_bool or _openalex_parts:
             _title_abstract_sources.add("openalex")
         # La requête RÉELLEMENT soumise à chacune : la même pour les sources à la limite
         # d'URL, la syntaxe `all:` pour arXiv, la forme à quatre opérateurs pour OpenAIRE,
@@ -1819,22 +1819,18 @@ def _run_user_scenario_populate(
 
     def _fetch_openalex():
         count = 0
-        # Un ou deux passages. Standard : la recherche par défaut (titre, résumé ET texte
-        # intégral), par pertinence, jusqu'au plafond. Exhaustive : TOUTES les
-        # correspondances sur titre et résumé (filtre title_and_abstract.search, qui accepte
-        # le booléen ; pagination par curseur, celle par numéro de page s'arrêtant à 10 000),
-        # PUIS le même passage que la recherche standard, pour qu'une recherche exhaustive ne
-        # trouve jamais moins qu'une standard : sans lui, 30 articles pertinents de HPAI_last,
-        # trouvés par le texte intégral, sortaient du corpus. Une notice rendue par les deux
-        # passages n'est comptée qu'une fois.
+        # Deux passages : TOUTES les correspondances sur titre et résumé (filtre
+        # title_and_abstract.search, qui accepte le booléen ; pagination par curseur, celle
+        # par numéro de page s'arrêtant à 10 000), PUIS la recherche par défaut (titre,
+        # résumé ET texte intégral), par pertinence, jusqu'au plafond classé : sans elle,
+        # 30 articles pertinents de HPAI_last, trouvés par le texte intégral, sortaient du
+        # corpus. Une notice rendue par les deux passages n'est comptée qu'une fois.
         # Un plan de passages (passage, requête, notices natives, plafond). Le booléen
-        # découpé (recherche exhaustive, trop long pour l'URL) donne un passage par
-        # morceau : leur union est le booléen, et le passage « comme en standard » se
-        # partage le plafond standard entre les morceaux.
+        # découpé (trop long pour l'URL) donne un passage par morceau : leur union est le
+        # booléen, et le passage en texte intégral se partage le plafond classé entre les
+        # morceaux.
         _oa_split = list(_openalex_parts)
-        if not exhaustive:
-            _passes = [("fulltext_top", _bool_query, _send_bool, _cap_ranked)]
-        elif "openalex" in _title_abstract_sources and _oa_split:
+        if "openalex" in _title_abstract_sources and _oa_split:
             _top_each = max(1, math.ceil(_cap_ranked / len(_oa_split)))
             _passes = ([("scoped", p, True, _cap_strategy) for p in _oa_split]
                        + [("fulltext_top", p, True, _top_each) for p in _oa_split])
@@ -1908,11 +1904,11 @@ def _run_user_scenario_populate(
                         break
                     oa_resp.raise_for_status()
                     _oa_json = oa_resp.json()
-                    # Le total de la recherche faite : en exhaustif, celui du passage qui
-                    # prend tout ; le passage « comme en standard » n'en est qu'un ajout.
-                    # Celui d'un booléen découpé n'est pas la somme des morceaux (ils se
-                    # recoupent) : il n'est pas annoncé, comme pour DOAJ.
-                    if not (exhaustive and _pass == "fulltext_top") and not _oa_split and not _oa_bisected[0]:
+                    # Le total de la recherche faite : celui du passage qui prend tout ; le
+                    # passage en texte intégral n'en est qu'un ajout. Celui d'un booléen
+                    # découpé n'est pas la somme des morceaux (ils se recoupent) : il n'est
+                    # pas annoncé, comme pour DOAJ.
+                    if _pass != "fulltext_top" and not _oa_split and not _oa_bisected[0]:
                         _note_total("openalex", (_oa_json.get("meta") or {}).get("count"))
                     _oa_results = _oa_json.get("results", [])
                     if not _oa_results:
@@ -2271,7 +2267,7 @@ def _run_user_scenario_populate(
         count = 0
         try:
             import urllib.parse as _ulib
-            # Une requête, ou le booléen découpé (recherche exhaustive) : une notice rendue
+            # Une requête, ou le booléen découpé : une notice rendue
             # par deux morceaux n'est comptée qu'une fois, sinon elle gonflerait le compte de
             # DOAJ et les doublons du PRISMA d'une notice que la base n'a rendue qu'une fois.
             _seen: set = set()
@@ -2319,8 +2315,8 @@ def _run_user_scenario_populate(
     def _fetch_clinicaltrials():
         count = 0
         try:
-            # Une requête, ou le booléen découpé (recherche exhaustive trop longue pour
-            # l'URL) : une étude rendue par deux morceaux n'est comptée qu'une fois.
+            # Une requête, ou le booléen découpé (trop long pour l'URL) : une étude rendue
+            # par deux morceaux n'est comptée qu'une fois.
             _ct_seen: set = set()
             _ct_native = _send_bool or bool(_ct_parts)
             for _ctq in (_ct_parts or [_bool_query]):
@@ -2404,8 +2400,8 @@ def _run_user_scenario_populate(
     def _fetch_arxiv():
         count = 0
         try:
-            # Une requête, ou le booléen découpé (recherche exhaustive) : une notice rendue
-            # par deux morceaux n'est comptée qu'une fois.
+            # Une requête, ou le booléen découpé : une notice rendue par deux morceaux n'est
+            # comptée qu'une fois.
             _ax_seen: set = set()
             for _axq in (_arxiv_parts or [_arxiv_q]):
                 _ax_start = 0
@@ -2447,7 +2443,7 @@ def _run_user_scenario_populate(
         # autres requêtes, plus haut) ; jamais « native » : ses notices sont ré-appariées
         # en local contre le booléen entier.
         _oa_q, _oa_native = _openaire_q, False
-        # Recherche exhaustive : le booléen ENTIER en morceaux de quatre opérateurs au plus
+        # Le booléen ENTIER en morceaux de quatre opérateurs au plus
         # (`_openaire_parts`, quand il en faut SPLIT_MAX_PARTS au plus). Leur union est le
         # booléen : ces notices-là sont natives ; la réduction, elle, ne l'est jamais.
         if _openaire_parts:
@@ -2856,17 +2852,15 @@ def _run_user_scenario_populate(
                 keyword_fallback_queries=(dict(_fallback_queries) if include_live else {}),
                 source_error_reasons=(dict(_fetcher_errors) if include_live else {}),
                 source_totals=(_totals_snapshot if include_live else {}),
-                # Le mode, et le plafond de chaque source quand il diffère : les passages
-                # classés par pertinence gardent le leur (RANKED_PASS_MAX), Crossref dans les
-                # deux modes et OpenAlex en standard, où c'est son seul passage (en
-                # exhaustif, son passage titre et résumé a le plafond commun). PubMed n'en a
-                # plus de propre : au-delà des 10 000 identifiants qu'eutils rend par
-                # recherche, sa requête est découpée par années (`year_slices`).
+                # Le mode, et le plafond de chaque source quand il diffère : Crossref, classé
+                # par pertinence, garde le sien (RANKED_PASS_MAX) ; le passage titre et
+                # résumé d'OpenAlex a le plafond commun. PubMed n'en a plus de propre :
+                # au-delà des 10 000 identifiants qu'eutils rend par recherche, sa requête
+                # est découpée par années (`year_slices`).
                 search_mode=_search_mode,
                 # Et l'endpoint classique de Semantic Scholar, qui ne rend pas plus de
-                # 1 000 notices, dans les deux modes.
-                source_caps=((({"crossref": int(_cap_ranked)}
-                               | ({} if exhaustive else {"openalex": int(_cap_ranked)}))
+                # 1 000 notices.
+                source_caps=(({"crossref": int(_cap_ranked)}
                               if _cap_ranked < int(_cap_strategy) else {})
                              | dict(_source_caps_run)
                              if include_live else {}),
@@ -3073,8 +3067,8 @@ def _run_user_scenario_populate(
                 # brief, variables et modèle, actions, carte des concepts) dès que le corpus
                 # est construit et scoré : un scénario est prêt sans qu'on ait à l'épingler.
                 # AUTO_PIPELINE_AFTER_SEARCH=0 pour s'en tenir à la recherche seule ;
-                # `auto_pipeline=False` pour cette recherche-ci (une recherche exhaustive
-                # dont on enrichit soi-même le sous-ensemble pertinent, par exemple).
+                # `auto_pipeline=False` pour cette recherche-ci (une recherche dont on
+                # enrichit soi-même le sous-ensemble pertinent, par exemple).
                 if _auto_ok[0] and _auto_pipeline_after_search() and auto_pipeline:
                     try:
                         from .scenarios import _launch_full_pipeline

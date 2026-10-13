@@ -180,7 +180,7 @@ def federation(db_conn, monkeypatch):
 
     def run():
         P._run_user_scenario_populate(SID, QUERY, {}, max_results=300, include_live=True,
-                                      auto_pipeline=False, force_live=True, exhaustive=False)
+                                      auto_pipeline=False, force_live=True)
         return P._user_scenario_populate_jobs.get(SID) or {}
 
     yield run, fake, tag
@@ -230,6 +230,7 @@ def test_no_retry_waits_past_the_federation_budget(federation, monkeypatch):
     from api import pipeline as P
     run, fake, _tag = federation
     monkeypatch.setattr(P, "POPULATE_FEDERATION_BUDGET", 2.0)
+    monkeypatch.setattr(P, "EXHAUSTIVE_FEDERATION_BUDGET", 2.0)
     monkeypatch.setattr(P, "FETCH_RETRY_BACKOFF_S", (30.0, 30.0, 30.0))
     t0 = time.monotonic()
     job = run()

@@ -3,7 +3,7 @@ import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDeta
 import { fetchActivity } from "./lib/api";
 import type { ActivityItem } from "./lib/api";
 import { useI18n } from "./i18n/LanguageProvider";
-import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, Search, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2 } from "lucide-react";
+import { Activity, BarChart2, BookOpen, Cloud, Download, ExternalLink, FolderOpen, MapPin, AlertTriangle, Users, Pill, Radio, RefreshCw, RotateCcw, Search, ChevronDown, ChevronUp, Zap, Lock, KeyRound, Wrench, Trash2, PlayCircle, X } from "lucide-react";
 
 import {
   fetchDocumentDetail,
@@ -2012,6 +2012,8 @@ export default function App() {
   // Clé d'écriture admin (X-API-Key). Saisie une fois, stockée en localStorage côté
   // navigateur - jamais dans le bundle public (cf. authHeaders dans lib/api).
   const [apiKeySet, setApiKeySet] = useState<boolean>(() => hasApiKey());
+  // La vidéo de démonstration, ouverte depuis l'en-tête.
+  const [showDemo, setShowDemo] = useState(false);
   const handleManageApiKey = () => {
     if (apiKeySet) {
       if (window.confirm(t("header.removeKeyConfirm"))) {
@@ -2029,15 +2031,12 @@ export default function App() {
   const [includeLive, setIncludeLive] = useState(false);
   // Recherche sans préprints : enregistrée dans les filtres du scénario par le serveur.
   const [excludePreprints, setExcludePreprints] = useState(false);
-  // Le mode de la recherche, enregistré sur le scénario par le serveur. Exhaustive par
-  // défaut : toutes les notices que chaque base apparie ; standard : les plus pertinentes
-  // de chaque base, plus vite.
-  const [exhaustiveSearch, setExhaustiveSearch] = useState(true);
-  // Les plafonds de ces deux modes viennent de l'environnement du serveur (la production
-  // lève celui du standard à 100 000) : l'écran les lit au lieu d'écrire 2 000 et 20 000.
-  // Les défauts du serveur tant qu'il n'a pas répondu.
+  // Une seule recherche, exhaustive : toutes les notices que chaque base apparie. Son
+  // plafond par base et son budget de temps viennent de l'environnement du serveur (la
+  // production met le plafond à 100 000) : l'écran les lit au lieu de les écrire. Les
+  // défauts du serveur tant qu'il n'a pas répondu.
   const [searchLimits, setSearchLimits] = useState<SearchLimits>({
-    standard_per_source: 2000, exhaustive_per_source: 20000, ranked_per_source: 2000,
+    per_source: 20000, ranked_per_source: 2000, budget_s: 2700,
   });
   useEffect(() => {
     let alive = true;
@@ -2505,8 +2504,8 @@ export default function App() {
       // ── LA recherche CONSTRUIT le corpus, puis l'affiche ─────────────────────
       // Le nombre affiché == la taille du corpus du scénario (même opération, même
       // helper booléen). On crée le scénario, on construit le corpus (requête
-      // booléenne sur base locale ∪ sources live, dans le mode choisi : exhaustive ou
-      // standard), puis on lit le corpus et on l'affiche. Plus de "preview" divergente.
+      // booléenne sur base locale ∪ sources live, toujours exhaustive), puis on lit le
+      // corpus et on l'affiche. Plus de "preview" divergente.
       const _sub = buildSubQueries(usedQuery);
       const newScenario = await createUserScenario({
         // Nom par défaut = l'expression COMPLÈTE (facettes + ET/OU), pas seulement
@@ -2524,8 +2523,8 @@ export default function App() {
       setCurrentSearchSid(sid);   // → indicateur global (« Voir les résultats » revient ici)
       // Le choix part AUSSI avec la recherche : un scénario épinglé de même requête est
       // renvoyé tel quel à la création, filtres compris, et serait sinon relancé sans lui.
-      // Pas de plafond envoyé : le mode le fixe, et le serveur applique le sien.
-      await populateUserScenario(sid, { includeLive, excludePreprints, exhaustive: exhaustiveSearch });
+      // Pas de plafond envoyé : le serveur applique le sien.
+      await populateUserScenario(sid, { includeLive, excludePreprints });
       // ── CONSTRUCTION COMPLÈTE PUIS AFFICHAGE ─────────────────────────────────
       // On construit tout le corpus (base locale ∪ sources en direct), on le score,
       // puis on l'affiche EN UNE FOIS. `renderCorpus` lit le corpus FINAL ; il
@@ -2770,14 +2769,13 @@ export default function App() {
     pipelinePollRef.current[scenarioId] = pollInterval;
   }
 
-  function _launchPipelineForScenario(scenarioId: string, exhaustive?: boolean) {
+  function _launchPipelineForScenario(scenarioId: string) {
     // Déclencher le pipeline complet dès qu'un scénario est épinglé. Pas de plafond
     // explicite : le serveur applique LIVE_MAX_PER_SOURCE (2000 par défaut), le MÊME
     // que le populate lancé depuis l'API - 500 ici donnait un corpus différent pour
-    // la même requête selon le point d'entrée. `exhaustive` : le mode d'un scénario
-    // NEUF, dont le corpus reste à construire (recherche multi-facettes) ; absent, le
-    // scénario garde le mode avec lequel sa recherche l'a construit.
-    startUserScenarioPipeline(scenarioId, undefined, exhaustive === undefined ? undefined : { exhaustive })
+    // la même requête selon le point d'entrée. Un corpus qui reste à construire
+    // (recherche multi-facettes) l'est par une recherche exhaustive, comme toute recherche.
+    startUserScenarioPipeline(scenarioId)
       .then(() => _pollPipelineStatus(scenarioId))
       .catch(err => console.warn('Pipeline launch failed:', err));
   }
@@ -2828,7 +2826,7 @@ export default function App() {
           combinator: newScenario.combinator ?? null,
           excludePreprints: newScenario.filters?.exclude_preprints === true,
         }, ...prev]);
-        _launchPipelineForScenario(newScenario.id, exhaustiveSearch);
+        _launchPipelineForScenario(newScenario.id);
       }).catch(err => console.warn('Create user_scenario failed:', err));
     }
     setShowSaveDialog(false);
@@ -2955,6 +2953,15 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-6">
+              {/* The demo video (docs/demo-video.md), served under /demo/ by the build. */}
+              <button
+                type="button"
+                onClick={() => setShowDemo(true)}
+                className="flex items-center gap-1.5 rounded-xl border border-gold-400/30 bg-gold-400/10 px-3 py-1.5 text-xs font-medium text-gold-400 transition hover:bg-gold-400/20"
+              >
+                <PlayCircle size={14} />
+                {t("header.demoVideo")}
+              </button>
               <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-white/5 p-0.5 text-xs" title={t("header.languageLabel")}>
                 {(["fr", "en"] as const).map((l) => (
                   <button
@@ -3034,6 +3041,53 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {showDemo && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("header.demoVideoTitle")}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setShowDemo(false)}
+        >
+          <div
+            className="w-full max-w-5xl rounded-2xl border border-white/10 bg-forest-950 p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <h2 className="text-sm font-semibold text-white">{t("header.demoVideoTitle")}</h2>
+              <button
+                type="button"
+                onClick={() => setShowDemo(false)}
+                aria-label={t("header.demoVideoClose")}
+                className="rounded-lg p-1 text-white/60 hover:bg-white/10 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <video
+              key={lang}
+              src={`/demo/literev-demo-${lang}.mp4`}
+              poster={`/demo/literev-demo-${lang}.jpg`}
+              controls
+              autoPlay
+              playsInline
+              className="w-full rounded-xl bg-black"
+            />
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/50">
+              <span>{t("header.demoVideoNote")}</span>
+              <a
+                href={`/demo/literev-demo-${lang}.mp4`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand-300 hover:text-brand-200"
+              >
+                {t("header.demoVideoOpen")}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-[1380px] px-6 py-8">
 
@@ -3231,7 +3285,16 @@ export default function App() {
                   />
                   <span>
                     <span>{t("search.includeLive")}</span>
-                    <span className="block text-forest-500 mt-0.5">{t("search.includeLiveHint")}</span>
+                    {/* Une seule recherche, exhaustive : ce qu'elle prend et combien de temps
+                        elle peut durer, chiffres du serveur. Il y avait un choix entre
+                        « exhaustive » et « standard » ; avec le plafond de production, la
+                        standard ne différait plus que par ce qu'elle laissait de côté. */}
+                    <span className="block text-forest-500 mt-0.5">
+                      {t("search.includeLiveHint")
+                        .replace("{n}", searchLimits.per_source.toLocaleString())
+                        .replace("{ranked}", searchLimits.ranked_per_source.toLocaleString())
+                        .replace("{minutes}", Math.round(searchLimits.budget_s / 60).toLocaleString())}
+                    </span>
                   </span>
                 </label>
 
@@ -3251,36 +3314,6 @@ export default function App() {
                     <span className="block text-forest-500 mt-0.5">{t("search.excludePreprintsHint")}</span>
                   </span>
                 </label>
-
-                {/* Le mode de la recherche, enregistré sur le scénario : exhaustive (par
-                    défaut) ou standard. Une ligne d'explication pour chacun. */}
-                <div role="radiogroup" aria-label={t("search.depthLabel")}
-                     className="mt-2 space-y-1.5 text-xs text-forest-300">
-                  {([true, false] as const).map((ex) => (
-                    <label key={ex ? "exhaustive" : "standard"}
-                           className="flex items-start gap-2 cursor-pointer select-none">
-                      <input
-                        type="radio"
-                        name="search-depth"
-                        checked={exhaustiveSearch === ex}
-                        onChange={() => setExhaustiveSearch(ex)}
-                        className="mt-0.5 h-4 w-4 accent-brand-400 shrink-0"
-                      />
-                      <span>
-                        <span>{t(ex ? "search.depthExhaustive" : "search.depthStandard")}</span>
-                        <span className="block text-forest-500 mt-0.5">
-                          {ex
-                            ? t("search.depthExhaustiveHint")
-                                .replace("{n}", searchLimits.exhaustive_per_source.toLocaleString())
-                            : t(searchLimits.ranked_per_source < searchLimits.standard_per_source
-                                  ? "search.depthStandardHintRanked" : "search.depthStandardHint")
-                                .replace("{n}", searchLimits.standard_per_source.toLocaleString())
-                                .replace("{ranked}", searchLimits.ranked_per_source.toLocaleString())}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
 
                 {/* Recherche multi-sous-requêtes (avancé) : combine la requête
                     principale ci-dessus avec des sous-requêtes additionnelles, par

@@ -15,6 +15,11 @@ export const fr = {
     adminKeySetTooltip:
       "Définir la clé admin (X-API-Key) pour activer les écritures",
     languageLabel: "Langue",
+    demoVideo: "Vidéo de démonstration",
+    demoVideoTitle: "LiteRev en 95 secondes environ",
+    demoVideoNote: "Les écrans sont ceux de l'application ; les 200 articles sont fictifs.",
+    demoVideoOpen: "Ouvrir le fichier vidéo",
+    demoVideoClose: "Fermer",
     removeKeyConfirm:
       "Retirer la clé admin de cet appareil ? Les écritures seront désactivées (lecture seule).",
     setKeyPrompt:
@@ -311,16 +316,11 @@ export const fr = {
     searchButton: "Rechercher",
     includeLive:
       "Inclure les sources API en direct (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, préprints Europe PMC : bioRxiv, medRxiv, Research Square…)",
-    includeLiveHint: "Recherche plus lente, ajoute les articles non encore indexes",
+    includeLiveHint:
+      "Recherche exhaustive : toutes les notices que chaque base apparie, jusqu'à {n} par base (Crossref, qui ne classe que des mots-clés : ses {ranked} plus pertinentes), y compris les articles que la bibliothèque n'a pas encore. Peut prendre jusqu'à {minutes} minutes",
     excludePreprints: "Exclure les préprints",
     excludePreprintsHint:
       "Les serveurs de préprints ne sont pas interrogés, PubMed et Europe PMC les excluent dans la requête, et ceux que rendent les autres bases sont retirés avant le screening (dit sur la carte PRISMA)",
-    depthLabel: "Profondeur de la recherche",
-    depthExhaustive: "Recherche exhaustive",
-    depthExhaustiveHint: "Toutes les notices que chaque base apparie, jusqu'à {n} par base : plus long",
-    depthStandard: "Recherche standard",
-    depthStandardHint: "Les {n} notices les plus pertinentes de chaque base : plus rapide",
-    depthStandardHintRanked: "Les notices les plus pertinentes de chaque base, jusqu'à {n} par base ({ranked} pour Crossref et OpenAlex, qui classent par pertinence) : plus rapide",
     strategyTruncated:
       "La stratégie booléenne rédigée par le modèle a été coupée à son plafond : la recherche utilise la requête telle que saisie.",
     proposal: {

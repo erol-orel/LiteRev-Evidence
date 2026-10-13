@@ -17,6 +17,11 @@ export const en: Translations = {
     adminKeySetTooltip:
       "Set the admin key (X-API-Key) to enable writes",
     languageLabel: "Language",
+    demoVideo: "Demo video",
+    demoVideoTitle: "LiteRev in about 95 seconds",
+    demoVideoNote: "The screens are the real application; the 200 articles are synthetic.",
+    demoVideoOpen: "Open the video file",
+    demoVideoClose: "Close",
     removeKeyConfirm:
       "Remove the admin key from this device? Writes will be disabled (read-only).",
     setKeyPrompt:
@@ -311,16 +316,11 @@ export const en: Translations = {
     searchButton: "Search",
     includeLive:
       "Include live API sources (PubMed, OpenAlex, Crossref, EuropePMC, Semantic Scholar, DOAJ, ClinicalTrials.gov, CORE, arXiv, OpenAIRE, Europe PMC preprints: bioRxiv, medRxiv, Research Square…)",
-    includeLiveHint: "Slower search, adds articles not yet indexed",
+    includeLiveHint:
+      "Exhaustive search: every record each database matches, up to {n} per database (Crossref, which only ranks keywords: its {ranked} most relevant), including articles the library does not hold yet. Can take up to {minutes} minutes",
     excludePreprints: "Exclude preprints",
     excludePreprintsHint:
       "Preprint servers are not searched, PubMed and Europe PMC exclude them in the query, and those the other databases return are removed before screening (stated on the PRISMA card)",
-    depthLabel: "Search depth",
-    depthExhaustive: "Exhaustive search",
-    depthExhaustiveHint: "Every record each database matches, up to {n} per database: takes longer",
-    depthStandard: "Standard search",
-    depthStandardHint: "The {n} most relevant records from each database: faster",
-    depthStandardHintRanked: "The most relevant records from each database, up to {n} per database ({ranked} for Crossref and OpenAlex, which rank by relevance): faster",
     strategyTruncated:
       "The Boolean strategy written by the model was cut off at its limit: the search uses the query as typed.",
     proposal: {

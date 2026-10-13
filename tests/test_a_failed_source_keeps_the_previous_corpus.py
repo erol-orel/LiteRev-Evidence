@@ -181,7 +181,7 @@ def scenario(db_conn, monkeypatch):
             cur.execute("UPDATE user_scenarios SET search_strategy = %s::jsonb WHERE id = %s",
                         (_strategy(boolean), SID))
         P._run_user_scenario_populate(SID, boolean, {}, include_live=True, auto_pipeline=False,
-                                      force_live=True, exhaustive=True)
+                                      force_live=True)
         return P._user_scenario_populate_jobs.get(SID) or {}
 
     yield run, fake, db_conn
