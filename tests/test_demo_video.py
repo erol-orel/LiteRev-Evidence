@@ -351,6 +351,62 @@ def test_a_narration_clip_is_asked_once_then_read_from_the_cache(tmp_path, monke
     assert "instructions" not in calls[-1][2]                       # tts-1 refuses them
 
 
+def test_a_clip_left_unanswered_or_refused_for_a_while_is_asked_again(tmp_path, monkeypatch):
+    """On 13 October the first clip got no answer for two minutes and the whole recording
+    was lost. A slow or busy API is now asked again, a few times, with a growing wait."""
+    import io
+    import urllib.error
+    answers = [TimeoutError("The read operation timed out"),
+               urllib.error.HTTPError("u", 503, "busy", {}, io.BytesIO(b"{}")),
+               b"\x01\x00" * render.TTS_RATE]
+    waits = []
+
+    class Answer:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self):
+            return self.data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        assert timeout == render.TTS_TIMEOUT
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return Answer(a)
+
+    monkeypatch.setattr(render.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(render.time, "sleep", waits.append)
+    clip = render.speak("Each article gets a score.", render.Voice(api_key="k"), str(tmp_path))
+    assert abs(render.pcm_seconds(clip) - 1.0) < 1e-9 and not answers
+    assert waits == [5, 10]
+
+
+def test_a_refused_key_stops_at_once_and_never_quotes_the_message(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    calls = []
+    body = b'{"error": {"message": "Incorrect API key provided: sk-ab***yz", "code": "invalid_api_key"}}'
+
+    def fake_urlopen(req, timeout):
+        calls.append(req)
+        raise urllib.error.HTTPError("u", 401, "unauthorized", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(render.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(render.time, "sleep", lambda s: pytest.fail("a refused key is not asked again"))
+    with pytest.raises(RuntimeError) as err:
+        render.speak("Each article gets a score.", render.Voice(api_key="k"), str(tmp_path))
+    assert len(calls) == 1
+    assert "401" in str(err.value) and "invalid_api_key" in str(err.value)
+    assert "sk-" not in str(err.value) and "Incorrect" not in str(err.value)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The site plays it: the build serves docs/demo/ under /demo/, the header opens it
 # ─────────────────────────────────────────────────────────────────────────────
