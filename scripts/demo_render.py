@@ -384,8 +384,10 @@ def frames(tl: Timeline, composer: Composer):
 TTS_RATE = 24_000           # the API's raw PCM: 24 kHz, 16-bit, mono
 #: A clip is asked again when the API is slow or busy: a long video asks for dozens, and
 #: one request left unanswered for minutes (as on 13 October) must not lose the recording.
-TTS_ATTEMPTS = 4
-TTS_TIMEOUT = 90            # seconds without a byte before an attempt is given up
+#: An answer starts within seconds, so 30 s without a byte is a request the API dropped:
+#: on 13 October 5 of 33 requests hung, and each time a later attempt answered at once.
+TTS_ATTEMPTS = 6
+TTS_TIMEOUT = 30            # seconds without a byte before an attempt is given up
 TTS_RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
@@ -426,7 +428,7 @@ def speak(text: str, voice: Voice, cache_dir: str) -> str:
             if attempt == TTS_ATTEMPTS:
                 raise RuntimeError(f"text-to-speech did not answer in {TTS_ATTEMPTS} attempts ({type(e).__name__})") from None
             why = type(e).__name__
-        wait = 5 * 2 ** (attempt - 1)
+        wait = min(5 * 2 ** (attempt - 1), 30)
         print(f"text-to-speech: attempt {attempt} failed ({why}), next in {wait} s", file=sys.stderr)
         time.sleep(wait)
     os.makedirs(cache_dir, exist_ok=True)
