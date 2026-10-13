@@ -125,7 +125,9 @@ speaks `/v1/audio/speech` works with `DEMO_TTS_BASE_URL`. `DEMO_TTS_MODEL` and
 `DEMO_TTS_API_KEY` is not set; `--no-narration` keeps the video silent. Each scene
 then lasts at least as long as its voice. The clips are cached in the work directory,
 so rendering again does not pay for them twice. For the workflow, store the key as the
-repository secret `DEMO_TTS_API_KEY`.
+secret `DEMO_TTS_API_KEY` of the GitHub environment "production", beside the other keys
+(a repository secret of that name works too): the job reads that environment without
+recording a deployment.
 
 ## Film a real deployment
 

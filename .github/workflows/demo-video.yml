@@ -3,7 +3,8 @@ name: Demo video
 # Records the demo video of the main pipeline (docs/demo-video.md) and keeps it as an
 # artifact of the run: from the Actions tab whenever the interface has changed, and on a
 # pull request that changes the demo's own files. Nothing is committed and nothing is
-# deployed. The video is narrated when the repository holds a DEMO_TTS_API_KEY secret.
+# deployed. The video is narrated when a DEMO_TTS_API_KEY secret is set (in the
+# "production" environment, or for the repository).
 
 on:
   workflow_dispatch:
@@ -22,6 +23,12 @@ jobs:
     name: Record and render
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # DEMO_TTS_API_KEY is kept with the other keys, as a secret of the "production"
+    # environment (a repository secret works too). The job reads it there without
+    # recording a deployment: nothing here deploys.
+    environment:
+      name: production
+      deployment: false
     services:
       postgres:
         image: postgres:16
