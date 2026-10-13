@@ -250,7 +250,7 @@ erDiagram
 > `user_scenario_folders`, `scenario_settings` and add columns), and Alembic. The
 > **`article_scenarios` table has no `CREATE TABLE` anywhere in the repo** - it
 > was hand-applied on the production DB and is only ever `ALTER`ed/queried in code
-> (documented in `AUDIT_REPORT.md`). So a fresh DB built purely from the repo
+> (documented in `archive/AUDIT_REPORT.md`). So a fresh DB built purely from the repo
 > would be missing it. Treat the *live* DB as the source of truth.
 
 ---
