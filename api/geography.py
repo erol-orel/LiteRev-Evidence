@@ -515,12 +515,14 @@ def _builtin_entries() -> list[tuple[str, int, str, str]]:
 
 def build_index(rows: Iterable[tuple[str, int, str, str, str | None]]) -> NutsIndex:
     """The index for the official rows (code, level, country, name, Latin-script name) as stored,
-    with the built-in names beside them; the built-in names alone when there are none."""
+    with the built-in names beside them; the built-in names alone when there are none. The
+    Latin-script name is the one shown: "Attiki" and "Yugozapaden" read where "Αττική" and
+    "Югозападен" do not, and for every other country the two are the same."""
     loaded: list[tuple[str, int, str, str]] = []
     for code, level, country, name, alt in rows:
-        loaded.append((code, level, country, name))
         if alt and alt != name:
             loaded.append((code, level, country, alt))
+        loaded.append((code, level, country, name))
     return NutsIndex(_builtin_entries(), "loaded" if loaded else "builtin", loaded)
 
 
@@ -545,12 +547,12 @@ def get_nuts_index() -> NutsIndex:
     return idx
 
 
-def _region_hits(words: list[str], index: NutsIndex, country: str | None) -> list[str]:
-    """The NUTS code each region name in a place points to, leftmost then longest, a name found
-    taking its words (Lower Saxony is not Saxony). Inside a known country every name counts; with
-    none, only the curated ones. A name several codes share points to what they have in common
-    ("Oldenburg": the town and the district are both in DE94), at its deepest level."""
-    hits: list[str] = []
+def _region_hits(words: list[str], index: NutsIndex, country: str | None) -> list[list[str]]:
+    """The NUTS codes each region name in a place can be, leftmost then longest, a name found
+    taking its words (Lower Saxony is not Saxony), at the name's deepest level. Inside a known
+    country every name counts; with none, only the curated ones. A name several codes share
+    gives them all ("Oldenburg": the town DE943 and the district DE94D)."""
+    hits: list[list[str]] = []
     i = 0
     while i < len(words):
         for j in range(min(len(words), i + index.max_words), i, -1):
@@ -558,12 +560,23 @@ def _region_hits(words: list[str], index: NutsIndex, country: str | None) -> lis
                      if (cc == country if country else curated)]
             if cands:
                 deepest = max(lvl for _c, lvl in cands)
-                hits.append(_common_prefix(sorted({c for c, lvl in cands if lvl == deepest})))
+                hits.append(sorted({c for c, lvl in cands if lvl == deepest}))
                 i = j
                 break
         else:
             i += 1
     return hits
+
+
+def _region_of(hits: list[list[str]]) -> str:
+    """The region a place names, from its hits: a code that only places another ("Baden-
+    Württemberg" around Sigmaringen, "Lower Saxony" around Cloppenburg) is set aside, and the
+    place is in what the others share. "Sigmaringen, Baden-Württemberg" is the district;
+    "Oldenburg and Cloppenburg, Lower Saxony" is Weser-Ems (DE94), where both districts lie;
+    "Bavaria and Saxony" is Germany (DE); "Bavaria and Lombardy" is no country ("")."""
+    codes = [c for h in hits for c in h]
+    leaves = sorted({c for c in codes if not any(o != c and o.startswith(c) for o in codes)})
+    return _common_prefix(leaves)
 
 
 def _common_prefix(codes: list[str]) -> str:
@@ -609,8 +622,7 @@ def resolve_location(place: Any, article_country: Any = None, index: NutsIndex |
     # Baden-Württemberg"), else only what they share ("Bavaria and Saxony" is Germany).
     hits = _region_hits(folded.split(), index, country)
     if hits:
-        deepest = max(hits, key=len)
-        code = deepest if all(deepest.startswith(h) for h in hits) else _common_prefix(hits)
+        code = _region_of(hits)
         if len(code) >= 3:
             iso = iso_of_nuts0(code[:2])
             out.update({"country": iso, "nuts0": code[:2], "method": "region", "level": len(code) - 2})

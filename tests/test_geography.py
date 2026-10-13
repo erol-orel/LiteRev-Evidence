@@ -347,6 +347,9 @@ OFFICIAL = G.build_index(G.parse_nuts_csv(
     'DE212,3,DE,"München, Kreisfreie Stadt","München, Kreisfreie Stadt"\nDE21H,3,DE,"München, Landkreis","München, Landkreis"\n'
     "DE9,1,DE,Niedersachsen,Niedersachsen\nDE94,2,DE,Weser-Ems,Weser-Ems\nDE948,3,DE,Cloppenburg,Cloppenburg\n"
     "DE94A,3,DE,Friesland (DE),Friesland (DE)\n"
+    'DE943,3,DE,"Oldenburg (Oldenburg), Kreisfreie Stadt","Oldenburg (Oldenburg), Kreisfreie Stadt"\n'
+    'DE94D,3,DE,"Oldenburg, Landkreis","Oldenburg, Landkreis"\n'
+    "BG41,2,BG,Yugozapaden,Югозападен\nBG411,3,BG,Sofia (stolitsa),София (столица)\nBG412,3,BG,Sofia,София\n"
     "ITH3,2,IT,Veneto,Veneto\nITH31,3,IT,Verona,Verona\nITC4,2,IT,Lombardia,Lombardia\n"
     "IE0,1,IE,Ireland,Ireland\nIE04,2,IE,Northern and Western,Northern and Western\nIE041,3,IE,Border,Border\nIE042,3,IE,West,West\n"
     "ES3,1,ES,Comunidad de Madrid,Comunidad de Madrid\nES300,3,ES,Madrid,Madrid\nES4,1,ES,Centro (ES),Centro (ES)\n"
@@ -368,6 +371,7 @@ def test_the_english_names_stay_beside_the_official_ones():
         r = _o(place)
         assert (r[f"nuts{level}"], r["method"]) == (code, "region"), place
     assert OFFICIAL.name_of["DE1"] == "Baden-Württemberg" and OFFICIAL.name_of["ITI1"] == "Toscana"   # the official name is shown
+    assert OFFICIAL.name_of["BG41"] == "Yugozapaden"                    # in Latin script, as the partners read it
 
 
 def test_a_district_resolves_inside_its_state_and_a_shared_name_to_what_it_shares():
@@ -377,6 +381,15 @@ def test_a_district_resolves_inside_its_state_and_a_shared_name_to_what_it_share
     # The town and the district of Munich share a name: Upper Bavaria, not a guess between them.
     r = _o("München, Germany")
     assert (r["nuts2"], r["nuts3"], r["level"]) == ("DE21", None, 2)
+    # Two districts, one of them a name two codes share, in their Land: where both lie (Weser-Ems),
+    # neither Cloppenburg alone nor the whole Land. As a paper wrote it on HPAI, with the article's
+    # country; without it only the curated Land is read.
+    place = "districts of Oldenburg and Cloppenburg in the German federal state of Lower Saxony"
+    assert (_o(place, "DE")["nuts2"], _o(place, "DE")["nuts3"]) == ("DE94", None)
+    assert (_o(place)["nuts1"], _o(place)["nuts2"]) == ("DE9", None)
+    # Sofia is the capital and the province around it: the region both are in.
+    assert (_o("Etropole, province of Sofia, western Bulgaria")["nuts2"],
+            _o("Etropole, province of Sofia, western Bulgaria")["nuts3"]) == ("BG41", None)
     # Two regions of one country, no country named: the country; of two countries: several.
     r = _r("Bavaria and Saxony")
     assert (r["country"], r["nuts1"], r["level"], r["method"]) == ("DE", None, 0, "region")

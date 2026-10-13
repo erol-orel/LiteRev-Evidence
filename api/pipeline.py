@@ -85,6 +85,7 @@ from .sources import (
     openalex_params,
     pubmed_esearch_by_years,
     s2_headers_paced,
+    s2_key,
     pubmed_year_bounds,
     pubmed_years_term,
     _parse_arxiv,
@@ -136,6 +137,13 @@ def _auto_pipeline_after_search() -> bool:
 FETCH_RETRY_ATTEMPTS = max(1, int(os.getenv("FETCH_RETRY_ATTEMPTS", "3") or 3))
 FETCH_RETRY_BACKOFF_S = (2.0, 4.0, 8.0)
 FETCH_RETRY_AFTER_CAP_S = 30.0
+#: Les attentes d'un 429 quand l'appel porte la clé du serveur (Semantic Scholar). Avec la clé
+#: et l'espacement d'une requête par seconde, la recherche de l'exposition du 13 octobre 2026
+#: s'arrêtait encore à la deuxième page (200 notices sur 10 257) après les quatre attentes de
+#: 2 à 8 s faites pour le quota anonyme, qu'insister durcit. Une clé ne l'est pas pour avoir
+#: attendu : huit tentatives, quatre minutes au plus, jamais au-delà du budget de fédération.
+#: Lues à l'appel : un test les raccourcit.
+KEYED_429_WAITS_S = (5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0)
 
 
 def _pubmed_year(article_elem) -> int | None:
@@ -1106,22 +1114,26 @@ def _run_user_scenario_populate(
     _RATE_LIMIT_ATTEMPTS = 5
     _RATE_LIMIT_MAX_SLEEP_S = 12.0
 
-    def _wait_out_rate_limit(resp, attempt: int, source: str) -> None:
+    def _wait_out_rate_limit(resp, attempt: int, source: str, keyed: bool = False) -> None:
         """Attendre un 429 une fois de plus, ou LEVER quand il n'y a plus lieu d'attendre.
 
         `attempt` compte les 429 déjà reçus pour cette page. Lève au-delà de
         `_RATE_LIMIT_ATTEMPTS`, et lève aussi quand le budget ne laisse plus le temps
         d'une attente : dans les deux cas la source finit en `error`, nommée dans la
-        ligne de couverture, au lieu de passer pour vide.
+        ligne de couverture, au lieu de passer pour vide. `keyed` : l'appel porte la clé
+        du serveur, et les attentes sont celles de `KEYED_429_WAITS_S`.
         """
-        if attempt + 1 >= _RATE_LIMIT_ATTEMPTS:
-            raise RuntimeError(f"{source} : 429 après {_RATE_LIMIT_ATTEMPTS} tentatives "
-                               f"(limite de débit ; une clé d'API la relèverait)")
+        _waits = KEYED_429_WAITS_S if keyed else ()
+        if attempt + 1 >= (len(_waits) + 1 if keyed else _RATE_LIMIT_ATTEMPTS):
+            raise RuntimeError(f"{source} : 429 après {len(_waits) + 1 if keyed else _RATE_LIMIT_ATTEMPTS} "
+                               "tentatives " + ("malgré la clé d'API (limite de débit de la source)" if keyed
+                                                else "(limite de débit ; une clé d'API la relèverait)"))
         try:
             _after = float((getattr(resp, "headers", None) or {}).get("Retry-After") or 0)
         except (TypeError, ValueError):
             _after = 0.0
-        _delay = min(max(_after, 2.0 * (attempt + 1)), _RATE_LIMIT_MAX_SLEEP_S)
+        _delay = (max(_after, _waits[attempt]) if keyed
+                  else min(max(_after, 2.0 * (attempt + 1)), _RATE_LIMIT_MAX_SLEEP_S))
         _delay = min(_delay, max(0.0, _fed_deadline[0] - _time.time()))
         if _delay <= 0:
             raise RuntimeError(f"{source} : 429 et budget de fédération épuisé")
@@ -2210,7 +2222,7 @@ def _run_user_scenario_populate(
                         "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
                         params=_p, headers=s2_headers_paced(), timeout=25), "Semantic Scholar", retry_429=False)
                     if _r.status_code == 429:
-                        _wait_out_rate_limit(_r, _429, "Semantic Scholar")
+                        _wait_out_rate_limit(_r, _429, "Semantic Scholar", keyed=bool(s2_key()))
                         _429 += 1
                         continue
                     _429 = 0                      # cette page est passée
@@ -2237,7 +2249,7 @@ def _run_user_scenario_populate(
                         headers=s2_headers_paced(), timeout=20,
                     ), "Semantic Scholar", retry_429=False)
                     if _r.status_code == 429:
-                        _wait_out_rate_limit(_r, _429, "Semantic Scholar")
+                        _wait_out_rate_limit(_r, _429, "Semantic Scholar", keyed=bool(s2_key()))
                         _429 += 1
                         continue
                     _429 = 0                      # cette page est passée
