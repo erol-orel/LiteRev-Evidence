@@ -16,6 +16,13 @@ from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql, reset_corpus_derived_caches,
                              screening_status_sql)
 
+def _learning():
+    """api.learning, later in the import order (it reads the link table this module
+    writes): imported when needed, as every module does for the ones after it."""
+    from . import learning
+    return learning
+
+
 class DoubleBlindDecisionIn(BaseModel):
     article_id: int
     # Conservé pour compatibilité ascendante, mais IGNORÉ : le rôle est déduit du code
@@ -352,6 +359,8 @@ def submit_double_blind_decision(
             _write_ars_screening(conn, scenario_id, payload.article_id,
                                  final_status if agreement else "pending")
 
+    # Every decision teaches the queue (api/learning.py), once it is committed.
+    _learning().schedule_retrain(scenario_id)
     return {
         "id": payload.article_id,
         "reviewer": reviewer,
@@ -397,6 +406,7 @@ def resolve_conflict(
         # revue décidait du sort de l'article dans toutes les autres.
         # Statut de screening de cette revue
         _write_ars_screening(conn, scenario_id, article_id, final_status, notes=arbitrator_notes)
+    _learning().schedule_retrain(scenario_id)
     return {"id": article_id, "final_status": final_status, "resolved": True}
 
 
@@ -509,7 +519,10 @@ def get_user_scenario_double_blind_queue(
     pouvait jamais exister.
 
     Le lot est le sous-ensemble pertinent, trié par pertinence : on ne demande pas à un
-    relecteur de juger un article que la revue n'a pas retenu. Quand l'échantillon
+    relecteur de juger un article que la revue n'a pas retenu. Dès que les décisions
+    prises ont entraîné un modèle (api/learning.py, `learned_score`), c'est lui qui
+    ordonne le lot, ce que `ordering` dit, et `learning` porte son état : la liste met en
+    premier ce que les décisions rendent probable. Quand l'échantillon
     d'audit est allumé, ses articles s'y ajoutent, marqués `audit_sample`, et sont
     intercalés à proportion (chaque partie avance au même rythme : un article d'audit
     tous les dix, pour mille pertinents et cent d'audit), pour que les deux kappas se
@@ -527,7 +540,7 @@ def get_user_scenario_double_blind_queue(
             WITH audit AS ({_audit_pool_sql()}),
             q AS (
                 SELECT d.id, d.title, d.abstract, d.year, d.journal, d.doi,
-                       ars.similarity_score, ars.rerank_score,
+                       ars.similarity_score, ars.rerank_score, ars.learned_score,
                        ars.reviewer_1_status, ars.reviewer_2_status,
                        (au.document_id IS NOT NULL) AS audit_sample,
                        CASE WHEN au.document_id IS NOT NULL
@@ -544,11 +557,12 @@ def get_user_scenario_double_blind_queue(
         rows = conn.execute(text(f"""
             {pending}
             SELECT id, title, abstract, year, journal, doi, similarity_score, rerank_score,
-                   reviewer_1_status, reviewer_2_status, audit_sample
+                   learned_score, reviewer_1_status, reviewer_2_status, audit_sample
             FROM (
                 SELECT q.*,
                        ROW_NUMBER() OVER (PARTITION BY audit_sample
                            ORDER BY audit_key,
+                                    learned_score DESC NULLS LAST,
                                     COALESCE(rerank_score, similarity_score, 0) DESC NULLS LAST,
                                     id) AS rn,
                        COUNT(*) OVER (PARTITION BY audit_sample) AS n_part
@@ -564,10 +578,13 @@ def get_user_scenario_double_blind_queue(
             FROM q
         """), params).mappings().first() or {}
     n_rel, n_aud = int(counts.get("relevant") or 0), int(counts.get("audit") or 0)
+    learning = _learning().learning_summary(scenario_id)
     return {
         "scenario_id": scenario_id, "reviewer": reviewer, "reviewer_code": code,
         "remaining": n_rel + n_aud, "remaining_relevant": n_rel, "remaining_audit": n_aud,
         "audit_sample_size": n_audit, "returned": len(rows),
+        "ordering": "learned" if learning.get("trained") else "relevance",
+        "learning": learning,
         "articles": [dict(r) for r in rows],
     }
 

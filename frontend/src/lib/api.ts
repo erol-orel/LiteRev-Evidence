@@ -2455,6 +2455,27 @@ export async function submitDoubleBlindDecision(
   return r.json();
 }
 
+/** The model trained on this scenario's own decisions (api/learning.py): the queue
+ *  follows its `learned_score` once it is trained, and it says what it still expects. */
+export interface LearningStatus {
+  trained: boolean;
+  n_included: number;
+  n_excluded: number;
+  /** Decisions of each kind needed before the first model is trained. */
+  min_per_class?: number;
+  n_scored?: number;
+  representation?: "embeddings" | "tfidf" | null;
+  trained_at?: string | null;
+  /** Cross-validated AUC, once there are enough decisions to measure it. */
+  cv_auc?: number | null;
+  /** Undecided articles of the relevant set, and how many of them the model expects to be included. */
+  remaining_relevant?: number;
+  expected_relevant_left?: number | null;
+  /** Undecided articles below the threshold the model would include, and the first of them. */
+  below_threshold_suggested?: number;
+  suggested?: Array<{ id: number; title: string; year?: number | null; learned_score?: number | null }>;
+}
+
 export interface DoubleBlindQueue {
   scenario_id: string;
   reviewer: 1 | 2;
@@ -2465,6 +2486,9 @@ export interface DoubleBlindQueue {
   remaining_audit?: number;
   audit_sample_size?: number;
   returned: number;
+  /** "learned" once a model trained on this scenario's decisions orders the list. */
+  ordering?: "learned" | "relevance";
+  learning?: LearningStatus | null;
   articles: Array<{
     id: number;
     title: string;
@@ -2474,6 +2498,8 @@ export interface DoubleBlindQueue {
     doi?: string | null;
     similarity_score?: number | null;
     rerank_score?: number | null;
+    /** Probability of inclusion, from the model trained on this scenario's decisions. */
+    learned_score?: number | null;
     reviewer_1_status?: string | null;
     reviewer_2_status?: string | null;
     /** Drawn below the threshold to audit the automatic exclusion. */

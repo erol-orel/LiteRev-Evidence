@@ -378,7 +378,8 @@ for the scripts, tools and tests.
 | `living_review` | living review status, run and trigger |
 | `clustering` | clustering jobs, UMAP/HDBSCAN core, visualisation cache, per-language summaries, endpoints |
 | `knowledge_graph` | the article similarity network, and the **concept map**: typed concepts per article (`concepts_json`, normalised once by the LLM in both languages), co-occurrence links, chains, evidence gaps, `/concept-graph` |
-| `double_blind` | double-blind decisions, conflicts, Cohen's kappa |
+| `double_blind` | double-blind decisions, conflicts, Cohen's kappa; the queue follows `learned_score` once a model is trained |
+| `learning` | the queue learns from the decisions: after each one, a logistic regression on the scenario's decided articles (stored embeddings, else TF-IDF) scores every article (`article_scenarios.learned_score`), `scenario_learning` keeps its state, `/learned-ranking` reports what it still expects and the below-threshold articles it would include |
 | `alerts` | alert subscriptions, digests, SMTP |
 | `scenarios` | `user_scenarios` DDL, CRUD, folders, detail, corpus endpoint, populate/pipeline launchers and job dicts, counts, activity, embedding status, model status |
 | `pipeline` | `_run_user_scenario_populate`, `_run_user_scenario_full_pipeline`, the full-pipeline endpoint |

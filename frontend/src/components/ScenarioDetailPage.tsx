@@ -6260,6 +6260,55 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               </span>
             )}
           </p>
+          {/* Le lot apprend des décisions (api/learning.py) : dès que le scénario porte
+              assez d'inclusions et d'exclusions, un modèle entraîné sur SES décisions
+              ordonne la liste, dit ce qu'il attend encore, et désigne les articles sous
+              le seuil qu'il inclurait. */}
+          {queue.learning && (
+            <div className="rounded-xl border border-brand-500/15 bg-brand-500/5 px-3 py-2 text-[10px] text-white/60 space-y-1">
+              <p className="font-semibold text-brand-300/90">{t("scenarioDetail.doubleBlind.learningTitle")}</p>
+              {queue.learning.trained ? (
+                <>
+                  <p>
+                    {t("scenarioDetail.doubleBlind.learningTrained")
+                      .replace("{included}", String(queue.learning.n_included))
+                      .replace("{excluded}", String(queue.learning.n_excluded))
+                      .replace("{remaining}", (queue.learning.remaining_relevant ?? 0).toLocaleString())
+                      .replace("{left}", queue.learning.expected_relevant_left != null
+                        ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")}
+                  </p>
+                  {queue.learning.cv_auc != null && (
+                    <p className="text-white/40">
+                      {t("scenarioDetail.doubleBlind.learningAuc").replace("{auc}", queue.learning.cv_auc.toFixed(2))}
+                    </p>
+                  )}
+                  {(queue.learning.below_threshold_suggested ?? 0) > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-gold-300/90">
+                        {t("scenarioDetail.doubleBlind.learningSuggested")
+                          .replace("{n}", String(queue.learning.below_threshold_suggested))}
+                      </p>
+                      <ul className="list-disc pl-4 text-white/50">
+                        {(queue.learning.suggested ?? []).slice(0, 5).map(s => (
+                          <li key={s.id}>
+                            {s.title}{s.year ? ` (${s.year})` : ""} · {t("scenarioDetail.doubleBlind.learningBadge")
+                              .replace("{score}", (s.learned_score ?? 0).toFixed(2))}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p>
+                  {t("scenarioDetail.doubleBlind.learningNotYet")
+                    .replace(/\{min\}/g, String(queue.learning.min_per_class ?? 3))
+                    .replace("{included}", String(queue.learning.n_included))
+                    .replace("{excluded}", String(queue.learning.n_excluded))}
+                </p>
+              )}
+            </div>
+          )}
           {queue.articles.length === 0 ? (
             <p className="text-[10px] text-white/35">{t("scenarioDetail.doubleBlind.queueEmpty")}</p>
           ) : (
@@ -6284,6 +6333,9 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                       : art.similarity_score != null
                         ? <span>sim {art.similarity_score.toFixed(3)}</span>
                         : null}
+                    {art.learned_score != null
+                      ? <span className="text-brand-300/80">{t("scenarioDetail.doubleBlind.learningBadge").replace("{score}", art.learned_score.toFixed(2))}</span>
+                      : null}
                     {art.audit_sample
                       ? <span className="rounded bg-gold-500/15 border border-gold-500/30 px-1.5 text-gold-300">{t("scenarioDetail.doubleBlind.auditBadge")}</span>
                       : null}

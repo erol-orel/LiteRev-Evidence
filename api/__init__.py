@@ -28,6 +28,7 @@ MODULES = (
     "digest",
     "exports",
     "review",
+    "learning",
     "subsets",
     "evidence",
     "report",

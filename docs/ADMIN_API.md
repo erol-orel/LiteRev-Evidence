@@ -117,6 +117,8 @@ curl -s "${auth[@]}" -X POST "$BASE/fulltext/fetch?scenario_id=usr-XXXX&limit=10
 |--------|------|------|---------|
 | POST | `/scenarios/{id}/rerank` | ✅ | Cohere cross-encoder rerank of the relevant subset |
 | GET | `/scenarios/{id}/rerank/status` | ✅ | rerank progress |
+| GET | `/user-scenarios/{id}/learned-ranking` | open | the model trained on this scenario's own screening decisions (`api/learning.py`): decisions counted, representation, cross-validated AUC, how many relevant articles it still expects among the undecided, and the below-threshold articles it would include |
+| POST | `/user-scenarios/{id}/learned-ranking/retrain` | ✅ | train now and score every article (`learned_score`); every decision endpoint already does it in the background, this is for decisions made before the feature existed or imported |
 
 ---
 

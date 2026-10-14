@@ -1076,7 +1076,16 @@ export const fr = {
       toScreen: "{remaining} articles à juger (votre vote)",
       toScreenSplit: "dont {audit} de l'échantillon d'audit",
       queueEmpty: "Vous avez statué sur tous les articles pertinents de ce scénario.",
-      auditToggle: "Juger aussi un échantillon aléatoire de {n} articles sous le seuil",
+      learningTitle: "La liste apprend de vos décisions",
+      learningNotYet:
+        "Après {min} décisions d'inclusion et {min} d'exclusion ({included} et {excluded} pour l'instant), la liste se réordonne d'après ce que vous décidez ; d'ici là elle suit le score de pertinence.",
+      learningTrained:
+        "Entraîné sur {included} inclusions et {excluded} exclusions : la liste met en premier ce que vos décisions rendent probable. Parmi les {remaining} articles pertinents restants, le modèle en attend environ {left} à inclure.",
+      learningAuc: "AUC en validation croisée {auc} (1 : il sépare parfaitement vos décisions, 0,5 : le hasard).",
+      learningSuggested:
+        "{n} articles sous le seuil de pertinence ressemblent à ce que vous incluez. Retrouvez-les dans l'onglet Corpus pour les inclure à la main :",
+      learningBadge: "appris {score}",
+      auditToggle:"Juger aussi un échantillon aléatoire de {n} articles sous le seuil",
       auditToggleHint: "Contrôle l'exclusion automatique : le même échantillon pour les deux relecteurs, marqué dans la liste, avec son propre kappa.",
       auditToggleFailed: "L'option n'a pas été enregistrée : réessayez (clé d'API ou réseau).",
       auditBadge: "Échantillon d'audit · sous le seuil",
