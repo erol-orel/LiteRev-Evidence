@@ -26,6 +26,7 @@ import {
   fetchScenarioPrisma,
   fetchScenarioCounts,
   uploadModelData,
+  retryFailedSources,
   uploadScenarioPapers,
   type UploadPapersReport,
   screenArticle,
@@ -4584,6 +4585,13 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
   const [data, setData] = useState<ScenarioPrisma | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Les notes de méthode du premier cadre : repliées par défaut. Elles disent comment la
+  // recherche a été faite (champs interrogés, requêtes découpées, tranches d'années,
+  // préprints, repli mots-clés, plafonds) : nécessaires pour une section Méthodes, mais
+  // une douzaine de paragraphes au-dessus des chiffres les noyait.
+  const [showNotes, setShowNotes] = useState(false);
+  const [retry, setRetry] = useState<{ busy: boolean; msg: string | null; error: boolean }>(
+    { busy: false, msg: null, error: false });
 
   useEffect(() => {
     setLoading(true);
@@ -4652,6 +4660,24 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     ...(ident.sources_cut_off ?? []),
     ...(ident.sources_skipped ?? []),
   ];
+  // Celles qu'une relance PEUT rattraper : une source en échec ou coupée par le budget.
+  // Une source SAUTÉE ne l'est pas (pas de clé, préprints exclus) : la relancer ne ferait
+  // que la sauter de nouveau.
+  const failedSources = [...(ident.sources_failed ?? []), ...(ident.sources_cut_off ?? [])];
+  // Combien de notes de méthode sont repliées : compté sur LES MÊMES conditions que les
+  // blocs rendus plus bas, pour que le lien ne promette jamais un nombre qui n'y est pas.
+  const methodNotes = [
+    (ident.sources_capped?.length ?? 0) > 0,
+    (ident.unranked_sources ?? []).some((s) => ident.sources_capped?.includes(s)),
+    (ident.title_abstract_sources?.length ?? 0) > 0,
+    (ident.facets_skipped?.length ?? 0) > 0,
+    Boolean(ident.local_match_capped),
+    Boolean(ident.preprints_excluded),
+    ident.per_source_cap != null,
+    ident.method !== "rebuild" && Boolean(ident.computed_at),
+  ].filter(Boolean).length
+    + Object.keys(ident.split_queries ?? {}).length
+    + Object.keys(ident.year_slices ?? {}).length;
   // Les sources dont la réponse incomplète a fait garder le corpus d'avant la recherche.
   const keptBecause = (ident.kept_previous_failed_sources?.length ?? 0) > 0
     ? (ident.kept_previous_failed_sources ?? [])
@@ -4668,6 +4694,8 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
     }
     return Array.from(groups.entries());
   })();
+  // Le repli mots-clés compte aussi parmi les notes repliées : un paragraphe par requête.
+  const methodNotesTotal = methodNotes + fallbackGroups.length;
   const outcomeStyle = (o?: string): string =>
     o == null ? "bg-slate-800/60 text-slate-300"
       : o === "error" ? "bg-rose-900/40 text-rose-300"
@@ -4822,20 +4850,51 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               ))}
             </div>
           )}
-          {/* Le paragraphe qu'un relecteur peut citer : la recherche est-elle complète ? */}
+          {/* Le paragraphe qu'un relecteur peut citer : la recherche est-elle complète ?
+              Et, juste dessous, le bouton qui y remédie : les sources en échec ne sont PAS
+              mémorisées, celles qui ont répondu le sont (SOURCE_CACHE_TTL_S), donc une
+              relance n'interroge que les premières. Sans ce bouton, la seule issue connue
+              était de relancer la recherche entière. */}
           {(notSearched.length > 0 || ident.federation_incomplete) && (
-            <p className="text-[10px] text-amber-300/80 pt-1 leading-relaxed">
-              {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
-                .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
-              {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
-              {/* La raison, en clair sous le paragraphe : une infobulle ne se cite pas
-                  dans un rapport, et c'est ce paragraphe qu'un relecteur recopie. */}
-              {Object.entries(ident.source_error_reasons ?? {}).map(([src, why]) => (
-                <span key={src} className="block text-rose-300/70">
-                  {(SOURCE_LABELS_MAP[src] ?? src)} : {why}
-                </span>
-              ))}
-            </p>
+            <div className="pt-1 space-y-1">
+              <p className="text-[10px] text-amber-300/80 leading-relaxed">
+                {notSearched.length > 0 && t("scenarioDetail.prisma.coverageIncomplete")
+                  .replace("{sources}", notSearched.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+                {ident.federation_incomplete ? ` ${t("scenarioDetail.prisma.federationIncomplete")}` : ""}
+                {/* La raison, en clair sous le paragraphe : une infobulle ne se cite pas
+                    dans un rapport, et c'est ce paragraphe qu'un relecteur recopie. */}
+                {Object.entries(ident.source_error_reasons ?? {}).map(([src, why]) => (
+                  <span key={src} className="block text-rose-300/70">
+                    {(SOURCE_LABELS_MAP[src] ?? src)} : {why}
+                  </span>
+                ))}
+              </p>
+              {failedSources.length > 0 && hasApiKey() && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={retry.busy}
+                    onClick={() => {
+                      setRetry({ busy: true, msg: null, error: false });
+                      retryFailedSources(scenarioId)
+                        .then((r) => setRetry({ busy: false, error: false,
+                          msg: t("scenarioDetail.prisma.retryStarted")
+                            .replace("{sources}", r.retrying.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", ")) }))
+                        .catch((e: Error) => setRetry({ busy: false, msg: e.message, error: true }));
+                    }}
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/20 transition disabled:opacity-50"
+                  >
+                    {retry.busy ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                    {t("scenarioDetail.prisma.retryFailed")
+                      .replace("{sources}", failedSources.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
+                  </button>
+                  <span className="text-[10px] text-white/35">{t("scenarioDetail.prisma.retryHint")}</span>
+                  {retry.msg && (
+                    <span className={retry.error ? "text-[10px] text-rose-300" : "text-[10px] text-brand-300"}>{retry.msg}</span>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           {/* Le corpus d'avant la recherche, gardé parce qu'une source n'a pas répondu en
               entier : une relance pendant une panne d'Europe PMC faisait tomber le corpus
@@ -4847,6 +4906,26 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 .replace("{sources}", keptBecause.map((s) => SOURCE_LABELS_MAP[s] ?? s).join(", "))}
             </p>
           )}
+          {/* ── Les notes de MÉTHODE, repliées ───────────────────────────────────
+              Comment la recherche a été faite : plafonds atteints, champs interrogés,
+              requêtes découpées, tranches d'années, préprints, repli mots-clés, date.
+              Chacune compte pour une section Méthodes, et toutes ensemble faisaient une
+              douzaine de paragraphes au-dessus des chiffres. Elles tiennent derrière un
+              seul lien, qui dit combien il y en a ; rien n'est retiré. Ce qui APPELLE une
+              action (une source en échec, le corpus gardé d'une recherche incomplète)
+              reste au-dessus, visible. */}
+          {methodNotesTotal > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowNotes((v) => !v)}
+              className="w-full pt-1 text-left text-[10px] text-emerald-300/60 underline underline-offset-2 hover:text-emerald-300"
+            >
+              {showNotes
+                ? t("scenarioDetail.prisma.methodNotesHide")
+                : t("scenarioDetail.prisma.methodNotesShow").replace("{n}", String(methodNotesTotal))}
+            </button>
+          )}
+          {showNotes && (<>
           {/* La stratégie RÉELLEMENT soumise, quand elle n'a pas été la même pour toutes.
               Sans cette ligne, les notices des sources en repli se lisaient comme le
               produit de la requête booléenne affichée au-dessus. */}
@@ -4982,6 +5061,7 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               {t("scenarioDetail.prisma.searchedOn").replace("{date}", new Date(ident.computed_at).toLocaleDateString())}
             </div>
           )}
+          </>)}
         </PrismaStageCard>
 
         <PrismaConnector />

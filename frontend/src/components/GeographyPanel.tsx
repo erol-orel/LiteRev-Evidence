@@ -99,23 +99,45 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-3 text-[10px] text-white/40">
-        <span className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white/60">
-          {g.nuts_source === "loaded" ? T("sourceLoaded").replace("{n}", String(regions ?? 0)) : T("sourceBuiltin")}
-        </span>
-        {keyed ? (
-          <>
-            <button onClick={() => fileRef.current?.click()}
-              className="flex items-center gap-1.5 rounded-lg border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-brand-300 hover:bg-brand-500/20 transition">
-              <Upload size={10} />{T("upload")}
-            </button>
-            <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
-              onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }} />
-          </>
-        ) : <span>{T("needsKey")}</span>}
-        {msg && <span className="text-gold-300/80">{msg}</span>}
-      </div>
-      <p className="text-[10px] text-white/35 max-w-[680px] leading-4">{T(g.nuts_source === "loaded" ? "loadedHint" : "builtinHint")}</p>
+      {/* La liste NUTS est chargée UNE FOIS pour le serveur (table geo_nuts) : elle survit
+          aux redémarrages et sert tous les scénarios. Le bouton restait pourtant affiché en
+          grand, à côté du message « 1 932 régions chargées », comme s'il fallait recommencer.
+          Une fois chargée, elle tient en une ligne, et le remplacement est un lien discret. */}
+      {g.nuts_source === "loaded" ? (
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-white/40">
+          <span className="text-white/55">{T("sourceLoaded").replace("{n}", String(regions ?? 0))}</span>
+          <span title={T("loadedHint")} className="cursor-help text-white/30">ⓘ</span>
+          {keyed && (
+            <>
+              <button onClick={() => fileRef.current?.click()}
+                className="text-white/35 underline underline-offset-2 hover:text-white/70">
+                {T("replace")}
+              </button>
+              <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
+                onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }} />
+            </>
+          )}
+          {msg && <span className="text-gold-300/80">{msg}</span>}
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-3 text-[10px] text-white/40">
+            <span className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white/60">{T("sourceBuiltin")}</span>
+            {keyed ? (
+              <>
+                <button onClick={() => fileRef.current?.click()}
+                  className="flex items-center gap-1.5 rounded-lg border border-brand-500/30 bg-brand-500/10 px-2.5 py-1 text-brand-300 hover:bg-brand-500/20 transition">
+                  <Upload size={10} />{T("upload")}
+                </button>
+                <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
+                  onChange={(e) => { void upload(e.target.files?.[0]); e.target.value = ""; }} />
+              </>
+            ) : <span>{T("needsKey")}</span>}
+            {msg && <span className="text-gold-300/80">{msg}</span>}
+          </div>
+          <p className="text-[10px] text-white/35 max-w-[680px] leading-4">{T("builtinHint")}</p>
+        </>
+      )}
 
       {g.n_unresolved > 0 && (
         <div>

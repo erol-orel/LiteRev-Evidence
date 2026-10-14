@@ -1523,6 +1523,39 @@ export async function uploadScenarioPapers(
   return response.json();
 }
 
+/** The sources of the last search that did not answer, and what a retry would do
+ *  (api/scenarios.py). The ones that answered are replayed from the cache, so a retry
+ *  queries only the failing ones. */
+export interface FailedSourcesState {
+  scenario_id: string;
+  failed: string[];
+  reasons: Record<string, string>;
+  replayed_from_cache: string[];
+  cache_ttl_hours: number;
+  retryable: boolean;
+  search_running: boolean;
+}
+
+export async function fetchFailedSources(scenarioId: string): Promise<FailedSourcesState> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/sources/failed`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/** Query the failing sources again, and only those. */
+export async function retryFailedSources(
+  scenarioId: string,
+): Promise<{ status: string; retrying: string[]; replayed_from_cache: string[]; message: string }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/sources/retry-failed`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 export interface ModelDataUploadResponse {
   status: string;
   dataset_id?: number;
