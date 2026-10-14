@@ -85,6 +85,39 @@ def s2_headers_paced() -> dict:
 #: L'URL de base de la recherche Europe PMC, écrite une fois : quatre appels la répétaient.
 EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
+#: Au-delà de cette longueur de requête ENCODÉE, Europe PMC est interrogée en POST.
+#: Mesuré sur trois scénarios de production, la même stratégie envoyée en GET :
+#:
+#:     EXP_HPAI           4 604 octets encodés   200
+#:     EXP_HPAI_criteria  5 598 octets encodés   503
+#:     HPAI_team          6 435 octets encodés   503
+#:
+#: Ce n'est donc pas une panne passagère : toute stratégie de revue un peu longue dépasse
+#: ce que leur serveur accepte dans une URL, et aucun nouvel essai ne peut aboutir, puisque
+#: c'est la même URL. L'API accepte les mêmes paramètres dans le CORPS d'un POST, où la
+#: longueur ne joue plus. Même remède que pour eutils (`EUTILS_POST_ABOVE`). La borne est
+#: prise bien en dessous de la première taille observée en échec.
+EPMC_POST_ABOVE_ENCODED = 3000
+
+
+def epmc_send(requests_mod, params: dict, timeout: float = 20.0, headers: dict | None = None):
+    """Un appel à la recherche Europe PMC : GET pour une requête courte, POST pour une
+    longue (cf. EPMC_POST_ABOVE_ENCODED).
+
+    Si leur serveur refusait le POST (405/501), l'appel est retenté en GET : on ne perd
+    pas la source sur une méthode non supportée, on retombe sur le comportement d'avant.
+    Rend la réponse telle quelle ; l'appelant lève pour un code d'erreur, comme avant."""
+    import urllib.parse as _up
+    encoded = len(_up.quote_plus(str(params.get("query") or "")))
+    if encoded <= EPMC_POST_ABOVE_ENCODED:
+        return requests_mod.get(EPMC_SEARCH_URL, params=params, timeout=timeout, headers=headers)
+    resp = requests_mod.post(EPMC_SEARCH_URL, data=params, timeout=timeout,
+                             headers={**(headers or {}), "Content-Type": "application/x-www-form-urlencoded"})
+    if getattr(resp, "status_code", 0) in (405, 501):
+        logger.warning("Europe PMC refuse le POST (%s) : nouvel essai en GET.", resp.status_code)
+        return requests_mod.get(EPMC_SEARCH_URL, params=params, timeout=timeout, headers=headers)
+    return resp
+
 
 def epmc_query(boolean: str) -> str:
     """La requête telle qu'Europe PMC la comprend : SANS les tags de champ de PubMed.
@@ -558,7 +591,7 @@ def _live_fetch_europepmc(query: str, max_results: int) -> list[dict]:
         # NB : ne PAS passer sort=RELEVANCE - c'est une valeur invalide pour
         # EuropePMC qui renvoie alors une liste vide. Sans 'sort', l'API trie
         # par pertinence par défaut.
-        r = _req.get(EPMC_SEARCH_URL, params={
+        r = epmc_send(_req, {
             # Sans les tags de champ de PubMed, qu'Europe PMC apparie comme du texte.
             "query": epmc_query(query), "resultType": "lite", "pageSize": min(max_results, 50),
             "format": "json"
@@ -590,7 +623,7 @@ def _live_fetch_preprints(query: str, max_results: int) -> list[dict]:
     import requests as _req
     results = []
     try:
-        r = _req.get(EPMC_SEARCH_URL, params={
+        r = epmc_send(_req, {
             "query": f"({epmc_query(query)}) AND (SRC:PPR)", "resultType": "lite",
             "pageSize": min(max_results, 50), "format": "json",
         }, headers={"User-Agent": "LiteRev/1.0 (mailto:api@literev.app)"}, timeout=10)

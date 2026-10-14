@@ -75,6 +75,7 @@ from .search import (
 from .sources import (
     EPMC_SEARCH_URL,
     NCBI_ESEARCH_CEILING,
+    epmc_send,
     _NCBI_LAST,
     _NCBI_LOCK,
     _NCBI_MIN_INTERVAL,
@@ -2037,13 +2038,15 @@ def _run_user_scenario_populate(
             while _ep_fetched < _ep_limit:
                 if _budget_exhausted():
                     break  # budget fédération dépassé - on arrête de paginer
-                ep_resp = _with_retries(lambda: _requests.get(
-                    EPMC_SEARCH_URL,
+                ep_resp = _with_retries(lambda: epmc_send(
+                    _requests,
                     # Pas de tri par date : on laisse le tri par PERTINENCE (défaut Europe PMC)
                     # → au plafond de 2000, on garde les plus pertinents et non les plus récents.
-                    params={"query": _epmc_q, "format": "json", "pageSize": _ep_page_size,
-                            "resultType": "core",
-                            "cursorMark": _ep_cursor_mark},
+                    # Une stratégie longue part en POST : dans une URL, leur serveur répond 503
+                    # (cf. EPMC_POST_ABOVE_ENCODED), et aucun nouvel essai n'y changeait rien.
+                    {"query": _epmc_q, "format": "json", "pageSize": _ep_page_size,
+                     "resultType": "core",
+                     "cursorMark": _ep_cursor_mark},
                     timeout=20,
                 ), "Europe PMC")
                 ep_resp.raise_for_status()
@@ -2111,13 +2114,13 @@ def _run_user_scenario_populate(
             while _pp_fetched < _cap_strategy:
                 if _budget_exhausted():
                     break  # budget fédération dépassé
-                _pp_resp = _with_retries(lambda: _requests.get(
-                    EPMC_SEARCH_URL,
+                _pp_resp = _with_retries(lambda: epmc_send(
+                    _requests,
                     # Par PERTINENCE (le tri par défaut d'Europe PMC), comme toutes les bases
                     # qui le permettent : au plafond, on garde les préprints les plus
                     # pertinents. Triés par date, on gardait les plus récents.
-                    params={"query": _pp_query, "format": "json", "pageSize": 100,
-                            "resultType": "core", "cursorMark": _pp_cursor},
+                    {"query": _pp_query, "format": "json", "pageSize": 100,
+                     "resultType": "core", "cursorMark": _pp_cursor},
                     timeout=20,
                 ), "Europe PMC preprints")
                 _pp_resp.raise_for_status()
