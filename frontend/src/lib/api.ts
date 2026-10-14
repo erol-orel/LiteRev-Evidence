@@ -1154,6 +1154,9 @@ export interface ScenarioPrisma {
      *  excluded, a double-blind vote, an arbitration): a search never deletes that work.
      *  Counted in records_screened. */
     kept_reviewed_links?: number;
+    /** Records the search did not match, kept because a reviewer added them by hand (an
+     *  uploaded file). Counted in records_screened. */
+    kept_added_links?: number;
     removed_not_matching?: number;
     removed_other_reasons?: number;
     /** A search without preprints: the preprints other databases returned, removed before
@@ -1459,6 +1462,64 @@ export async function uploadScenarioDataset(
     throw new Error(text || `Upload failed with status ${response.status}`);
   }
 
+  return response.json();
+}
+
+/** One paper of an upload, as the server reports it (api/additions.py). */
+export interface UploadedPaper {
+  id?: number;
+  title: string;
+  year?: number | null;
+  doi?: string | null;
+  pmid?: string | null;
+  /** added: linked to the corpus by this upload; already_in_corpus: it was there; failed: not ingested. */
+  status: "added" | "already_in_corpus" | "failed";
+  /** The library had no such record before. */
+  new_document?: boolean;
+  /** Marked as included by hand by this upload. */
+  included?: boolean;
+  /** A reviewer had already decided on it: the decision was kept. */
+  kept_decision?: boolean;
+  fulltext_stored?: boolean;
+  /** For a PDF: where its title and abstract come from. */
+  metadata_from?: "crossref" | "text" | null;
+  error?: string | null;
+  file: string;
+}
+
+export interface UploadPapersReport {
+  scenario_id: string;
+  include: boolean;
+  files: Array<{ name: string; kind: string | null; records: number; added: number;
+                 already_in_corpus: number; skipped: number; error?: string | null }>;
+  totals: { records: number; added: number; new_documents: number; already_in_corpus: number;
+            skipped: number; included: number; kept_decision: number; fulltext_stored: number;
+            files_failed: number };
+  /** The cosine scoring of the new links was started (false: a scoring already runs, or
+   *  OpenAI is not configured; the corpus page triggers the next pass). */
+  scoring_started: boolean;
+  articles: UploadedPaper[];
+}
+
+/** Outside papers into a scenario's corpus: PDFs, or RIS, BibTeX, nbib, CSV, Excel files.
+ *  `include` marks them as included by hand (relevant whatever their score). */
+export async function uploadScenarioPapers(
+  scenarioId: string,
+  files: File[],
+  include: boolean,
+): Promise<UploadPapersReport> {
+  const formData = new FormData();
+  for (const f of files) formData.append("files", f);
+  const base = scenarioBase(scenarioId);
+  const response = await safeFetch(`${base}/${scenarioId}/articles/upload?include=${include ? "true" : "false"}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Upload failed with status ${response.status}`);
+  }
   return response.json();
 }
 

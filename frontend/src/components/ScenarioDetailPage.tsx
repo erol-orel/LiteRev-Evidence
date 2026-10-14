@@ -26,6 +26,8 @@ import {
   fetchScenarioPrisma,
   fetchScenarioCounts,
   uploadModelData,
+  uploadScenarioPapers,
+  type UploadPapersReport,
   screenArticle,
   fetchArticlePico,
   fetchAllScenarioPico,
@@ -2415,9 +2417,138 @@ function YearHistogram({ distribution }: { distribution: { year: number; count: 
   );
 }
 
-function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
+/** Outside papers into the corpus (api/additions.py): the files chosen, one request, and
+ *  the report of what each became: added, already there, or not read. */
+function AddPapersPanel({ scenarioId, onClose, onAdded }:
+  { scenarioId: string; onClose: () => void; onAdded: () => void }) {
+  const { t } = useI18n();
+  const [files, setFiles] = useState<File[]>([]);
+  const [include, setInclude] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<UploadPapersReport | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const fmt = (key: string, vars: Record<string, string | number>) =>
+    Object.entries(vars).reduce((s, [k, v]) => s.replace(`{${k}}`, String(v)), t(key));
+  const submit = async () => {
+    if (!files.length) { setError(t("scenarioDetail.corpus.addPapersNoFile")); return; }
+    setBusy(true); setError(null); setReport(null);
+    try {
+      const r = await uploadScenarioPapers(scenarioId, files, include);
+      setReport(r);
+      setFiles([]);
+      if (inputRef.current) inputRef.current.value = "";
+      if (r.totals.added + r.totals.already_in_corpus > 0) onAdded();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const statusKey = (s: string) => s === "added" ? "scenarioDetail.corpus.addPapersStatusAdded"
+    : s === "already_in_corpus" ? "scenarioDetail.corpus.addPapersStatusAlready"
+    : "scenarioDetail.corpus.addPapersStatusFailed";
+  const statusStyle = (s: string) => s === "added" ? "bg-brand-500/15 text-brand-300"
+    : s === "already_in_corpus" ? "bg-white/5 text-white/50" : "bg-rose-500/15 text-rose-300";
+  return (
+    <div className="rounded-2xl border border-brand-500/20 bg-brand-500/5 px-4 py-3 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold text-brand-200 flex items-center gap-1.5">
+            <Upload size={12} />{t("scenarioDetail.corpus.addPapersTitle")}
+          </p>
+          <p className="text-[11px] text-white/55 leading-relaxed mt-1">
+            {fmt("scenarioDetail.corpus.addPapersHelp", { files: 50, mb: 30 })}
+          </p>
+        </div>
+        <button type="button" onClick={onClose} className="text-white/40 hover:text-white/80"
+                title={t("scenarioDetail.corpus.addPapersClose")}>
+          <X size={14} />
+        </button>
+      </div>
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:text-white cursor-pointer">
+          <FileText size={11} />{t("scenarioDetail.corpus.addPapersChoose")}
+          <input ref={inputRef} type="file" multiple
+                 accept=".pdf,.ris,.bib,.bibtex,.nbib,.txt,.csv,.tsv,.xlsx"
+                 className="hidden"
+                 onChange={e => setFiles(Array.from(e.target.files ?? []))} />
+        </label>
+        {files.length > 0 && (
+          <span className="text-[11px] text-white/50">
+            {fmt("scenarioDetail.corpus.addPapersChosen", { n: files.length })}
+          </span>
+        )}
+        <label className="flex items-center gap-1.5 text-[11px] text-white/70 cursor-pointer">
+          <input type="checkbox" checked={include} onChange={e => setInclude(e.target.checked)}
+                 className="accent-brand-500" />
+          {t("scenarioDetail.corpus.addPapersInclude")}
+        </label>
+        <button type="button" onClick={submit} disabled={busy || files.length === 0}
+          className="flex items-center gap-1.5 rounded-xl border border-brand-500/30 bg-brand-500/15 px-3 py-1.5 text-[11px] font-semibold text-brand-200 hover:bg-brand-500/25 transition disabled:opacity-50">
+          {busy ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+          {busy ? t("scenarioDetail.corpus.addPapersBusy")
+                : fmt("scenarioDetail.corpus.addPapersSubmit", { n: files.length })}
+        </button>
+      </div>
+      {error && (
+        <p className="text-[11px] text-rose-300">{t("scenarioDetail.corpus.addPapersFailed")} : {error}</p>
+      )}
+      {report && (
+        <div className="space-y-1.5 text-[11px]">
+          <p className="text-white/80 font-medium">
+            {fmt("scenarioDetail.corpus.addPapersDone", {
+              added: report.totals.added, newDocs: report.totals.new_documents,
+              already: report.totals.already_in_corpus, skipped: report.totals.skipped })}
+          </p>
+          {report.totals.included > 0 && (
+            <p className="text-brand-300">{fmt("scenarioDetail.corpus.addPapersIncluded", { n: report.totals.included })}</p>
+          )}
+          {report.totals.kept_decision > 0 && (
+            <p className="text-white/55">{fmt("scenarioDetail.corpus.addPapersKeptDecision", { n: report.totals.kept_decision })}</p>
+          )}
+          {report.totals.fulltext_stored > 0 && (
+            <p className="text-white/55">{fmt("scenarioDetail.corpus.addPapersFulltext", { n: report.totals.fulltext_stored })}</p>
+          )}
+          {(report.totals.added + report.totals.already_in_corpus) > 0 && (
+            <p className={report.scoring_started ? "text-white/55" : "text-gold-300/80"}>
+              {t(report.scoring_started ? "scenarioDetail.corpus.addPapersScoring" : "scenarioDetail.corpus.addPapersNoScoring")}
+            </p>
+          )}
+          {report.files.filter(f => f.error).map(f => (
+            <p key={f.name} className="text-rose-300/80">
+              {fmt("scenarioDetail.corpus.addPapersFileError", { file: f.name, error: f.error ?? "" })}
+            </p>
+          ))}
+          {report.articles.length > 0 && (
+            <ul className="max-h-48 overflow-y-auto space-y-1 pt-1 border-t border-white/5">
+              {report.articles.map((a, i) => (
+                <li key={`${a.id ?? "x"}-${i}`} className="flex items-start gap-2 text-white/70">
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${statusStyle(a.status)}`}>
+                    {t(statusKey(a.status))}
+                  </span>
+                  <span className="min-w-0">
+                    {a.title}{a.year ? ` (${a.year})` : ""}
+                    {a.metadata_from && (
+                      <span className="text-white/35"> · {t(a.metadata_from === "crossref"
+                        ? "scenarioDetail.corpus.addPapersFromCrossref" : "scenarioDetail.corpus.addPapersFromText")}</span>
+                    )}
+                    {a.error && <span className="text-rose-300/80"> · {a.error}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged }:
   { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts;
-    onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void }) {
+    onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void;
+    onCorpusChanged?: () => void }) {
   const { t } = useI18n();
   const [data, setData] = useState<ScenarioCorpus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2425,6 +2556,8 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  // Outside papers (PDF, RIS, BibTeX, nbib, CSV, Excel) added by hand to the corpus.
+  const [showAdd, setShowAdd] = useState(false);
   // Recherche DANS le corpus. La liste est paginée côté serveur, donc la recherche
   // l'est aussi : filtrer ici n'aurait cherché que dans les cent articles affichés.
   const [query, setQuery] = useState("");
@@ -2669,8 +2802,39 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold }:
               </button>
             )}
             <RelevantExportMenu scenarioId={scenarioId} threshold={threshold} />
+            <button
+              type="button"
+              onClick={() => setShowAdd(v => !v)}
+              aria-pressed={showAdd}
+              title={t("scenarioDetail.corpus.addPapersTitle")}
+              className={`flex items-center gap-1 rounded-full border px-3 py-1 text-[10px] font-semibold transition ${
+                showAdd
+                  ? "bg-brand-500/20 border-brand-500/40 text-brand-200"
+                  : "bg-brand-500/10 border-brand-500/30 text-brand-300 hover:bg-brand-500/20"
+              }`}
+            >
+              <Upload size={10} />{t("scenarioDetail.corpus.addPapers")}
+            </button>
           </div>
         </div>
+
+        {/* Des articles que la recherche ne peut pas atteindre (une base non interrogée,
+            un PDF sur le bureau) : déposés ici, ils rejoignent le corpus, y restent aux
+            recherches suivantes, et sont scorés comme les autres. */}
+        {showAdd && (
+          <AddPapersPanel
+            scenarioId={scenarioId}
+            onClose={() => setShowAdd(false)}
+            onAdded={() => {
+              const shown = Math.max(CORPUS_PAGE_SIZE, data.articles.length);
+              fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}), ...search })
+                .then(setData)
+                .catch(() => {});
+              fetchUserScenarioEmbeddingStatus(scenarioId).then(setEmbeddingStatus).catch(() => {});
+              onCorpusChanged?.();
+            }}
+          />
+        )}
 
         {/* Chercher DANS le corpus. La recherche est faite en base, sur tout le corpus :
             la liste n'affiche que cent articles à la fois, et un filtre posé sur ce qui
@@ -4598,6 +4762,11 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
                 )}
                 {num(ident.kept_reviewed_links) > 0 && (
                   <PrismaRow label={t("scenarioDetail.prisma.keptReviewedLinks")} value={`+${num(ident.kept_reviewed_links).toLocaleString()}`} />
+                )}
+                {/* Ajoutés à la main (fichier déposé) et non retrouvés par la recherche :
+                    gardés eux aussi, sur leur ligne. */}
+                {num(ident.kept_added_links) > 0 && (
+                  <PrismaRow label={t("scenarioDetail.prisma.keptAddedLinks")} value={`+${num(ident.kept_added_links).toLocaleString()}`} />
                 )}
                 {/* Le corpus a changé depuis la recherche (reconstruction, pages tardives d'une
                     source, doublons marqués ensuite) : l'écart a sa ligne, dans son sens, pour
@@ -7577,6 +7746,7 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
           <CorpusSection
             key={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
             threshold={liveThreshold} counts={counts}
+            onCorpusChanged={() => onRefreshCounts?.()}
             onUseAsThreshold={(kind, value) =>
               setAskedThreshold(a => ({ kind, value, nonce: (a?.nonce ?? 0) + 1 }))} />
         </div>

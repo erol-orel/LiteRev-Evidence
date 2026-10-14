@@ -380,6 +380,7 @@ for the scripts, tools and tests.
 | `knowledge_graph` | the article similarity network, and the **concept map**: typed concepts per article (`concepts_json`, normalised once by the LLM in both languages), co-occurrence links, chains, evidence gaps, `/concept-graph` |
 | `double_blind` | double-blind decisions, conflicts, Cohen's kappa; the queue follows `learned_score` once a model is trained |
 | `learning` | the queue learns from the decisions: after each one, a logistic regression on the scenario's decided articles (stored embeddings, else TF-IDF) scores every article (`article_scenarios.learned_score`), `scenario_learning` keeps its state, `/learned-ranking` reports what it still expects and the below-threshold articles it would include |
+| `additions` | papers added by hand from uploaded files (PDF read with pdftotext and completed from Crossref; RIS, BibTeX, nbib, CSV, Excel parsed here): the same ingestion as a search result, a link to the scenario remembered in `scenario_additions` (a later search keeps it, `_set_scenario_corpus`; the PRISMA card counts it, `kept_added_links`), optional inclusion by hand, the cosine scoring started at once |
 | `alerts` | alert subscriptions, digests, SMTP |
 | `scenarios` | `user_scenarios` DDL, CRUD, folders, detail, corpus endpoint, populate/pipeline launchers and job dicts, counts, activity, embedding status, model status |
 | `pipeline` | `_run_user_scenario_populate`, `_run_user_scenario_full_pipeline`, the full-pipeline endpoint |
