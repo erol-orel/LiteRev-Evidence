@@ -1523,6 +1523,97 @@ export async function uploadScenarioPapers(
   return response.json();
 }
 
+/** One record of a review being imported, and what the import would do with it
+ *  (api/review_import.py). */
+export interface ImportPlanRow {
+  title: string;
+  doi?: string | null;
+  pmid?: string | null;
+  year?: number | null;
+  /** What the file says, once read: included, excluded, or nothing. */
+  decision: "included" | "excluded" | null;
+  /** The cell as it was written, when it decided nothing. */
+  decision_raw?: string | null;
+  reason?: string | null;
+  id?: number | null;
+  matched_by?: "doi" | "pmid" | "title" | null;
+  current_status?: string | null;
+  action: "apply" | "already" | "conflict" | "overwrite_conflict" | "add_and_include"
+        | "not_in_corpus" | "no_decision";
+}
+
+export interface ImportDecisionsReport {
+  scenario_id: string;
+  filename: string;
+  kind: string;
+  header: string[];
+  /** Which column was read as which field. */
+  mapping: Record<string, string>;
+  /** What a model proposes when the header is not recognised: a person confirms it. */
+  suggested_mapping?: Record<string, string>;
+  /** Set when nothing could be read: the reason, with the header above to map from. */
+  unreadable?: string | null;
+  counts: Record<string, number>;
+  plan: ImportPlanRow[];
+}
+
+export interface ImportDecisionsResult {
+  import_id: number | null;
+  counts: Record<string, number>;
+  applied: number;
+  added: number;
+  filename: string;
+  mapping: Record<string, string>;
+  conflicts: ImportPlanRow[];
+}
+
+/** What importing this review's decisions would do. Writes nothing. */
+export async function previewDecisions(
+  scenarioId: string, file: File, mapping?: Record<string, string>,
+): Promise<ImportDecisionsReport> {
+  const body = new FormData();
+  body.append("file", file);
+  if (mapping) body.append("mapping", JSON.stringify(mapping));
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/decisions/preview`, {
+    method: "POST", headers: authHeaders(), body,
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/** Apply the decisions. `overwrite` lets the file win over a decision made here. */
+export async function importDecisions(
+  scenarioId: string, file: File, opts: { mapping?: Record<string, string>; overwrite?: boolean;
+                                          addMissing?: boolean } = {},
+): Promise<ImportDecisionsResult> {
+  const body = new FormData();
+  body.append("file", file);
+  if (opts.mapping) body.append("mapping", JSON.stringify(opts.mapping));
+  const q = new URLSearchParams({
+    overwrite: opts.overwrite ? "true" : "false",
+    add_missing: opts.addMissing === false ? "false" : "true",
+  });
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/decisions/import?${q}`, {
+    method: "POST", headers: authHeaders(), body,
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+/** Put back what the last import changed. */
+export async function undoDecisionImport(
+  scenarioId: string,
+): Promise<{ import_id: number; restored: number }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/decisions/undo`, {
+    method: "POST", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 /** The sources of the last search that did not answer, and what a retry would do
  *  (api/scenarios.py). The ones that answered are replayed from the cache, so a retry
  *  queries only the failing ones. */
