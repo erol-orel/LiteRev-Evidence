@@ -1175,11 +1175,12 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             ids = _boolean_corpus_ids(boolean, filters)        # base LOCALE uniquement
             n_corpus = _set_scenario_corpus(scenario_id, ids)  # fixe l'appartenance
             _n_dup_rows = _dedup_scenario_links(scenario_id)   # un seul lien / article distinct
-            # Les liens qu'un relecteur a jugés restent, même hors de la correspondance
-            # locale (_set_scenario_corpus) : ils sont au corpus, et la carte les compte
-            # sur leur ligne. La reconstruction les supprimait avec leur décision.
+            # Les liens qu'un relecteur a jugés, ou ajoutés à la main, restent, même hors
+            # de la correspondance locale (_set_scenario_corpus) : ils sont au corpus, et
+            # la carte les compte sur leur ligne. La reconstruction les supprimait avec
+            # leur décision.
             _kept = _kept_link_counts(scenario_id, ids)
-            n_corpus = n_corpus - _n_dup_rows + _kept["reviewed"]
+            n_corpus = n_corpus - _n_dup_rows + _kept["reviewed"] + _kept.get("added", 0)
             # L'appartenance vient de changer : les cartes décrivaient l'ancien corpus, et
             # le scoring qui suit ne voit pas les articles RETIRÉS. Elles restaient servies
             # jusqu'à 30 jours. (Le scoring périme de nouveau ce qu'il change lui-même.)
@@ -1196,7 +1197,8 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             # garde donc ce que la dernière recherche avait établi, sous son propre nom.
             _figs = _prisma_identification_figures(
                 {}, len(set(ids)), _n_dup_rows, max(0, n_corpus), method="rebuild",
-                records_from_library=len(ids), kept_reviewed_links=_kept["reviewed"])
+                records_from_library=len(ids), kept_reviewed_links=_kept["reviewed"],
+                kept_added_links=_kept.get("added", 0))
             _prev = _load_prisma_identification(scenario_id) or {}
             if _prev.get("method") == "populate":
                 _figs["last_search"] = {
@@ -1289,6 +1291,17 @@ _AUTOSCORE_MAX_RETRY_S = 6 * 3600
 _AUTOSCORE_MAX_STALLS = 8
 _AUTOSCORE: dict[str, dict] = {}
 _autoscore_lock = threading.Lock()
+
+
+def score_new_links(scenario_id: str) -> bool:
+    """Start the automatic cosine scoring now for the links that wait for a score (an
+    article just added by hand, api/additions.py), without the pause between two
+    automatic passes: the reviewer who added a paper is looking at the corpus. Returns
+    True when a pass was started (not when one is already running, or when OpenAI is not
+    configured: the corpus page triggers the next one)."""
+    with _autoscore_lock:
+        _AUTOSCORE.setdefault(scenario_id, {"interval": AUTOSCORE_RETRY_S, "stalls": 0})["not_before"] = 0.0
+    return _maybe_autorerank(scenario_id)
 
 
 def _schedule_autoscore(scenario_id: str, delay_s: float) -> threading.Timer:

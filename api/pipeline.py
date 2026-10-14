@@ -2812,7 +2812,7 @@ def _run_user_scenario_populate(
             # document identifié qui n'est resté que parce que le corpus l'avait déjà
             # (fédération incomplète) ou qu'un relecteur en avait décidé compte parmi les
             # retraits, et revient sur la ligne des liens gardés (_kept_link_counts).
-            _kept = {"reviewed": 0, "previous": 0}
+            _kept = {"reviewed": 0, "added": 0, "previous": 0}
             if _matched is not None:
                 _kept = _kept_link_counts(scenario_id, _matched)
             _kept_no_abs, _not_linked, _pp_out = 0, 0, 0
@@ -2886,7 +2886,8 @@ def _run_user_scenario_populate(
                 # incomplète), puis les liens qu'un relecteur a jugés.
                 kept_previous_links=_kept["previous"],
                 kept_previous_failed_sources=list(_incomplete_sources),
-                kept_reviewed_links=_kept["reviewed"])
+                kept_reviewed_links=_kept["reviewed"],
+                kept_added_links=_kept.get("added", 0))
             _store_prisma_identification(scenario_id, _figures)
             # Le même total pour tout le monde : le statut du job expose le corpus
             # RETENU (= article_count = « passés au screening » du PRISMA), et non le

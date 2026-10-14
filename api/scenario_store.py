@@ -187,6 +187,15 @@ def reviewer_decision_sql(link: str = "ars") -> str:
             f" OR {link}.kappa_final_status IS NOT NULL)")
 
 
+def added_by_hand_sql(link: str = "ars") -> str:
+    """The predicate "this link was added by hand" (a file uploaded by a reviewer,
+    api/additions.py), read on `link` (article_scenarios) through `scenario_additions`.
+    Like a reviewer's decision, an addition is human work: no search deletes such a link,
+    and the PRISMA card counts it on its own line. Never NULL. Pure."""
+    return (f"EXISTS (SELECT 1 FROM scenario_additions sa"
+            f" WHERE sa.scenario_id = {link}.scenario_id AND sa.document_id = {link}.document_id)")
+
+
 def relevant_gate_sql(doc: str = "d", link: str = "ars", thr: str = ":thr") -> str:
     """Le prédicat SQL du sous-ensemble pertinent, à mettre dans un WHERE.
 

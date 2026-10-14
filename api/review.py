@@ -359,7 +359,8 @@ def get_user_scenario_prisma(
             **({"kept_previous_links": int(_rec.get("kept_previous_links") or 0),
                 "kept_previous_failed_sources": [str(s) for s in
                                                  (_figures.get("kept_previous_failed_sources") or [])],
-                "kept_reviewed_links": int(_rec.get("kept_reviewed_links") or 0)}
+                "kept_reviewed_links": int(_rec.get("kept_reviewed_links") or 0),
+                "kept_added_links": int(_rec.get("kept_added_links") or 0)}
                if _figures.get("kept_previous_links") is not None
                or _figures.get("kept_reviewed_links") is not None else {}),
             "embedded": embedded,

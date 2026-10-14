@@ -18,7 +18,8 @@ import lexical_search as _lex
 
 from .core import _norm_lang, app, engine, logger, require_api_key
 from .documents import PREPRINT_DOI_RE, _strategy_is_degraded, same_work_survivors
-from .scenario_store import _get_user_scenario_or_404, has_abstract_sql, reviewer_decision_sql
+from .scenario_store import (_get_user_scenario_or_404, added_by_hand_sql, has_abstract_sql,
+                             reviewer_decision_sql)
 from llm_usage import model_for as _model
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1244,12 +1245,16 @@ def _multi_query_corpus_ids(sub_queries: list[dict], combinator: str, filters: d
 def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False,
                          keep: list | None = None) -> int:
     """Fixe le corpus d'un scénario à `ids` (appartenance booléenne) : insère les liens
-    manquants et supprime ceux qui n'en font plus partie, SAUF deux sortes de liens.
+    manquants et supprime ceux qui n'en font plus partie, SAUF trois sortes de liens.
 
       - Ceux qui portent la décision d'un relecteur (`reviewer_decision_sql`). La
         suppression était inconditionnelle : une recherche relancée effaçait une inclusion
         à la main avec son motif et ses votes dès que sa requête n'appariait plus
         l'article. Ils restent, et la carte PRISMA les compte (`kept_reviewed_links`).
+      - Ceux ajoutés à la main (`added_by_hand_sql` : un fichier déposé par un relecteur,
+        api/additions.py). Même raison : un article qu'une personne a mis dans le corpus
+        n'en sort pas parce qu'une requête ne le retrouve pas. La carte les compte
+        (`kept_added_links`).
       - Ceux dont le document est dans `keep` : le corpus d'avant une recherche dont la
         fédération n'a pas abouti (une source en échec, ou coupée par le budget de
         temps). Une source qui n'a pas répondu ne dit rien des liens qu'elle aurait
@@ -1277,6 +1282,7 @@ def _set_scenario_corpus(scenario_id: str, ids: list, allow_empty: bool = False,
               AND NOT (a.document_id = ANY(CAST(:ids AS bigint[])))
               AND NOT (a.document_id = ANY(CAST(:keep AS bigint[])))
               AND NOT {reviewer_decision_sql('a')}
+              AND NOT {_added_by_hand_predicate('a')}
         """), {"sid": scenario_id, "ids": list(ids), "keep": [int(k) for k in (keep or [])]})
         if ids:
             # Insertion en masse (un seul aller-retour) plutôt qu'une requête par
@@ -1321,26 +1327,53 @@ def _ids_within_criteria(ids, filters: dict | None) -> list[int]:
     return [int(r) for r in rows]
 
 
+#: `scenario_additions` existe-t-elle ? Mémorisé une fois VRAI (la table est créée au
+#: démarrage, cf. api/additions.py), re-sondé tant que la réponse est non : un import qui
+#: poserait la question avant la DDL ne doit pas figer « non » pour la vie du processus.
+_ADDITIONS_TABLE = [False]
+
+
+def _added_by_hand_predicate(link: str = "a") -> str:
+    """`added_by_hand_sql`, ou `FALSE` quand la table des ajouts n'existe pas.
+
+    Le prédicat est sur le CHEMIN DE LA RECHERCHE (_set_scenario_corpus) : sur une base
+    antérieure à la fonctionnalité, ou dont la DDL n'a pas pu passer, une sous-requête vers
+    une table absente ferait échouer le DELETE, donc toute recherche. `FALSE` rend
+    exactement le comportement d'avant : aucun lien n'est tenu pour ajouté à la main."""
+    if not _ADDITIONS_TABLE[0]:
+        try:
+            with engine.connect() as _c:
+                _ADDITIONS_TABLE[0] = bool(_c.execute(text(
+                    "SELECT to_regclass('scenario_additions') IS NOT NULL")).scalar())
+        except Exception as _e:                              # noqa: BLE001 - jamais bloquant
+            logger.warning(f"_added_by_hand_predicate: {_e}")
+            return "FALSE"
+    return added_by_hand_sql(link) if _ADDITIONS_TABLE[0] else "FALSE"
+
+
 def _kept_link_counts(scenario_id: str, matched) -> dict[str, int]:
     """Les liens du corpus que la recherche n'a PAS appariés (hors de `matched`) et qui
-    sont restés, par raison : la décision d'un relecteur (`reviewed`), sinon le corpus
-    d'avant une fédération incomplète (`previous`).
+    sont restés, par raison : la décision d'un relecteur (`reviewed`), sinon un ajout à
+    la main (`added`), sinon le corpus d'avant une fédération incomplète (`previous`).
 
     Lu après l'assemblage et la dédup, sur les documents non doublons : ce sont des
     « passés au screening » que la recherche n'a pas produits. Sans leur ligne,
     identifiés moins doublons moins retraits ne menait plus au corpus, ou les retraits
     étaient rognés pour que le compte retombe juste."""
     _decided = reviewer_decision_sql("a")
+    _added = _added_by_hand_predicate("a")
     with engine.connect() as _c:
         row = _c.execute(text(f"""
-            SELECT COUNT(DISTINCT a.document_id) FILTER (WHERE {_decided})     AS reviewed,
-                   COUNT(DISTINCT a.document_id) FILTER (WHERE NOT {_decided}) AS previous
+            SELECT COUNT(DISTINCT a.document_id) FILTER (WHERE {_decided})                    AS reviewed,
+                   COUNT(DISTINCT a.document_id) FILTER (WHERE NOT {_decided} AND {_added})     AS added,
+                   COUNT(DISTINCT a.document_id) FILTER (WHERE NOT {_decided} AND NOT {_added}) AS previous
             FROM article_scenarios a
             JOIN literature_document d ON d.id = a.document_id
             WHERE a.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
               AND NOT (a.document_id = ANY(CAST(:ids AS bigint[])))
         """), {"sid": scenario_id, "ids": [int(i) for i in (matched or [])]}).mappings().first() or {}
-    return {"reviewed": int(row.get("reviewed") or 0), "previous": int(row.get("previous") or 0)}
+    return {"reviewed": int(row.get("reviewed") or 0), "added": int(row.get("added") or 0),
+            "previous": int(row.get("previous") or 0)}
 
 
 def _dedup_scenario_links(scenario_id: str) -> int:
@@ -1561,6 +1594,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    kept_previous_links: int = 0,
                                    kept_previous_failed_sources: list | None = None,
                                    kept_reviewed_links: int = 0,
+                                   kept_added_links: int = 0,
                                    year_slices: dict | None = None,
                                    year_slices_capped: dict | None = None) -> dict[str, Any]:
     """Chiffres PRISMA 2020 de l'étape « identification », calculés à partir de ce qu'une
@@ -1647,6 +1681,8 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                              retire.
     kept_reviewed_links    : les liens que la recherche n'a pas appariés et qui restent parce
                              qu'un relecteur en a décidé (inclus, exclu, vote, arbitrage).
+    kept_added_links       : ceux qui restent parce qu'un relecteur les a ajoutés à la main
+                             (un fichier déposé, api/additions.py), sans décision encore.
     year_slices            : les sources dont la requête a été lue par tranches d'années de
                              publication, et ces tranches (PubMed : eutils ne rend pas plus
                              de 10 000 identifiants par recherche). Le total de la source
@@ -1721,14 +1757,15 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
     # relecteur, puis corpus d'avant une fédération incomplète. Ils sont parmi les passés
     # au screening, jamais au-delà.
     kept_reviewed = min(corpus, max(0, int(kept_reviewed_links or 0)))
-    kept_previous = min(corpus - kept_reviewed, max(0, int(kept_previous_links or 0)))
+    kept_added = min(corpus - kept_reviewed, max(0, int(kept_added_links or 0)))
+    kept_previous = min(corpus - kept_reviewed - kept_added, max(0, int(kept_previous_links or 0)))
     # Retraits AVANT screening, ventilés : sans résumé (l'ancienne règle, 0 désormais),
     # préprints d'une recherche qui les exclut, hors requête (enregistrement d'une source
     # par mots-clés qui ne correspond pas au booléen en local), et le reste (résiduel -
     # p. ex. un document marqué doublon global). Chacun est borné à ce qui reste à
     # expliquer, dans cet ordre, pour que identifiés − doublons − retraits + gardés =
     # passés au screening tienne toujours.
-    to_explain = max(0, unique_after + kept_reviewed + kept_previous - corpus)
+    to_explain = max(0, unique_after + kept_reviewed + kept_added + kept_previous - corpus)
     # Zéro pour une recherche nouvelle (les notices sans résumé sont gardées, cf.
     # `kept_no_abstract`) ; le paramètre reste pour un appelant qui en retire encore.
     no_abstract = min(to_explain, max(0, int(removed_no_abstract or 0)))
@@ -1812,6 +1849,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "kept_previous_failed_sources": (sorted({_source_label(s) for s in (kept_previous_failed_sources or [])})
                                          if kept_previous else []),
         "kept_reviewed_links": kept_reviewed,
+        "kept_added_links": kept_added,
         # Dont sans résumé : gardées, à juger sur le titre à la main (un sous-compte des
         # passés au screening, jamais un retrait).
         "kept_no_abstract": min(corpus, max(0, int(kept_no_abstract or 0))),
@@ -1865,6 +1903,7 @@ def _reconcile_prisma_identification(figures: dict, corpus_now: int) -> dict[str
         "removed_other_reasons": other,
         "kept_previous_links": int(figures.get("kept_previous_links") or 0),
         "kept_reviewed_links": int(figures.get("kept_reviewed_links") or 0),
+        "kept_added_links": int(figures.get("kept_added_links") or 0),
         "removed_before_screening": no_abstract + preprints + not_matching + other,
         "records_screened_at_search": screened_then,
         "added_after_search": max(0, corpus_now - screened_then),

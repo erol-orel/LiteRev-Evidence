@@ -29,6 +29,7 @@ MODULES = (
     "exports",
     "review",
     "learning",
+    "additions",
     "subsets",
     "evidence",
     "report",
