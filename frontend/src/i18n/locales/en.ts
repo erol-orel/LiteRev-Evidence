@@ -1076,6 +1076,15 @@ export const en: Translations = {
       toScreen: "{remaining} articles to screen (your vote)",
       toScreenSplit: "including {audit} from the audit sample",
       queueEmpty: "You have voted on every relevant article of this scenario.",
+      learningTitle: "The list learns from your decisions",
+      learningNotYet:
+        "After {min} included and {min} excluded decisions ({included} and {excluded} so far), the list reorders itself from what you decide; until then it follows the relevance score.",
+      learningTrained:
+        "Trained on {included} included and {excluded} excluded decisions: the list puts first what your decisions make likely. Among the {remaining} relevant articles left, the model expects about {left} to be included.",
+      learningAuc: "Cross-validated AUC {auc} (1 means it separates your decisions perfectly, 0.5 means chance).",
+      learningSuggested:
+        "{n} articles below the relevance threshold look like what you include. Find them in the Corpus tab to include them by hand:",
+      learningBadge: "learned {score}",
       auditToggle: "Also screen a random sample of {n} articles below the threshold",
       auditToggleHint: "Audits the automatic exclusion: the same sample for both reviewers, marked in the list, with its own kappa.",
       auditToggleFailed: "The option was not saved: try again (API key or network).",

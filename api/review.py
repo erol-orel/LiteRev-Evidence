@@ -674,6 +674,9 @@ def screen_user_scenario_article(
     # dans la même transaction : `_write_ars_screening` s'en charge pour tous ses appelants.
     with engine.begin() as conn:
         _write_ars_screening(conn, scenario_id, article_id, status, reason, notes)
+    # Every decision teaches the double-blind queue (api/learning.py), once committed.
+    from . import learning
+    learning.schedule_retrain(scenario_id)
     return {"id": article_id, "status": status, "updated": True, "scope": "scenario"}
 
 

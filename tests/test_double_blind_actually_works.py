@@ -60,6 +60,7 @@ def seeded(db_conn):
         cur.execute(
             "CREATE TABLE article_scenarios (scenario_id text, document_id bigint,"
             "similarity_score double precision, rerank_score double precision,"
+            "learned_score double precision,"
             "screening_status text, screening_reason text, screening_notes text,"
             "screened_at timestamp, reviewer_1_status varchar(20), reviewer_1_reason text,"
             "reviewer_2_status varchar(20), reviewer_2_reason text,"
