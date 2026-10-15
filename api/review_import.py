@@ -121,7 +121,9 @@ def decision_of(value: Any) -> str | None:
 #: It is the export a team most often arrives with (the ISS team's own file holds 1,524
 #: records this way), and no column of it says "decision": read as a plain reason column,
 #: every row came back undecided.
-_RAYYAN_VOTES = re.compile(r"RAYYAN-INCLUSION:\s*\{(.*?)\}", re.S)
+#: The votes, with or without the braces Rayyan writes them in: a BibTeX note loses them
+#: on the way through `_bib_fields`, which strips a value's inner braces.
+_RAYYAN_VOTES = re.compile(r"RAYYAN-INCLUSION:\s*(.*?)(?=\|\s*RAYYAN-|$)", re.S)
 _RAYYAN_ONE_VOTE = re.compile(r'"[^"]*"\s*=>\s*"([^"]+)"')
 _RAYYAN_REASONS = re.compile(r"RAYYAN-EXCLUSION-REASONS:\s*([^|]+)")
 
@@ -241,7 +243,13 @@ def records_with_decisions(data: bytes, kind: str, mapping: dict | None = None) 
     from .additions import _decode
     recs = parser(_decode(data))
     for rec in recs:
-        rec["decision"], rec["decision_raw"], rec["reason"] = None, None, None
+        # RIS and BibTeX have no decision field, so a reference file brings the papers and
+        # nothing more, EXCEPT where a screening tool wrote its own block into a note:
+        # Rayyan does, in RIS `N1` and BibTeX `note`, and exports the ISS team sent arrive
+        # that way. The note itself is dropped: it carries the reviewer's name.
+        found, why = rayyan_decision(rec.pop("notes", None))
+        rec["decision"], rec["reason"] = found, why
+        rec["decision_raw"] = "RAYYAN-INCLUSION" if found or why else None
     return recs, [], {}
 
 

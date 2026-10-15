@@ -87,6 +87,38 @@ def test_a_rayyan_row_never_carries_a_reviewer_name_into_the_corpus():
     assert "Claudia" not in str(recs[0]["reason"]) and "RAYYAN" not in str(recs[0]["reason"])
 
 
+def test_a_rayyan_reference_file_carries_its_decisions_too():
+    """Rayyan exports RIS, BibTeX and CSV, and a team sends whichever its reviewer clicked.
+    RIS and BibTeX have no decision field, so the decision rides inside a note: `N1` in
+    RIS, `note` in BibTeX. Read without that, the ISS team's own BibTeX of their 73
+    inclusions imported as 73 undecided records."""
+    ris = ('TY  - JOUR\nTI  - Seroprevalence of avian influenza among poultry cullers\n'
+           'DO  - 10.5555/imp.r1\nPY  - 2019\n'
+           'N1  - RAYYAN-INCLUSION: {"Claudia"=>"Included"} | RAYYAN-LABELS: EU,occupational exposure\n'
+           'ER  - \n\n'
+           'TY  - JOUR\nTI  - A study of something else entirely\nDO  - 10.5555/imp.r2\n'
+           'N1  - RAYYAN-INCLUSION: {"Claudia"=>"Excluded"} | RAYYAN-EXCLUSION-REASONS: Extra EU\n'
+           'ER  - \n')
+    recs, _h, _c = main.records_with_decisions(ris.encode(), "ris", None)
+    assert [r["decision"] for r in recs] == ["included", "excluded"]
+    assert recs[0]["reason"] is None and recs[1]["reason"] == "Extra EU"
+
+    bib = ('@article{key1,\n  title={Protective measures among poultry workers},\n'
+           '  doi={10.5555/imp.b1},\n  year={2021},\n'
+           '  note={RAYYAN-INCLUSION: {"Claudia"=>"Included"} | RAYYAN-LABELS: EU,occupational exposure},\n}\n')
+    recs, _h, _c = main.records_with_decisions(bib.encode(), "bibtex", None)
+    assert len(recs) == 1 and recs[0]["decision"] == "included"
+    # Whatever the format, the note itself never follows the paper into the corpus.
+    assert all("Claudia" not in str(r.get("reason")) and "notes" not in r for r in recs)
+
+
+def test_a_reference_file_without_a_screening_note_stays_undecided():
+    """And a plain RIS, the kind a reference manager exports, still decides nothing."""
+    ris = 'TY  - JOUR\nTI  - An ordinary record from a reference manager\nPY  - 2020\nER  - \n'
+    recs, _h, _c = main.records_with_decisions(ris.encode(), "ris", None)
+    assert len(recs) == 1 and recs[0]["decision"] is None and recs[0]["decision_raw"] is None
+
+
 def test_the_decision_and_reason_columns_are_found_by_name():
     cols = main.map_decision_columns(["Key", "Title", "Authors", "DOI", "Decision", "Exclusion Reason", "Year"])
     assert cols["decision"] == "Decision" and cols["reason"] == "Exclusion Reason"
