@@ -186,10 +186,22 @@ def _decode(data: bytes) -> str:
     return data.decode("utf-8", "ignore")
 
 
+def screening_note_of(values: list) -> str | None:
+    """The note block a screening tool writes into a reference file, or None.
+
+    Rayyan exports its decisions nowhere but inside a note: `N1` in RIS, `note` in BibTeX.
+    Only a value carrying its marker is kept, because only that one holds a decision the
+    import can read; an ordinary note is left where it is, a reviewer's remark being
+    nobody's business here. `api/review_import.py` reads the decision out of it."""
+    kept = [str(v) for v in values if v and "RAYYAN-" in str(v)]
+    return " | ".join(kept) if kept else None
+
+
 def parse_ris(text_: str) -> list[dict]:
     """RIS: `TAG  - value` lines, records closed by `ER  -`; a line without a tag
     continues the previous value. Title TI/T1, abstract AB/N2, DOI DO, year PY/Y1/DA,
-    authors AU/A1, journal JO/JF/T2."""
+    authors AU/A1, journal JO/JF/T2. A screening tool's note block rides along as
+    `notes`, for the decision import to read."""
     recs: list[dict[str, list[str]]] = []
     cur: dict[str, list[str]] = {}
     last: str | None = None
@@ -221,6 +233,9 @@ def parse_ris(text_: str) -> list[dict]:
         rec = make_record(first("TI", "T1", "CT"), first("AB", "N2"), first("DO"), first("PM"),
                           first("PY", "Y1", "DA"), authors, first("JO", "JF", "T2", "J2", "JA"), first("UR"))
         if rec:
+            note = screening_note_of([v for values in r.values() for v in values])
+            if note:
+                rec["notes"] = note
             out.append(rec)
     return out
 
@@ -278,6 +293,9 @@ def parse_bibtex(text_: str) -> list[dict]:
                           f.get("year") or f.get("date"), authors,
                           f.get("journal") or f.get("journaltitle") or f.get("booktitle"), f.get("url"))
         if rec:
+            note = screening_note_of(list(f.values()))       # Rayyan writes its block in `note`
+            if note:
+                rec["notes"] = note
             out.append(rec)
     return out
 

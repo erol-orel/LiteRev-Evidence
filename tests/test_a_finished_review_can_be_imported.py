@@ -87,6 +87,38 @@ def test_a_rayyan_row_never_carries_a_reviewer_name_into_the_corpus():
     assert "Claudia" not in str(recs[0]["reason"]) and "RAYYAN" not in str(recs[0]["reason"])
 
 
+def test_a_rayyan_reference_file_carries_its_decisions_too():
+    """Rayyan exports RIS, BibTeX and CSV, and a team sends whichever its reviewer clicked.
+    RIS and BibTeX have no decision field, so the decision rides inside a note: `N1` in
+    RIS, `note` in BibTeX. Read without that, the ISS team's own BibTeX of their 73
+    inclusions imported as 73 undecided records."""
+    ris = ('TY  - JOUR\nTI  - Seroprevalence of avian influenza among poultry cullers\n'
+           'DO  - 10.5555/imp.r1\nPY  - 2019\n'
+           'N1  - RAYYAN-INCLUSION: {"Claudia"=>"Included"} | RAYYAN-LABELS: EU,occupational exposure\n'
+           'ER  - \n\n'
+           'TY  - JOUR\nTI  - A study of something else entirely\nDO  - 10.5555/imp.r2\n'
+           'N1  - RAYYAN-INCLUSION: {"Claudia"=>"Excluded"} | RAYYAN-EXCLUSION-REASONS: Extra EU\n'
+           'ER  - \n')
+    recs, _h, _c = main.records_with_decisions(ris.encode(), "ris", None)
+    assert [r["decision"] for r in recs] == ["included", "excluded"]
+    assert recs[0]["reason"] is None and recs[1]["reason"] == "Extra EU"
+
+    bib = ('@article{key1,\n  title={Protective measures among poultry workers},\n'
+           '  doi={10.5555/imp.b1},\n  year={2021},\n'
+           '  note={RAYYAN-INCLUSION: {"Claudia"=>"Included"} | RAYYAN-LABELS: EU,occupational exposure},\n}\n')
+    recs, _h, _c = main.records_with_decisions(bib.encode(), "bibtex", None)
+    assert len(recs) == 1 and recs[0]["decision"] == "included"
+    # Whatever the format, the note itself never follows the paper into the corpus.
+    assert all("Claudia" not in str(r.get("reason")) and "notes" not in r for r in recs)
+
+
+def test_a_reference_file_without_a_screening_note_stays_undecided():
+    """And a plain RIS, the kind a reference manager exports, still decides nothing."""
+    ris = 'TY  - JOUR\nTI  - An ordinary record from a reference manager\nPY  - 2020\nER  - \n'
+    recs, _h, _c = main.records_with_decisions(ris.encode(), "ris", None)
+    assert len(recs) == 1 and recs[0]["decision"] is None and recs[0]["decision_raw"] is None
+
+
 def test_the_decision_and_reason_columns_are_found_by_name():
     cols = main.map_decision_columns(["Key", "Title", "Authors", "DOI", "Decision", "Exclusion Reason", "Year"])
     assert cols["decision"] == "Decision" and cols["reason"] == "Exclusion Reason"
@@ -305,3 +337,22 @@ def test_the_import_needs_the_key_and_refuses_what_it_cannot_read(seeded):
     assert r.status_code == 422
     assert c.post("/user-scenarios/usr-nope/decisions/import", headers=KEY,
                   files=_file(EXPORT)).status_code == 404
+
+
+def test_a_table_it_cannot_read_is_a_sentence_not_a_500(seeded):
+    """A cell past csv's raised limit made the reader raise its own error, which no caller
+    caught: production answered 500, about nothing, on a file the user could have fixed.
+    The preview reports it as unreadable and still hands back what it could see; the
+    import refuses it with a message."""
+    from api.additions import CSV_MAX_FIELD_BYTES
+    monstrous = ('Title,DOI,Decision\n"%s",10.5555/imp.huge,Include\n'
+                 % ("x" * (CSV_MAX_FIELD_BYTES + 16)))
+    c = _client()
+    r = c.post(f"/user-scenarios/{SID}/decisions/preview", headers=KEY,
+               files=_file(monstrous, "huge.csv"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["unreadable"] and "CSV" in body["unreadable"]
+    assert body["counts"]["records"] == 0 and body["plan"] == []
+    r = c.post(f"/user-scenarios/{SID}/decisions/import", headers=KEY, files=_file(monstrous, "huge.csv"))
+    assert r.status_code == 422 and "CSV" in r.json()["detail"]

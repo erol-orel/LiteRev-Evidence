@@ -121,7 +121,9 @@ def decision_of(value: Any) -> str | None:
 #: It is the export a team most often arrives with (the ISS team's own file holds 1,524
 #: records this way), and no column of it says "decision": read as a plain reason column,
 #: every row came back undecided.
-_RAYYAN_VOTES = re.compile(r"RAYYAN-INCLUSION:\s*\{(.*?)\}", re.S)
+#: The votes, with or without the braces Rayyan writes them in: a BibTeX note loses them
+#: on the way through `_bib_fields`, which strips a value's inner braces.
+_RAYYAN_VOTES = re.compile(r"RAYYAN-INCLUSION:\s*(.*?)(?=\|\s*RAYYAN-|$)", re.S)
 _RAYYAN_ONE_VOTE = re.compile(r'"[^"]*"\s*=>\s*"([^"]+)"')
 _RAYYAN_REASONS = re.compile(r"RAYYAN-EXCLUSION-REASONS:\s*([^|]+)")
 
@@ -160,12 +162,19 @@ def map_decision_columns(header: list) -> dict[str, Any]:
 
 
 def rows_from_table(data: bytes, kind: str) -> tuple[list[dict], list]:
-    """The rows of a table and its header, whatever the delimiter."""
+    """The rows of a table and its header, whatever the delimiter.
+
+    A file that cannot be read raises ValueError, never the parser's own error: `_prepare`
+    turns a ValueError into a 422 that names the trouble, while anything else reached the
+    client as a 500 about nothing. A cell past `CSV_MAX_FIELD_BYTES` did exactly that."""
     import csv
     import io
     if kind == "xlsx":
         import pandas as pd
-        df = pd.read_excel(io.BytesIO(data), dtype=str)
+        try:
+            df = pd.read_excel(io.BytesIO(data), dtype=str)
+        except Exception as e:                               # noqa: BLE001 - not a readable workbook
+            raise ValueError(f"Excel unreadable: {str(e)[:200]}") from None
         df = df.where(df.notna(), None)
         return df.to_dict(orient="records"), [str(c) for c in df.columns]
     from .additions import _decode
@@ -173,7 +182,10 @@ def rows_from_table(data: bytes, kind: str) -> tuple[list[dict], list]:
     first = text_.splitlines()[0] if text_.strip() else ""
     delim = max(",;\t|", key=first.count) if first else ","
     reader = csv.DictReader(io.StringIO(text_), delimiter=delim)
-    rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    try:
+        rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    except csv.Error as e:                                   # a cell past the limit, a broken quote
+        raise ValueError(f"CSV unreadable: {e}") from None
     return rows, list(reader.fieldnames or [])
 
 
@@ -231,7 +243,13 @@ def records_with_decisions(data: bytes, kind: str, mapping: dict | None = None) 
     from .additions import _decode
     recs = parser(_decode(data))
     for rec in recs:
-        rec["decision"], rec["decision_raw"], rec["reason"] = None, None, None
+        # RIS and BibTeX have no decision field, so a reference file brings the papers and
+        # nothing more, EXCEPT where a screening tool wrote its own block into a note:
+        # Rayyan does, in RIS `N1` and BibTeX `note`, and exports the ISS team sent arrive
+        # that way. The note itself is dropped: it carries the reviewer's name.
+        found, why = rayyan_decision(rec.pop("notes", None))
+        rec["decision"], rec["reason"] = found, why
+        rec["decision_raw"] = "RAYYAN-INCLUSION" if found or why else None
     return recs, [], {}
 
 
