@@ -4868,6 +4868,29 @@ export interface SearchStrategy {
 /** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
  *  quelle une stratégie booléenne saisie et la vérifie : une erreur réelle revient en
  *  correction PROPOSÉE (`proposed_query`), jamais appliquée. */
+/** What each database will receive of a scenario's query, before any search runs:
+ *  whole, in the request body, split into parts whose union is the query, reduced (the
+ *  only form that drops terms), or keywords for an API that reads no boolean. */
+export interface SourceQueryPlan {
+  scenario_id: string;
+  query_chars: number;
+  plan: Array<{ source: string; how: "whole" | "body" | "parts" | "reduced" | "keywords";
+                encoded?: number; limit?: string | null; limit_value?: number;
+                parts?: number | null; operators?: number; note?: string }>;
+  whole: string[];
+  body: string[];
+  parts: Record<string, number | null>;
+  reduced: string[];
+  keywords: string[];
+}
+
+export async function fetchSourceQueryPlan(scenarioId: string): Promise<SourceQueryPlan> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/source-query-plan`,
+                            { headers: authHeaders() });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
+}
+
 export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
   const r = await safeFetch(`${API_BASE_URL}/search-strategy`, {
     method: 'POST',

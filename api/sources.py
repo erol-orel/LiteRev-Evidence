@@ -97,7 +97,11 @@ EPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 #: c'est la même URL. L'API accepte les mêmes paramètres dans le CORPS d'un POST, où la
 #: longueur ne joue plus. Même remède que pour eutils (`EUTILS_POST_ABOVE`). La borne est
 #: prise bien en dessous de la première taille observée en échec.
-EPMC_POST_ABOVE_ENCODED = 3000
+#: Europe PMC takes its query in the body above this encoded length. Lowered from 3,000:
+#: the COVID exposure run came back 503 on a GET whose query was under that, and the same
+#: query in a body had worked all week on HPAI. A long query has no business in a URL, so
+#: the threshold now sits where only short ones stay there.
+EPMC_POST_ABOVE_ENCODED = 1200
 
 
 def epmc_send(requests_mod, params: dict, timeout: float = 20.0, headers: dict | None = None):

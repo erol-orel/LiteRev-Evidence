@@ -176,6 +176,8 @@ import {
   questionExportUrl,
   type ScenarioQuestionsPage,
   type RerankJob,
+  fetchSourceQueryPlan,
+  type SourceQueryPlan,
 } from "../lib/api";
 import { pollJob, type PollHandle } from "../lib/poll";
 import {
@@ -284,7 +286,11 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
   const [showPrompt, setShowPrompt] = useState(false);
   const [strategy, setStrategy] = useState<SearchStrategy | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
-  const [strategyError, setStrategyError] = useState<string | null>(null);
+  const [strategyError, setStrategyError] = React.useState<string | null>(null);
+  // Ce que chaque base recevra de la requête, AVANT la recherche : jusqu'ici cela ne se
+  // lisait qu'après, dans les notes du PRISMA, et seulement pour les sources réduites ou
+  // découpées. Une source qui refusait la requête n'apparaissait que « en échec ».
+  const [plan, setPlan] = useState<SourceQueryPlan | null>(null);
   const [liveData, setLiveData] = useState<LiveSearchResponse | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -301,6 +307,13 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     });
     return arr;
   }, [liveData, liveSort]);
+
+  useEffect(() => {
+    if (!isUserScenario(scenarioId)) return;
+    let alive = true;
+    fetchSourceQueryPlan(scenarioId).then(p => { if (alive) setPlan(p); }).catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId]);
 
   const loadStrategy = useCallback(() => {
     if (!isUserScenario(scenarioId)) return;
@@ -469,6 +482,43 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       {/* AI Search Strategy (user scenarios only) */}
       {isUserScenario(scenarioId) && (
         <div>
+          {/* Ce que chaque base recevra, dit AVANT d'interroger quoi que ce soit. */}
+          {plan && plan.plan.length > 0 && (
+            <div className="mb-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 space-y-1">
+              <p className="text-[10px] font-semibold text-white/60 uppercase tracking-wider">
+                {t("scenarioDetail.queries.sourcePlanTitle")}
+              </p>
+              <p className="text-[11px] text-white/50 leading-5">
+                {t("scenarioDetail.queries.sourcePlanIntro").replace("{chars}", String(plan.query_chars))}
+              </p>
+              {plan.whole.length > 0 && (
+                <p className="text-[11px] text-emerald-300/80">
+                  {t("scenarioDetail.queries.sourcePlanWhole").replace("{sources}", plan.whole.join(", "))}
+                </p>
+              )}
+              {plan.body.length > 0 && (
+                <p className="text-[11px] text-emerald-300/80">
+                  {t("scenarioDetail.queries.sourcePlanBody").replace("{sources}", plan.body.join(", "))}
+                </p>
+              )}
+              {Object.keys(plan.parts).length > 0 && (
+                <p className="text-[11px] text-sky-300/80">
+                  {t("scenarioDetail.queries.sourcePlanParts").replace("{sources}",
+                    Object.entries(plan.parts).map(([s, n]) => `${s} (${n})`).join(", "))}
+                </p>
+              )}
+              {plan.reduced.length > 0 && (
+                <p className="text-[11px] text-gold-300/90">
+                  {t("scenarioDetail.queries.sourcePlanReduced").replace("{sources}", plan.reduced.join(", "))}
+                </p>
+              )}
+              {plan.keywords.length > 0 && (
+                <p className="text-[11px] text-white/40">
+                  {t("scenarioDetail.queries.sourcePlanKeywords").replace("{sources}", plan.keywords.join(", "))}
+                </p>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
