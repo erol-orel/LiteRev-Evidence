@@ -26,8 +26,13 @@ import {
   fetchScenarioPrisma,
   fetchScenarioCounts,
   uploadModelData,
+  importDecisions,
+  previewDecisions,
   retryFailedSources,
+  undoDecisionImport,
   uploadScenarioPapers,
+  type ImportDecisionsReport,
+  type ImportDecisionsResult,
   type UploadPapersReport,
   screenArticle,
   fetchArticlePico,
@@ -2546,6 +2551,149 @@ function AddPapersPanel({ scenarioId, onClose, onAdded }:
   );
 }
 
+/** The decisions of a review screened elsewhere (api/review_import.py): preview first, so
+ *  what it would do is on screen before anything is written, then apply, then undo. */
+function ImportDecisionsPanel({ scenarioId, onClose, onApplied }:
+  { scenarioId: string; onClose: () => void; onApplied: () => void }) {
+  const { t } = useI18n();
+  const [file, setFile] = useState<File | null>(null);
+  const [overwrite, setOverwrite] = useState(false);
+  const [busy, setBusy] = useState<"preview" | "apply" | "undo" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<ImportDecisionsReport | null>(null);
+  const [result, setResult] = useState<ImportDecisionsResult | null>(null);
+  const [undone, setUndone] = useState<number | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const K = (k: string) => `scenarioDetail.corpus.${k}`;
+  const fmt = (k: string, vars: Record<string, string | number>) =>
+    Object.entries(vars).reduce((s, [n, v]) => s.replace(`{${n}}`, String(v)), t(K(k)));
+  const pairs = (m?: Record<string, string>) =>
+    Object.entries(m ?? {}).map(([f, c]) => `${f} = ${c}`).join(", ");
+  // The mapping a model proposed is sent back only when the file carried no readable one:
+  // confirming it is the person's act, not the model's.
+  const mappingToUse = report?.unreadable || !report?.mapping?.decision
+    ? report?.suggested_mapping : undefined;
+  const run = async (what: "preview" | "apply") => {
+    if (!file) return;
+    setBusy(what); setError(null); setUndone(null);
+    try {
+      if (what === "preview") {
+        setResult(null);
+        setReport(await previewDecisions(scenarioId, file));
+      } else {
+        const r = await importDecisions(scenarioId, file, { overwrite, mapping: mappingToUse });
+        setResult(r);
+        if (r.applied + r.added > 0) onApplied();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const undo = async () => {
+    setBusy("undo"); setError(null);
+    try {
+      const r = await undoDecisionImport(scenarioId);
+      setUndone(r.restored); setResult(null); onApplied();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const c = report?.counts ?? {};
+  const line = (key: string, n: number, cls: string) =>
+    n > 0 ? <p className={cls}>{fmt(key, { n })}</p> : null;
+  return (
+    <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold text-violet-200 flex items-center gap-1.5">
+            <ClipboardList size={12} />{t(K("importTitle"))}
+          </p>
+          <p className="text-[11px] text-white/55 leading-relaxed mt-1 max-w-[760px]">{t(K("importHelp"))}</p>
+        </div>
+        <button type="button" onClick={onClose} className="text-white/40 hover:text-white/80">
+          <X size={14} />
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/70 hover:text-white cursor-pointer">
+          <Table2 size={11} />{t(K("importChoose"))}
+          <input ref={inputRef} type="file" accept=".csv,.tsv,.xlsx,.ris,.bib,.bibtex,.nbib,.txt"
+            className="hidden"
+            onChange={(e) => { setFile(e.target.files?.[0] ?? null); setReport(null); setResult(null); }} />
+        </label>
+        {file && <span className="text-[11px] text-white/50">{file.name}</span>}
+        <button type="button" onClick={() => void run("preview")} disabled={!file || busy !== null}
+          className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white/75 hover:bg-white/10 transition disabled:opacity-50">
+          {busy === "preview" ? <Loader2 size={11} className="animate-spin" /> : <Search size={11} />}
+          {busy === "preview" ? t(K("importBusy")) : t(K("importPreview"))}
+        </button>
+        <button type="button" onClick={() => void run("apply")} disabled={!report || busy !== null || !!report?.unreadable}
+          className="flex items-center gap-1.5 rounded-xl border border-violet-500/30 bg-violet-500/15 px-3 py-1.5 text-[11px] font-semibold text-violet-200 hover:bg-violet-500/25 transition disabled:opacity-50">
+          {busy === "apply" ? <Loader2 size={11} className="animate-spin" /> : <CheckCircle2 size={11} />}
+          {busy === "apply" ? t(K("importApplying")) : t(K("importApply"))}
+        </button>
+        <label className="flex items-center gap-1.5 text-[11px] text-white/60 cursor-pointer">
+          <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)}
+            className="accent-violet-500" />
+          {t(K("importOverwrite"))}
+        </label>
+        <button type="button" onClick={() => void undo()} disabled={busy !== null}
+          className="text-[11px] text-white/40 underline underline-offset-2 hover:text-white/70 disabled:opacity-50">
+          {busy === "undo" ? <Loader2 size={11} className="animate-spin inline" /> : t(K("importUndo"))}
+        </button>
+      </div>
+      {error && <p className="text-[11px] text-rose-300">{t(K("importFailed"))} : {error}</p>}
+      {undone != null && <p className="text-[11px] text-brand-300">{fmt("importUndone", { n: undone })}</p>}
+      {report && (
+        <div className="space-y-1 text-[11px]">
+          {report.unreadable ? (
+            <>
+              <p className="text-gold-300/90">{fmt("importUnreadable", { error: report.unreadable })}</p>
+              <p className="text-white/45">{fmt("importHeader", { columns: report.header.join(", ") })}</p>
+              {Object.keys(report.suggested_mapping ?? {}).length > 0 && (
+                <p className="text-brand-300">{fmt("importMappingSuggested", { pairs: pairs(report.suggested_mapping) })}</p>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="text-white/50">{fmt("importMappingRead", { pairs: pairs(report.mapping) })}</p>
+              {line("importWouldApply", c.apply ?? 0, "text-white/80 font-medium")}
+              {line("importWouldAdd", c.add_and_include ?? 0, "text-brand-300")}
+              {line("importAlready", c.already ?? 0, "text-white/50")}
+              {line("importConflicts", c.conflict ?? 0, "text-gold-300/90")}
+              {line("importNoDecision", c.no_decision ?? 0, "text-white/45")}
+              {line("importNotInCorpus", c.not_in_corpus ?? 0, "text-white/45")}
+            </>
+          )}
+        </div>
+      )}
+      {result && (
+        <div className="space-y-1 text-[11px]">
+          <p className="text-brand-300 font-medium">
+            {fmt("importDone", { applied: result.applied, added: result.added })}
+          </p>
+          {(result.counts.conflict ?? 0) > 0 && (
+            <p className="text-gold-300/90">{fmt("importConflicts", { n: result.counts.conflict })}</p>
+          )}
+          {result.conflicts.length > 0 && (
+            <ul className="max-h-40 overflow-y-auto space-y-0.5 text-white/60">
+              {result.conflicts.slice(0, 50).map((r) => (
+                <li key={r.id ?? r.title}>
+                  {r.title} <span className="text-white/35">({r.current_status} → {r.decision})</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged }:
   { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts;
     onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void;
@@ -2559,6 +2707,8 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
   // Outside papers (PDF, RIS, BibTeX, nbib, CSV, Excel) added by hand to the corpus.
   const [showAdd, setShowAdd] = useState(false);
+  // The decisions of a review already screened elsewhere.
+  const [showImport, setShowImport] = useState(false);
   // Recherche DANS le corpus. La liste est paginée côté serveur, donc la recherche
   // l'est aussi : filtrer ici n'aurait cherché que dans les cent articles affichés.
   const [query, setQuery] = useState("");
@@ -2816,8 +2966,37 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
             >
               <Upload size={10} />{t("scenarioDetail.corpus.addPapers")}
             </button>
+            {/* Les décisions d'une revue déjà screenée ailleurs : lues dans les colonnes de
+                son export, jamais devinées, et annulables. */}
+            <button
+              type="button"
+              onClick={() => setShowImport(v => !v)}
+              aria-pressed={showImport}
+              title={t("scenarioDetail.corpus.importTitle")}
+              className={`flex items-center gap-1 rounded-full border px-3 py-1 text-[10px] font-semibold transition ${
+                showImport
+                  ? "bg-violet-500/20 border-violet-500/40 text-violet-200"
+                  : "bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20"
+              }`}
+            >
+              <ClipboardList size={10} />{t("scenarioDetail.corpus.importDecisions")}
+            </button>
           </div>
         </div>
+
+        {showImport && (
+          <ImportDecisionsPanel
+            scenarioId={scenarioId}
+            onClose={() => setShowImport(false)}
+            onApplied={() => {
+              const shown = Math.max(CORPUS_PAGE_SIZE, data.articles.length);
+              fetchScenarioCorpus(scenarioId, { limit: shown, ...(threshold != null ? { threshold } : {}), ...search })
+                .then(setData)
+                .catch(() => {});
+              onCorpusChanged?.();
+            }}
+          />
+        )}
 
         {/* Des articles que la recherche ne peut pas atteindre (une base non interrogée,
             un PDF sur le bureau) : déposés ici, ils rejoignent le corpus, y restent aux

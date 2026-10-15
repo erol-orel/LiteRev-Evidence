@@ -30,6 +30,7 @@ MODULES = (
     "review",
     "learning",
     "additions",
+    "review_import",
     "subsets",
     "evidence",
     "report",
