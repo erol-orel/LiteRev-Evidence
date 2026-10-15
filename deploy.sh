@@ -32,7 +32,7 @@ echo "  LiteRev Deploy - $(date '+%Y-%m-%d %H:%M:%S')"
 echo "========================================"
 
 # ── 1. Git pull ───────────────────────────────────────────────
-echo "[1/7] Git pull..."
+echo "[1/8] Git pull..."
 cd "$REPO_DIR"
 git reset --hard HEAD          # discard any server-side manual edits
 git clean -fd                  # remove untracked files
@@ -46,12 +46,12 @@ if [ -z "${DEPLOY_REEXEC:-}" ]; then
 fi
 
 # ── 2. Vérification syntaxe Python (tous les modules importés) ─
-echo "[2/7] Vérification syntaxe Python..."
+echo "[2/8] Vérification syntaxe Python..."
 "$VENV_PY" -m compileall -q "$REPO_DIR"/*.py "$REPO_DIR"/scripts/*.py "$REPO_DIR"/tools/*.py
 echo "  OK - $(cat $REPO_DIR/main.py $REPO_DIR/api/*.py | md5sum | cut -d' ' -f1)"
 
 # ── 3. Dépendances backend ────────────────────────────────────
-echo "[3/7] Installation dépendances backend..."
+echo "[3/8] Installation dépendances backend..."
 "$VENV_PIP" install -q -r "$REPO_DIR/requirements.txt"
 echo "  OK"
 
@@ -59,7 +59,7 @@ echo "  OK"
 # Non bloquant : le schéma est aussi garanti au démarrage par les fonctions
 # _ensure_*() des modules api/. Un échec alembic est journalisé mais n'interrompt
 # pas le déploiement (l'app applique ses DDL idempotentes au boot).
-echo "[4/7] Migrations alembic (non bloquant)..."
+echo "[4/8] Migrations alembic (non bloquant)..."
 if [ -f "$REPO_DIR/alembic.ini" ]; then
   if ( cd "$REPO_DIR" && "$VENV_PY" -m alembic upgrade head ); then
     echo "  OK"
@@ -71,7 +71,7 @@ else
 fi
 
 # ── 5. Build frontend (dans un répertoire temporaire) ─────────
-echo "[5/7] Build frontend..."
+echo "[5/8] Build frontend..."
 cd "$FRONTEND_DIR"
 npm ci --silent
 rm -rf "$FRONTEND_DIR/dist"
@@ -93,7 +93,7 @@ BUNDLE=$(ls "$FRONTEND_DIR/dist/assets/"*.js 2>/dev/null | xargs -n1 basename | 
 echo "  OK - $TITLE | $BUNDLE"
 
 # ── 6. Déploiement atomique vers nginx ────────────────────────
-echo "[6/7] Bascule atomique vers $NGINX_ROOT..."
+echo "[6/8] Bascule atomique vers $NGINX_ROOT..."
 STAGING="${NGINX_ROOT}.new"
 PREVIOUS="${NGINX_ROOT}.prev"
 rm -rf "$STAGING"
@@ -106,8 +106,33 @@ mv "$STAGING" "$NGINX_ROOT"
 echo "  OK - $(grep -o '<title>.*</title>' $NGINX_ROOT/index.html)"
 echo "  Rollback dispo : $PREVIOUS"
 
-# ── 7. Redémarrage API + health check bloquant ────────────────
-echo "[7/7] Redémarrage API..."
+# ── 7. Taille maximale d'un envoi (nginx) ─────────────────────
+# Sans directive, nginx refuse tout corps de requête au-delà d'1 Mo (sa valeur par
+# défaut) : un 413 renvoyé par le proxy, que l'API ne voit jamais et dont elle ne peut
+# donc rien dire. L'export de criblage d'une équipe (1 524 notices, 4,2 Mo) et un PDF
+# ordinaire étaient refusés avant d'arriver. C'est l'application qui doit poser la
+# limite, avec son message : on laisse donc passer un peu plus que son propre plafond
+# (api/additions.py, MAX_FILE_BYTES), pinné par tests/test_the_upload_limit_is_the_app_s.py.
+# Étape NON BLOQUANTE : un nginx qui refuse de recharger ne doit pas empêcher le
+# déploiement du code, et la configuration précédente reste alors en place.
+echo "[7/8] Taille maximale d'un envoi (nginx)..."
+NGINX_SNIPPET="/etc/nginx/conf.d/literev-uploads.conf"
+NGINX_BODY_LIMIT="client_max_body_size 32m;"
+if [ "$(cat "$NGINX_SNIPPET" 2>/dev/null || true)" = "$NGINX_BODY_LIMIT" ]; then
+  echo "  OK - déjà en place ($NGINX_BODY_LIMIT)"
+elif printf '%s\n' "$NGINX_BODY_LIMIT" > "$NGINX_SNIPPET" 2>/dev/null && nginx -t >/dev/null 2>&1; then
+  if systemctl reload nginx; then
+    echo "  OK - $NGINX_BODY_LIMIT"
+  else
+    echo "  AVERTISSEMENT : reload nginx en échec - limite écrite, pas encore active."
+  fi
+else
+  echo "  AVERTISSEMENT : $NGINX_SNIPPET non écrit, ou nginx -t en échec : limite inchangée."
+  rm -f "$NGINX_SNIPPET" 2>/dev/null || true
+fi
+
+# ── 8. Redémarrage API + health check bloquant ────────────────
+echo "[8/8] Redémarrage API..."
 systemctl restart literev-api
 HEALTH=""
 for i in 1 2 3 4 5 6; do

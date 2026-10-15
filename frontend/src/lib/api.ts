@@ -105,12 +105,24 @@ export async function safeFetch(
 /** Traduit un statut HTTP en message utilisateur (langue courante). */
 export function httpMessage(status: number): string {
   if (status === 429) return tStandalone("errors.tooManyRequests");
+  // 413 comes from the proxy in front of the API, as an HTML page the API never sees and
+  // cannot explain: say what happened in one sentence of our own.
+  if (status === 413) return tStandalone("errors.fileTooLarge");
   if (status === 401 || status === 403) return tStandalone("errors.unauthorized");
   if (status === 404) return tStandalone("errors.notFound");
   if (status === 502 || status === 503 || status === 504)
     return tStandalone("errors.serviceUnavailable");
   if (status >= 500) return tStandalone("errors.serverError");
   return `${tStandalone("errors.genericPrefix")} ${status}.`;
+}
+
+/** Why a call failed, in one readable sentence. The API answers JSON with a `detail`; a
+ *  proxy that refuses the request answers its own HTML page, which carries nothing worth
+ *  showing, so the status speaks instead. */
+export async function apiError(response: Response): Promise<string> {
+  let detail = "";
+  try { detail = (await response.clone().json()).detail ?? ""; } catch { /* not JSON */ }
+  return detail || httpMessage(response.status);
 }
 
 export interface FilterOption {
@@ -1516,10 +1528,7 @@ export async function uploadScenarioPapers(
     headers: authHeaders(),
     body: formData,
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Upload failed with status ${response.status}`);
-  }
+  if (!response.ok) throw new Error(await apiError(response));
   return response.json();
 }
 
@@ -1578,7 +1587,7 @@ export async function previewDecisions(
   const r = await safeFetch(`${base}/${scenarioId}/decisions/preview`, {
     method: "POST", headers: authHeaders(), body,
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 
@@ -1598,7 +1607,7 @@ export async function importDecisions(
   const r = await safeFetch(`${base}/${scenarioId}/decisions/import?${q}`, {
     method: "POST", headers: authHeaders(), body,
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 
@@ -1610,7 +1619,7 @@ export async function undoDecisionImport(
   const r = await safeFetch(`${base}/${scenarioId}/decisions/undo`, {
     method: "POST", headers: authHeaders(),
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 
@@ -1630,7 +1639,7 @@ export interface FailedSourcesState {
 export async function fetchFailedSources(scenarioId: string): Promise<FailedSourcesState> {
   const base = scenarioBase(scenarioId);
   const r = await safeFetch(`${base}/${scenarioId}/sources/failed`);
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 
@@ -1643,7 +1652,7 @@ export async function retryFailedSources(
     method: "POST",
     headers: authHeaders(),
   });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }
 

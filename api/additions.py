@@ -59,6 +59,13 @@ MAX_FILE_BYTES = 30 * 1024 * 1024
 #: Records read from one reference file: the request is synchronous, and ingesting a record
 #: is a few round trips to the database.
 MAX_RECORDS_PER_FILE = 5000
+#: Bytes in one CSV cell. The `csv` module refuses a cell above 128 KB and raises, which
+#: the upload answered with a 500: a notes column holding a whole abstract, or a screening
+#: note carrying every label and comment of a record, reaches that size. The file's own
+#: size is the limit that should speak, so the cell limit is raised past anything one row
+#: can hold, and a cell beyond it is reported rather than raised.
+CSV_MAX_FIELD_BYTES = 8 * 1024 * 1024
+csv.field_size_limit(CSV_MAX_FIELD_BYTES)
 #: pdftotext on one file.
 PDF_TIMEOUT_S = 90
 #: Pages read to guess a PDF's metadata (the whole file is read for the full text).
@@ -358,7 +365,10 @@ def parse_csv(data: bytes) -> list[dict]:
     first = text_.splitlines()[0] if text_.strip() else ""
     delim = max(",;\t|", key=first.count) if first else ","
     reader = csv.DictReader(io.StringIO(text_), delimiter=delim)
-    rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    try:
+        rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    except csv.Error as e:                                   # a cell past the limit, a NUL byte
+        raise ValueError(f"CSV unreadable: {e}") from None
     return parse_table_rows(rows, list(reader.fieldnames or []))
 
 

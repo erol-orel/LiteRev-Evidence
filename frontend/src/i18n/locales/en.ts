@@ -45,6 +45,7 @@ export const en: Translations = {
     unauthorized: "Unauthorized access.",
     notFound: "Resource not found.",
     serviceUnavailable: "Service temporarily unavailable - try again in a moment.",
+    fileTooLarge: "File refused before it arrived: too large. Split it, or send a lighter export.",
     serverError: "Server error - try again later.",
     genericPrefix: "Error",
   },
