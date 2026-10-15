@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMe
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
+import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { levelBadge, levelText } from "../lib/gradeLevels";
 import { useI18n } from "../i18n/LanguageProvider";
@@ -483,42 +484,7 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       {isUserScenario(scenarioId) && (
         <div>
           {/* Ce que chaque base recevra, dit AVANT d'interroger quoi que ce soit. */}
-          {plan && plan.plan.length > 0 && (
-            <div className="mb-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 space-y-1">
-              <p className="text-[10px] font-semibold text-white/60 uppercase tracking-wider">
-                {t("scenarioDetail.queries.sourcePlanTitle")}
-              </p>
-              <p className="text-[11px] text-white/50 leading-5">
-                {t("scenarioDetail.queries.sourcePlanIntro").replace("{chars}", String(plan.query_chars))}
-              </p>
-              {plan.whole.length > 0 && (
-                <p className="text-[11px] text-emerald-300/80">
-                  {t("scenarioDetail.queries.sourcePlanWhole").replace("{sources}", plan.whole.join(", "))}
-                </p>
-              )}
-              {plan.body.length > 0 && (
-                <p className="text-[11px] text-emerald-300/80">
-                  {t("scenarioDetail.queries.sourcePlanBody").replace("{sources}", plan.body.join(", "))}
-                </p>
-              )}
-              {Object.keys(plan.parts).length > 0 && (
-                <p className="text-[11px] text-sky-300/80">
-                  {t("scenarioDetail.queries.sourcePlanParts").replace("{sources}",
-                    Object.entries(plan.parts).map(([s, n]) => `${s} (${n})`).join(", "))}
-                </p>
-              )}
-              {plan.reduced.length > 0 && (
-                <p className="text-[11px] text-gold-300/90">
-                  {t("scenarioDetail.queries.sourcePlanReduced").replace("{sources}", plan.reduced.join(", "))}
-                </p>
-              )}
-              {plan.keywords.length > 0 && (
-                <p className="text-[11px] text-white/40">
-                  {t("scenarioDetail.queries.sourcePlanKeywords").replace("{sources}", plan.keywords.join(", "))}
-                </p>
-              )}
-            </div>
-          )}
+          {plan && <SourcePlanPanel plan={plan} className="mb-3" />}
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">

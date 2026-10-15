@@ -43,6 +43,8 @@ import {
   type CorpusMaintenanceReport,
   fetchSearchStrategy,
   type SearchStrategy,
+  fetchSourceQueryPlanFor,
+  type SourceQueryPlan,
   populateUserScenario,
   fetchSearchLimits,
   type SearchLimits,
@@ -80,6 +82,7 @@ import {
 import { pollDelay, pollJob, POLL_MAX_ERRORS } from "./lib/poll";
 import { acceptProposal, keepEnteredQuery } from "./lib/queryProposal";
 import { QueryProposal } from "./components/QueryProposal";
+import { SourcePlanPanel } from "./components/SourcePlanPanel";
 import {
   combinedQueryText,
   effectiveKind,
@@ -2165,6 +2168,10 @@ export default function App() {
   // base du corpus (même requête → compteur == taille du corpus).
   const [booleanStrategy, setBooleanStrategy] = useState<SearchStrategy | null>(null);
   const [translatingQuery, setTranslatingQuery] = useState(false);
+  // Ce que chaque base recevra de cette requête, dit AVANT de lancer la recherche et non
+  // après coup dans les notes PRISMA : une base qui refusait la requête n'apparaissait
+  // jusqu'ici qu'« en échec ». Fonction pure côté serveur, aucun appel réseau.
+  const [sourcePlan, setSourcePlan] = useState<SourceQueryPlan | null>(null);
   // Une correction PROPOSÉE pour la requête saisie (parenthèses ou guillemets déséquilibrés,
   // opérateurs sans sens...) : affichée, et la recherche attend le choix de l'utilisateur.
   // Rien ne change sans son accord ; « garder ma requête » la lance telle que saisie.
@@ -2180,6 +2187,21 @@ export default function App() {
       };
       setPendingProposal(strategy);
     });
+  // Le plan par source de la requête SAISIE, pendant qu'elle est encore modifiable : en
+  // mode booléen la requête saisie EST celle qui partira, donc le plan est exact. Court
+  // délai pour ne pas appeler à chaque frappe ; en langage naturel il n'y a pas encore de
+  // requête booléenne à planifier, et le plan du scénario le dira après.
+  useEffect(() => {
+    const q = query.trim();
+    if (mode !== "boolean" || q.length < 60) { setSourcePlan(null); return; }
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      fetchSourceQueryPlanFor(q)
+        .then(p => { if (alive) setSourcePlan(p); })
+        .catch(() => { if (alive) setSourcePlan(null); });
+    }, 700);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [query, mode]);
   // Panneau de progression pendant la recherche (~30 s avec les APIs en direct) :
   // informe l'utilisateur de l'étape en cours pour qu'il patiente sereinement.
   const [searchPhase, setSearchPhase] = useState<'idle' | 'translating' | 'searching'>('idle');
@@ -3502,6 +3524,16 @@ export default function App() {
                     </div>
                     <p className="mt-1 text-[10px] text-forest-500">{t("search.facetLiveNote")}</p>
                   </div>
+                )}
+
+                {/* Ce que chaque base recevra, AVANT de lancer la recherche : c'est ici,
+                    et non après coup dans les notes PRISMA, qu'il faut dire qu'OpenAlex
+                    recevra la requête en neuf morceaux et que DOAJ n'en prendra qu'une
+                    forme réduite. Affiché seulement quand une base doit l'adapter. */}
+                {mode === "boolean" && sourcePlan && (sourcePlan.body.length > 0
+                  || Object.keys(sourcePlan.parts).length > 0
+                  || sourcePlan.reduced.length > 0) && (
+                  <SourcePlanPanel plan={sourcePlan} className="mt-3" />
                 )}
 
                 {mode === "boolean" && (translatingQuery || booleanStrategy?.general) && (

@@ -2147,19 +2147,13 @@ def get_search_strategy(scenario_id: str, lang: str | None = Query(None, max_len
     return strategy if isinstance(strategy, dict) else {}
 
 
-@app.get("/user-scenarios/{scenario_id}/source-query-plan")
-def get_source_query_plan(scenario_id: str) -> dict[str, Any]:
-    """What each database will receive of this scenario's query, BEFORE a search runs.
+def _source_plan_payload(query: str) -> dict[str, Any]:
+    """The plan of a query, with the shortcuts a screen reads at a glance.
 
-    Until now a reviewer learned this afterwards, from the PRISMA notes, and only for the
-    sources that were reduced or split: a source that refused the query outright simply
-    appeared as failed. The plan is computed from the stored query with the same renderers
-    and the same limits the search uses, so it costs a few milliseconds and no network."""
-    row = _get_user_scenario_or_404(scenario_id)
-    query = row.get("query") or ""
+    One shape for both callers: the search page, which has a query and no scenario yet,
+    and the scenario's strategy tab, which has a scenario."""
     plan = source_query_plan(query)
     return {
-        "scenario_id": scenario_id,
         "query_chars": len(query),
         "plan": plan,
         # What a reader wants at a glance: nothing to worry about, or which sources are
@@ -2170,6 +2164,20 @@ def get_source_query_plan(scenario_id: str) -> dict[str, Any]:
         "reduced": [r["source"] for r in plan if r["how"] == "reduced"],
         "keywords": [r["source"] for r in plan if r["how"] == "keywords"],
     }
+
+
+@app.get("/user-scenarios/{scenario_id}/source-query-plan")
+def get_source_query_plan(scenario_id: str) -> dict[str, Any]:
+    """What each database will receive of this scenario's query, BEFORE a search runs.
+
+    Until now a reviewer learned this afterwards, from the PRISMA notes, and only for the
+    sources that were reduced or split: a source that refused the query outright simply
+    appeared as failed. The plan is computed from the stored query with the same renderers
+    and the same limits the search uses, so it costs a few milliseconds and no network."""
+    row = _get_user_scenario_or_404(scenario_id)
+    out = _source_plan_payload(row.get("query") or "")
+    out["scenario_id"] = scenario_id
+    return out
 
 
 # ── Une stratégie collée : gardée telle quelle, vérifiée, une correction PROPOSÉE ──────
@@ -2646,6 +2654,23 @@ def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
     requête saisie, et c'est l'utilisateur qui accepte la correction ou garde sa requête.
     """
     return _strategy_in_lang(_generate_search_strategy(payload.query), payload.lang)
+
+
+class SourcePlanIn(BaseModel):
+    # Même plafond que la stratégie elle-même : on veut pouvoir planifier la requête
+    # la plus longue qu'un utilisateur puisse coller, pas une version coupée.
+    query: str = Field(..., min_length=1, max_length=SEARCH_STRATEGY_MAX_CHARS)
+
+
+@app.post("/source-query-plan")
+def post_source_query_plan(payload: SourcePlanIn) -> dict[str, Any]:
+    """Ce que chaque base recevra d'une requête, AVANT qu'un scénario existe.
+
+    La page de recherche affiche la requête booléenne compilée puis lance la recherche :
+    c'est là, et non après coup dans les notes PRISMA, qu'il faut dire qu'OpenAlex la
+    recevra en neuf morceaux et que DOAJ n'en prendra qu'une forme réduite. Fonction pure,
+    aucun appel réseau, aucun modèle."""
+    return _source_plan_payload(payload.query)
 
 
 class FacetPreviewIn(BaseModel):

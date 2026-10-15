@@ -4865,14 +4865,11 @@ export interface SearchStrategy {
   proposal_issues?: string[];
 }
 
-/** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
- *  quelle une stratégie booléenne saisie et la vérifie : une erreur réelle revient en
- *  correction PROPOSÉE (`proposed_query`), jamais appliquée. */
-/** What each database will receive of a scenario's query, before any search runs:
- *  whole, in the request body, split into parts whose union is the query, reduced (the
- *  only form that drops terms), or keywords for an API that reads no boolean. */
+/** What each database will receive of a query, before any search runs: whole, in the
+ *  request body, split into parts whose union is the query, reduced (the only form that
+ *  drops terms), or keywords for an API that reads no boolean. */
 export interface SourceQueryPlan {
-  scenario_id: string;
+  scenario_id?: string;
   query_chars: number;
   plan: Array<{ source: string; how: "whole" | "body" | "parts" | "reduced" | "keywords";
                 encoded?: number; limit?: string | null; limit_value?: number;
@@ -4891,6 +4888,21 @@ export async function fetchSourceQueryPlan(scenarioId: string): Promise<SourceQu
   return r.json();
 }
 
+/** The same plan for a query that has no scenario yet: the search page composes the
+ *  boolean, shows it, and launches. Pure on the server, so it costs nothing. */
+export async function fetchSourceQueryPlanFor(query: string): Promise<SourceQueryPlan> {
+  const r = await safeFetch(`${API_BASE_URL}/source-query-plan`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ query }),
+  });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
+}
+
+/** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle
+ *  quelle une stratégie booléenne saisie et la vérifie : une erreur réelle revient en
+ *  correction PROPOSÉE (`proposed_query`), jamais appliquée. */
 export async function fetchSearchStrategy(query: string): Promise<SearchStrategy> {
   const r = await safeFetch(`${API_BASE_URL}/search-strategy`, {
     method: 'POST',

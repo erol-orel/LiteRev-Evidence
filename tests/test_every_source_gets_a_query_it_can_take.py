@@ -109,3 +109,31 @@ def test_an_ordinary_query_is_whole_everywhere_it_can_be():
 def test_no_boolean_means_keywords_everywhere():
     plan = S.source_query_plan("avian influenza in European poultry farms")
     assert {r["how"] for r in plan} == {"keywords"}
+
+
+def test_the_plan_is_answered_for_a_query_with_no_scenario_yet():
+    """The search page composes the boolean, shows it and launches: that is where the
+    carriage has to be said, before a scenario exists. One payload builder for both
+    callers, so the strategy tab and the search page can never disagree."""
+    import main
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).post("/source-query-plan", json={"query": LONG})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["query_chars"] == len(LONG)
+    assert body["body"] and "pubmed" in body["body"]
+    assert body["parts"].get("semantic_scholar", 0) > 1
+    assert body["keywords"] == ["crossref"]
+    # The same rows the pure function gives, in the same order.
+    assert [r_["source"] for r_ in body["plan"]] == \
+        [r_["source"] for r_ in S.source_query_plan(LONG)]
+    assert "scenario_id" not in body, "there is no scenario at this point"
+
+
+def test_an_empty_query_is_refused_rather_than_planned():
+    """A plan of nothing would read as "every source takes it whole", which is false."""
+    import main
+    from fastapi.testclient import TestClient
+
+    assert TestClient(main.app).post("/source-query-plan", json={"query": ""}).status_code == 422
