@@ -219,6 +219,11 @@ _COUNTED_IN: dict[str, tuple[str, tuple[str, ...]]] = {
 _NUTS_ISO = frozenset({
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
     "PL", "PT", "RO", "SK", "SI", "ES", "SE", "IS", "LI", "NO", "CH", "GB", "ME", "MK", "AL", "RS", "TR"})
+#: The same set under a public name, for the counts that need to say "in Europe": it is the
+#: NUTS country list, so it holds the candidate countries (Turkey, Serbia, Albania, North
+#: Macedonia, Montenegro) beside the EU, the EEA and the United Kingdom. Anything reported
+#: from it says NUTS countries, never "the EU".
+NUTS_ISO = _NUTS_ISO
 #: Where the NUTS 0 code is not the ISO code.
 _NUTS0 = {"GR": "EL", "GB": "UK"}
 COUNTRY_NAME = {iso: name for iso, name, _a in _COUNTRIES}
