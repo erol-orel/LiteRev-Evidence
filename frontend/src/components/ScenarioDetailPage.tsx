@@ -109,6 +109,7 @@ import {
   fetchKappaStats,
   fetchDoubleBlindConflicts,
   fetchDoubleBlindQueue,
+  learnedSuggestionsExportUrl,
   type DoubleBlindQueue,
   registerDoubleBlindReviewer,
   resolveDoubleBlindConflict,
@@ -6724,6 +6725,13 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                           </li>
                         ))}
                       </ul>
+                      {/* Cinq titres pour une centaine de suggestions : le reste se lisait
+                          nulle part. Le fichier les porte toutes, dans l'ordre du modèle. */}
+                      <a href={learnedSuggestionsExportUrl(scenarioId)}
+                         className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
+                        {t("scenarioDetail.doubleBlind.learningDownloadAll")
+                          .replace("{n}", String(queue.learning.below_threshold_suggested ?? 0))}
+                      </a>
                     </div>
                   )}
                 </>

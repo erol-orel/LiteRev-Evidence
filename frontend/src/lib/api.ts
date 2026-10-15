@@ -1980,6 +1980,12 @@ export async function reverifyExtractionQuotes(scenarioId: string): Promise<Quot
   return r.json();
 }
 
+/** Every below-threshold article the learned model would include, as a CSV. The card
+ *  lists five of them and the count can run to a hundred, so the rest needs a file. */
+export function learnedSuggestionsExportUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/learned-ranking/export`;
+}
+
 export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
 }

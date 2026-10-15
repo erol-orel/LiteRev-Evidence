@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
@@ -46,7 +46,10 @@ EMBED_COVERAGE_MIN = 0.95
 #: TF-IDF vocabulary cap: unigrams and bigrams of titles and abstracts.
 TFIDF_MAX_FEATURES = 60_000
 #: Below-threshold articles the model would include: listed to the reviewers, this many.
+#: The card on screen shows five of them and the count said ninety-seven, so there was no
+#: way to see the rest: a caller asks for more with `limit`, and the export takes them all.
 SUGGESTED_LIMIT = 10
+SUGGESTED_LIMIT_MAX = 2000
 #: Cross-validated AUC is reported from this many decisions of each kind: fewer folds
 #: would say little.
 CV_MIN_PER_CLASS = 10
@@ -277,7 +280,7 @@ def schedule_retrain(scenario_id: str) -> bool:
 
 
 # ── What the panel reads ─────────────────────────────────────────────────────
-def learning_summary(scenario_id: str, conn=None) -> dict[str, Any]:
+def learning_summary(scenario_id: str, conn=None, suggested_limit: int | None = None) -> dict[str, Any]:
     """The model's state plus what it says of the work left: the undecided articles of
     the relevant set, the number of them the model expects to be included (the sum of
     their probabilities), and the undecided articles below the threshold the model would
@@ -315,7 +318,9 @@ def learning_summary(scenario_id: str, conn=None) -> dict[str, Any]:
                   AND ars.learned_score >= 0.5
                 ORDER BY ars.learned_score DESC, ars.document_id
                 LIMIT :lim
-            """), {"sid": scenario_id, "thr": thr, "lim": SUGGESTED_LIMIT}).mappings().all()]
+            """), {"sid": scenario_id, "thr": thr,
+                   "lim": max(1, min(int(suggested_limit or SUGGESTED_LIMIT), SUGGESTED_LIMIT_MAX))}
+            ).mappings().all()]
     finally:
         if own:
             conn.close()
@@ -331,10 +336,44 @@ def learning_summary(scenario_id: str, conn=None) -> dict[str, Any]:
 
 
 @app.get("/user-scenarios/{scenario_id}/learned-ranking")
-def get_learned_ranking(scenario_id: str) -> dict[str, Any]:
-    """The state of the model trained on this scenario's decisions, and what it expects."""
+def get_learned_ranking(scenario_id: str, limit: int | None = None) -> dict[str, Any]:
+    """The state of the model trained on this scenario's decisions, and what it expects.
+
+    `limit` asks for more of the below-threshold suggestions than the card shows. The
+    count has always been there; the list stopped at ten, so the other suggestions could
+    be counted and never read."""
     _get_user_scenario_or_404(scenario_id)
-    return learning_summary(scenario_id)
+    return learning_summary(scenario_id, suggested_limit=limit)
+
+
+@app.get("/user-scenarios/{scenario_id}/learned-ranking/export")
+def export_learned_suggestions(scenario_id: str) -> Response:
+    """Every below-threshold article the model would include, as a CSV.
+
+    The card names five of them and the count said ninety-seven: a reviewer who wants to
+    work through the rest had nowhere to read them. Ordered as the model ranks them, with
+    the two scores beside each other so a reviewer sees what the similarity order missed.
+    Opened in Excel, hence the BOM, as the other exports of this project."""
+    import csv
+    import io
+    row = _get_user_scenario_or_404(scenario_id)
+    state = learning_summary(scenario_id, suggested_limit=SUGGESTED_LIMIT_MAX)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([f"# Scenario: {row['name']} ({scenario_id})"])
+    w.writerow([f"# Articles below the relevance threshold that the model would include,"
+                f" trained on {state.get('n_included', 0)} included and"
+                f" {state.get('n_excluded', 0)} decisions to exclude."
+                f" Cross-validated AUC {state.get('cv_auc')}."])
+    w.writerow(["rank", "id", "title", "year", "learned_score", "similarity_score", "url"])
+    for i, s in enumerate(state.get("suggested") or [], start=1):
+        w.writerow([i, s.get("id"), s.get("title"), s.get("year"),
+                    f"{float(s['learned_score']):.4f}" if s.get("learned_score") is not None else "",
+                    f"{float(s['similarity_score']):.4f}" if s.get("similarity_score") is not None else "",
+                    f"https://literev-scenario.com/scenarios/{scenario_id}?article={s.get('id')}"])
+    return Response(content=buf.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="learned_suggestions_{scenario_id}.csv"'})
 
 
 @app.post("/user-scenarios/{scenario_id}/learned-ranking/retrain")

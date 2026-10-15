@@ -1140,6 +1140,7 @@ export const fr = {
       learningSuggested:
         "{n} articles sous le seuil de pertinence ressemblent à ce que vous incluez. Retrouvez-les dans l'onglet Corpus pour les inclure à la main :",
       learningBadge: "appris {score}",
+      learningDownloadAll: "Télécharger les {n} en CSV, dans l'ordre du modèle",
       auditToggle:"Juger aussi un échantillon aléatoire de {n} articles sous le seuil",
       auditToggleHint: "Contrôle l'exclusion automatique : le même échantillon pour les deux relecteurs, marqué dans la liste, avec son propre kappa.",
       auditToggleFailed: "L'option n'a pas été enregistrée : réessayez (clé d'API ou réseau).",

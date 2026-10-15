@@ -1140,6 +1140,7 @@ export const en: Translations = {
       learningSuggested:
         "{n} articles below the relevance threshold look like what you include. Find them in the Corpus tab to include them by hand:",
       learningBadge: "learned {score}",
+      learningDownloadAll: "Download all {n} as a CSV, in the model's order",
       auditToggle: "Also screen a random sample of {n} articles below the threshold",
       auditToggleHint: "Audits the automatic exclusion: the same sample for both reviewers, marked in the list, with its own kappa.",
       auditToggleFailed: "The option was not saved: try again (API key or network).",

@@ -227,6 +227,27 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     assert r.status_code == 200 and r.json()["suggested"][0]["id"] == 808
 
 
+def test_every_suggestion_can_be_read_not_only_counted(seeded):
+    """The card shows five suggestions and the count said ninety-seven, so on a real
+    review the rest could be counted and never read. `limit` asks for more, and the export
+    takes them all, in the model's own order with both scores beside each other."""
+    pytest.importorskip("sklearn")
+    main.retrain(SID)
+    c = _client()
+    state = c.get(f"/user-scenarios/{SID}/learned-ranking", params={"limit": 500}).json()
+    assert len(state["suggested"]) == state["below_threshold_suggested"], "all of them, not a page"
+    r = c.get(f"/user-scenarios/{SID}/learned-ranking/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    body = r.content.decode("utf-8-sig")
+    assert "rank,id,title,year,learned_score,similarity_score,url" in body
+    assert str(state["suggested"][0]["id"]) in body
+    assert body.count("\n") >= 3 + len(state["suggested"]) - 1, "a line per suggestion, plus the header"
+    # The limit is bounded: a caller asking for a million does not get a million rows.
+    assert len(c.get(f"/user-scenarios/{SID}/learned-ranking",
+                     params={"limit": 10 ** 9}).json()["suggested"]) <= main.SUGGESTED_LIMIT_MAX
+
+
 def test_embeddings_are_read_when_the_scenario_has_them(seeded):
     conn, _ = seeded
     pytest.importorskip("sklearn")
