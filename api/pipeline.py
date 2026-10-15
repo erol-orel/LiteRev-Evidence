@@ -36,6 +36,7 @@ from .search import (
     OPENALEX_SPLIT_MAX_PARTS,
     RANKED_PASS_MAX,
     SOURCE_OUTCOMES_COUNTED,
+    S2_MAX_QUERY_ENCODED,
     URL_QUERY_MAX_ENCODED,
     _url_encoded_len,
     _boolean_corpus_ids,
@@ -1299,6 +1300,9 @@ def _run_user_scenario_populate(
     _arxiv_parts: list[str] = []
     _openaire_parts: list[str] = []             # chaque morceau ≤ OPENAIRE_MAX_OPERATORS opérateurs
     _s2_bool_q: list = [None]                   # la forme bulk de Semantic Scholar, ou None
+    _s2_parts: list[str] = []                   # son booléen découpé, union = le booléen
+    _s2_native: list = [True]                   # faux dès que sa requête est réduite
+    _s2_reduced: list = [False]                 # ce que la carte doit dire de cette source
     # Les facettes OU qu'aucune base n'a reçues (requête trop longue), et la correspondance
     # locale qui aurait atteint sa borne : dits dans les chiffres de la recherche.
     _facets_skipped: list[str] = []
@@ -1512,6 +1516,38 @@ def _run_user_scenario_populate(
                 _s2_bool_q[0] = _boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(_portable_bool)))
             except Exception:                            # noqa: BLE001
                 _s2_bool_q[0] = None
+            # Sa requête part dans une URL, comme celle d'OpenAlex, et RIEN ne la mesurait :
+            # la plus longue chaîne T2.4 (COVID exposition, 4 519 caractères) revenait en
+            # 400 Bad Request et la source ne versait rien. Même traitement que les autres :
+            # entière si elle tient, sinon RÉDUITE, et ses notices ne sont alors plus
+            # natives puisqu'elles ne répondent plus au booléen entier (ré-appariement
+            # local, qui applique la requête complète, exclusions comprises).
+            if _s2_bool_q[0] and _url_encoded_len(_s2_bool_q[0]) > S2_MAX_QUERY_ENCODED:
+                _enc = _url_encoded_len(_s2_bool_q[0])
+                # D'ABORD le DÉCOUPAGE, comme pour OpenAlex et ClinicalTrials.gov : des
+                # requêtes dont l'UNION est le booléen entier, donc rien de perdu et des
+                # notices natives. La forme réduite ne vient qu'après, si le booléen ne
+                # tient pas en SPLIT_MAX_PARTS morceaux.
+                _sp = _split_boolean(_portable_bool, S2_MAX_QUERY_ENCODED,
+                                     render=_boolean_to_s2, measure=_url_encoded_len)
+                if _sp:
+                    _s2_parts[:] = _sp
+                    _split_queries["semantic_scholar"] = list(_sp)
+                    _s2_bool_q[0] = None               # le lot des morceaux remplace la requête
+                    logger.warning("Semantic Scholar : requete de %d caracteres encodes, "
+                                   "au-dela de %d ; decoupee en %d requetes dont l'union est "
+                                   "le booleen.", _enc, S2_MAX_QUERY_ENCODED, len(_sp))
+                else:
+                    _short_s2 = _shorten_boolean(_portable_bool, S2_MAX_QUERY_ENCODED,
+                                                 render=_boolean_to_s2, measure=_url_encoded_len)
+                    logger.warning(
+                        "Semantic Scholar : requete de %d caracteres encodes, au-dela de %d ; "
+                        "%s.", _enc, S2_MAX_QUERY_ENCODED,
+                        "forme reduite envoyee" if _short_s2 else "repli sur l'endpoint classique")
+                    _s2_bool_q[0] = _short_s2 or None
+                    _s2_native[0] = False
+                    if _short_s2:
+                        _s2_reduced[0] = True
         if _s2_bool_q[0]:
             _unranked_sources.add("semantic_scholar")
         else:
@@ -2208,8 +2244,13 @@ def _run_user_scenario_populate(
         # L'endpoint bulk rend les notices dans l'ordre des identifiants, PAS par pertinence
         # (calculé avec les autres requêtes, plus haut, pour que la carte le dise).
         _s2_bool = _s2_bool_q[0]
+        # Un seul booléen, ou les morceaux dont l'union est le booléen entier. Liste vide :
+        # pas de booléen pour cette source, et c'est l'endpoint classique qui répond, dans
+        # le `else` plus bas. `for ... else` ne dirait PAS cela : son else s'exécute quand
+        # la boucle finit sans break, donc après un passage réussi.
+        _s2_queries = list(_s2_parts) or ([_s2_bool] if _s2_bool else [])
         try:
-            if _s2_bool:
+            for _s2_bool in _s2_queries:
                 _tok, _fetched, _429 = None, 0, 0
                 while _fetched < _cap_strategy:
                     if _budget_exhausted():
@@ -2230,13 +2271,13 @@ def _run_user_scenario_populate(
                     _note_total("semantic_scholar", _payload.get("total"))
                     _n = len(_payload.get("data") or [])
                     count += _ingest_parsed("semantic_scholar", _parse_semantic_scholar(_payload),
-                                            boolean_native=True)
+                                            boolean_native=_s2_native[0])
                     _fetched += _n
                     _tok = _payload.get("token")
                     if not _tok or _n == 0:
                         break
                     _time.sleep(0.3)
-            else:
+            if not _s2_queries:
                 _off, _cap, _429 = 0, min(max_results, 1000), 0   # search classique : offset+limit ≤ 1000
                 while _off < _cap:
                     if _budget_exhausted():

@@ -145,6 +145,11 @@ def seeded(db_conn, monkeypatch):
         main._ensure_learning_tables()
         cur.execute("DELETE FROM scenario_learning WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM scenario_reviewer WHERE scenario_id = %s", (SID,))
+        # The settings row outlives the tables above, and the audit sample is one of its
+        # columns: left on by a run that switched it on, it draws every below-threshold
+        # article into the blind sample and the queue tests read a different queue than
+        # they were written for. The seed owns this scenario's settings, so it clears them.
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         cur.execute("INSERT INTO user_scenarios (id, name, query, mode, filters)"
                     " VALUES (%s, 'The queue learns', 'avian influenza', 'boolean', '{}')", (SID,))
@@ -164,6 +169,7 @@ def seeded(db_conn, monkeypatch):
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM scenario_learning WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM scenario_reviewer WHERE scenario_id = %s", (SID,))
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         db_conn.commit()
 
@@ -215,7 +221,15 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     q = _queue(_client(), R1)
     assert q["ordering"] == "learned"
     undecided = [a["id"] for a in q["articles"] if not a["audit_sample"]]
-    assert undecided == [806, 807], "the relevant set's undecided articles, the likely one first"
+    # 808 sits below the threshold and the model would include it, so it is IN the list to
+    # screen, between the two relevant ones by learned score. It used to be named in the
+    # card and left in the corpus for the reviewer to find, which on a real review meant
+    # a hundred articles counted and never read.
+    assert undecided == [806, 808, 807], "the relevant ones and the suggestion, by learned score"
+    by_id = {a["id"]: a for a in q["articles"]}
+    assert by_id[808]["below_threshold"] is True, "and it says it came in below the threshold"
+    assert by_id[806]["below_threshold"] is False and by_id[807]["below_threshold"] is False
+    assert q["remaining_suggested"] == 1 and q["remaining_relevant"] == 2
     assert q["articles"][0]["learned_score"] == pytest.approx(scores[806])
     info = q["learning"]
     assert info["remaining_relevant"] == 2
@@ -225,6 +239,53 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     assert [s["id"] for s in info["suggested"]] == [808]
     r = _client().get(f"/user-scenarios/{SID}/learned-ranking")
     assert r.status_code == 200 and r.json()["suggested"][0]["id"] == 808
+
+
+def test_the_audit_sample_is_never_dressed_up_as_a_suggestion(seeded):
+    """The audit sample and the model's suggestions are drawn from the same pool: the
+    below-threshold articles nobody judged. The sample exists to check the threshold
+    blind, so an article in it must never be marked as something the model likes, or its
+    kappa stops being an independent check. With the sample at 100 percent there is
+    nothing left to suggest, and the queue says so rather than double-counting."""
+    pytest.importorskip("sklearn")
+    main.retrain(SID)
+    c = _client()
+    r = c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 100}, headers=KEY)
+    assert r.status_code == 200, r.text
+    try:
+        q = _queue(c, R1)
+        for a in q["articles"]:
+            assert not (a["audit_sample"] and a["below_threshold"]), \
+                f"article {a['id']} is in the blind audit sample and marked as a suggestion"
+        assert q["remaining_suggested"] == 0, "the sample already screens them, blind"
+        assert q["remaining_audit"] > 0
+    finally:
+        # The setting lives in the database and outlives this test, its file and this
+        # run: left on, it puts every below-threshold article of this scenario into the
+        # audit sample, and the test above that expects a suggestion in the queue fails
+        # on the NEXT run, not this one.
+        c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 0}, headers=KEY)
+
+
+def test_every_suggestion_can_be_read_not_only_counted(seeded):
+    """The card shows five suggestions and the count said ninety-seven, so on a real
+    review the rest could be counted and never read. `limit` asks for more, and the export
+    takes them all, in the model's own order with both scores beside each other."""
+    pytest.importorskip("sklearn")
+    main.retrain(SID)
+    c = _client()
+    state = c.get(f"/user-scenarios/{SID}/learned-ranking", params={"limit": 500}).json()
+    assert len(state["suggested"]) == state["below_threshold_suggested"], "all of them, not a page"
+    r = c.get(f"/user-scenarios/{SID}/learned-ranking/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    body = r.content.decode("utf-8-sig")
+    assert "rank,id,title,year,learned_score,similarity_score,url" in body
+    assert str(state["suggested"][0]["id"]) in body
+    assert body.count("\n") >= 3 + len(state["suggested"]) - 1, "a line per suggestion, plus the header"
+    # The limit is bounded: a caller asking for a million does not get a million rows.
+    assert len(c.get(f"/user-scenarios/{SID}/learned-ranking",
+                     params={"limit": 10 ** 9}).json()["suggested"]) <= main.SUGGESTED_LIMIT_MAX
 
 
 def test_embeddings_are_read_when_the_scenario_has_them(seeded):

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMe
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
+import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { levelBadge, levelText } from "../lib/gradeLevels";
 import { useI18n } from "../i18n/LanguageProvider";
@@ -109,6 +110,7 @@ import {
   fetchKappaStats,
   fetchDoubleBlindConflicts,
   fetchDoubleBlindQueue,
+  learnedSuggestionsExportUrl,
   type DoubleBlindQueue,
   registerDoubleBlindReviewer,
   resolveDoubleBlindConflict,
@@ -175,6 +177,8 @@ import {
   questionExportUrl,
   type ScenarioQuestionsPage,
   type RerankJob,
+  fetchSourceQueryPlan,
+  type SourceQueryPlan,
 } from "../lib/api";
 import { pollJob, type PollHandle } from "../lib/poll";
 import {
@@ -283,7 +287,11 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
   const [showPrompt, setShowPrompt] = useState(false);
   const [strategy, setStrategy] = useState<SearchStrategy | null>(null);
   const [strategyLoading, setStrategyLoading] = useState(false);
-  const [strategyError, setStrategyError] = useState<string | null>(null);
+  const [strategyError, setStrategyError] = React.useState<string | null>(null);
+  // Ce que chaque base recevra de la requête, AVANT la recherche : jusqu'ici cela ne se
+  // lisait qu'après, dans les notes du PRISMA, et seulement pour les sources réduites ou
+  // découpées. Une source qui refusait la requête n'apparaissait que « en échec ».
+  const [plan, setPlan] = useState<SourceQueryPlan | null>(null);
   const [liveData, setLiveData] = useState<LiveSearchResponse | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -300,6 +308,13 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
     });
     return arr;
   }, [liveData, liveSort]);
+
+  useEffect(() => {
+    if (!isUserScenario(scenarioId)) return;
+    let alive = true;
+    fetchSourceQueryPlan(scenarioId).then(p => { if (alive) setPlan(p); }).catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId]);
 
   const loadStrategy = useCallback(() => {
     if (!isUserScenario(scenarioId)) return;
@@ -468,6 +483,8 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       {/* AI Search Strategy (user scenarios only) */}
       {isUserScenario(scenarioId) && (
         <div>
+          {/* Ce que chaque base recevra, dit AVANT d'interroger quoi que ce soit. */}
+          {plan && <SourcePlanPanel plan={plan} className="mb-3" />}
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
@@ -6714,7 +6731,9 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                     <div className="space-y-1">
                       <p className="text-gold-300/90">
                         {t("scenarioDetail.doubleBlind.learningSuggested")
-                          .replace("{n}", String(queue.learning.below_threshold_suggested))}
+                          .replace("{n}", String(queue.learning.below_threshold_suggested))
+                          .replace("{inQueue}", String(queue.learning.suggested_in_queue
+                            ?? queue.remaining_suggested ?? 0))}
                       </p>
                       <ul className="list-disc pl-4 text-white/50">
                         {(queue.learning.suggested ?? []).slice(0, 5).map(s => (
@@ -6724,6 +6743,13 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                           </li>
                         ))}
                       </ul>
+                      {/* Cinq titres pour une centaine de suggestions : le reste se lisait
+                          nulle part. Le fichier les porte toutes, dans l'ordre du modèle. */}
+                      <a href={learnedSuggestionsExportUrl(scenarioId)}
+                         className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
+                        {t("scenarioDetail.doubleBlind.learningDownloadAll")
+                          .replace("{n}", String(queue.learning.below_threshold_suggested ?? 0))}
+                      </a>
                     </div>
                   )}
                 </>
@@ -6766,6 +6792,11 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                       : null}
                     {art.audit_sample
                       ? <span className="rounded bg-gold-500/15 border border-gold-500/30 px-1.5 text-gold-300">{t("scenarioDetail.doubleBlind.auditBadge")}</span>
+                      : null}
+                    {/* Un article venu de SOUS le seuil se dit : le relecteur juge la
+                        suggestion du modèle, pas un article que la recherche a retenu. */}
+                    {art.below_threshold
+                      ? <span className="rounded bg-brand-500/15 border border-brand-500/30 px-1.5 text-brand-200">{t("scenarioDetail.doubleBlind.suggestedBadge")}</span>
                       : null}
                   </div>
                   <div className="flex gap-2">

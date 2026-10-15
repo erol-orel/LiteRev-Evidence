@@ -1980,6 +1980,12 @@ export async function reverifyExtractionQuotes(scenarioId: string): Promise<Quot
   return r.json();
 }
 
+/** Every below-threshold article the learned model would include, as a CSV. The card
+ *  lists five of them and the count can run to a hundred, so the rest needs a file. */
+export function learnedSuggestionsExportUrl(scenarioId: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/learned-ranking/export`;
+}
+
 export function extractionExportUrl(scenarioId: string, format: "xlsx" | "csv"): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/extraction/export?format=${format}`;
 }
@@ -2667,6 +2673,10 @@ export interface LearningStatus {
   expected_relevant_left?: number | null;
   /** Undecided articles below the threshold the model would include, and the first of them. */
   below_threshold_suggested?: number;
+  /** How many of those the screening queue carries. The rest are in the export: the
+   *  model offers 97 suggestions on one corpus and 1,442 on another, and a queue of
+   *  1,442 articles the search did not retain is a different review. */
+  suggested_in_queue?: number;
   suggested?: Array<{ id: number; title: string; year?: number | null; learned_score?: number | null }>;
 }
 
@@ -2679,6 +2689,8 @@ export interface DoubleBlindQueue {
   remaining_relevant?: number;
   remaining_audit?: number;
   audit_sample_size?: number;
+  /** Of `remaining`, how many came in below the threshold on the model's suggestion. */
+  remaining_suggested?: number;
   returned: number;
   /** "learned" once a model trained on this scenario's decisions orders the list. */
   ordering?: "learned" | "relevance";
@@ -2698,6 +2710,9 @@ export interface DoubleBlindQueue {
     reviewer_2_status?: string | null;
     /** Drawn below the threshold to audit the automatic exclusion. */
     audit_sample?: boolean;
+    /** Came in from below the relevance threshold because the learned model would include
+     *  it: part of the list to screen, marked so a reviewer knows what they are judging. */
+    below_threshold?: boolean;
   }>;
 }
 
@@ -4848,6 +4863,41 @@ export interface SearchStrategy {
   /** What was found: "unclosed_parenthesis", "unmatched_closing_parenthesis",
    *  "unpaired_quote", "typographic_quotes", and "model" when the model proposed it. */
   proposal_issues?: string[];
+}
+
+/** What each database will receive of a query, before any search runs: whole, in the
+ *  request body, split into parts whose union is the query, reduced (the only form that
+ *  drops terms), or keywords for an API that reads no boolean. */
+export interface SourceQueryPlan {
+  scenario_id?: string;
+  query_chars: number;
+  plan: Array<{ source: string; how: "whole" | "body" | "parts" | "reduced" | "keywords";
+                encoded?: number; limit?: string | null; limit_value?: number;
+                parts?: number | null; operators?: number; note?: string }>;
+  whole: string[];
+  body: string[];
+  parts: Record<string, number | null>;
+  reduced: string[];
+  keywords: string[];
+}
+
+export async function fetchSourceQueryPlan(scenarioId: string): Promise<SourceQueryPlan> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/source-query-plan`,
+                            { headers: authHeaders() });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
+}
+
+/** The same plan for a query that has no scenario yet: the search page composes the
+ *  boolean, shows it, and launches. Pure on the server, so it costs nothing. */
+export async function fetchSourceQueryPlanFor(query: string): Promise<SourceQueryPlan> {
+  const r = await safeFetch(`${API_BASE_URL}/source-query-plan`, {
+    method: 'POST',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ query }),
+  });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
 }
 
 /** Traduit une requête en langage naturel en stratégie booléenne (LLM), ou garde telle

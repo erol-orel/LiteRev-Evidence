@@ -681,6 +681,12 @@ def _count_operators(rendered: str) -> int:
 #: 2 000 caractères d'URL où les requêtes cessent d'être sûres, une fois l'adresse et
 #: les autres paramètres comptés.
 URL_QUERY_MAX_ENCODED = 1800
+#: Semantic Scholar's bulk query rides in a URL exactly like OpenAlex's, and nothing
+#: measured it: every other source weighed its query against a limit and shortened or split
+#: it, this one rendered the whole tree and sent it. The longest T2.4 string, COVID exposure
+#: at 4,519 characters, came back 400 Bad Request, and the source contributed nothing to a
+#: 27,405 article corpus. Measured on the encoded form, as the others are.
+S2_MAX_QUERY_ENCODED = 1800
 
 
 def _url_encoded_len(query: str) -> int:
@@ -2141,6 +2147,39 @@ def get_search_strategy(scenario_id: str, lang: str | None = Query(None, max_len
     return strategy if isinstance(strategy, dict) else {}
 
 
+def _source_plan_payload(query: str) -> dict[str, Any]:
+    """The plan of a query, with the shortcuts a screen reads at a glance.
+
+    One shape for both callers: the search page, which has a query and no scenario yet,
+    and the scenario's strategy tab, which has a scenario."""
+    plan = source_query_plan(query)
+    return {
+        "query_chars": len(query),
+        "plan": plan,
+        # What a reader wants at a glance: nothing to worry about, or which sources are
+        # adapted. `reduced` is the only one that loses terms; `parts` and `body` do not.
+        "whole": [r["source"] for r in plan if r["how"] == "whole"],
+        "body": [r["source"] for r in plan if r["how"] == "body"],
+        "parts": {r["source"]: r.get("parts") for r in plan if r["how"] == "parts"},
+        "reduced": [r["source"] for r in plan if r["how"] == "reduced"],
+        "keywords": [r["source"] for r in plan if r["how"] == "keywords"],
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/source-query-plan")
+def get_source_query_plan(scenario_id: str) -> dict[str, Any]:
+    """What each database will receive of this scenario's query, BEFORE a search runs.
+
+    Until now a reviewer learned this afterwards, from the PRISMA notes, and only for the
+    sources that were reduced or split: a source that refused the query outright simply
+    appeared as failed. The plan is computed from the stored query with the same renderers
+    and the same limits the search uses, so it costs a few milliseconds and no network."""
+    row = _get_user_scenario_or_404(scenario_id)
+    out = _source_plan_payload(row.get("query") or "")
+    out["scenario_id"] = scenario_id
+    return out
+
+
 # ── Une stratégie collée : gardée telle quelle, vérifiée, une correction PROPOSÉE ──────
 # Décision du propriétaire du produit : une stratégie de revue collée passe par le chemin
 # du modèle quelle que soit sa longueur, elle est utilisée TELLE QUE SAISIE, et si elle a
@@ -2617,6 +2656,23 @@ def post_search_strategy(payload: SearchStrategyIn) -> dict[str, Any]:
     return _strategy_in_lang(_generate_search_strategy(payload.query), payload.lang)
 
 
+class SourcePlanIn(BaseModel):
+    # Même plafond que la stratégie elle-même : on veut pouvoir planifier la requête
+    # la plus longue qu'un utilisateur puisse coller, pas une version coupée.
+    query: str = Field(..., min_length=1, max_length=SEARCH_STRATEGY_MAX_CHARS)
+
+
+@app.post("/source-query-plan")
+def post_source_query_plan(payload: SourcePlanIn) -> dict[str, Any]:
+    """Ce que chaque base recevra d'une requête, AVANT qu'un scénario existe.
+
+    La page de recherche affiche la requête booléenne compilée puis lance la recherche :
+    c'est là, et non après coup dans les notes PRISMA, qu'il faut dire qu'OpenAlex la
+    recevra en neuf morceaux et que DOAJ n'en prendra qu'une forme réduite. Fonction pure,
+    aucun appel réseau, aucun modèle."""
+    return _source_plan_payload(payload.query)
+
+
 class FacetPreviewIn(BaseModel):
     sub_queries: list[dict[str, Any]] | None = None
     combinator: str = Field(default="union")
@@ -2668,3 +2724,83 @@ def post_search_facets(payload: FacetPreviewIn, _: None = Depends(require_api_ke
     return {"facets": facets, "union": union, "intersection": intersection,
             "combined": combined, "combinator": payload.combinator,
             "capped": any(f["capped"] for f in facets)}
+
+
+# ─── What each source will actually receive, before anything is sent ─────────
+#: One row per source: its name, how its query travels, and the limit it is measured
+#: against. The pipeline tailors the query to nine APIs, and until now the only way to
+#: learn what each one got was to run the search and read the PRISMA notes afterwards. A
+#: reviewer writing a strategy deserves to know beforehand which sources will take it
+#: whole, which will receive it reduced, and which would refuse it.
+#:
+#: This mirrors the decisions `_run_populate_job` makes; the constants are the SAME objects,
+#: so a limit cannot drift between the plan and the search, and a test pins the pairing.
+SOURCE_QUERY_CARRIAGE = (
+    ("pubmed", "body", None),                 # eutils takes a long query in a POST body
+    ("europepmc", "body_above", None),        # EPMC_POST_ABOVE_ENCODED, read at call time
+    ("core", "body", None),                   # its query goes in a POST JSON body
+    ("openalex", "url", "URL_QUERY_MAX_ENCODED"),
+    ("clinicaltrials", "url", "URL_QUERY_MAX_ENCODED"),
+    ("semantic_scholar", "url", "S2_MAX_QUERY_ENCODED"),
+    ("doaj", "url", "DOAJ_MAX_QUERY_CHARS"),
+    ("openaire", "operators", "OPENAIRE_MAX_OPERATORS"),
+    ("arxiv", "url", "URL_QUERY_MAX_ENCODED"),
+    ("crossref", "keywords", None),           # free text only, never a boolean
+)
+
+
+def source_query_plan(boolean: str) -> list[dict]:
+    """For each source, what it will receive of `boolean`, and why.
+
+    `how` is one of: `whole` (the query as written), `body` (whole, in the request body, so
+    no length applies), `parts` (split into queries whose union is the query), `reduced`
+    (the same tree with each OR block cut to its first terms, exclusions dropped) or
+    `keywords` (free text, this source takes no boolean). PURE: no network, no database."""
+    from .sources import EPMC_POST_ABOVE_ENCODED, epmc_query
+    out: list[dict] = []
+    portable = " ".join(_strip_field_tags(boolean or "").split())
+    real = bool(portable) and _looks_boolean(portable)
+    clean = _clean_boolean(portable) if real else ""
+    for name, carriage, limit_name in SOURCE_QUERY_CARRIAGE:
+        row: dict = {"source": name, "limit": limit_name, "carriage": carriage}
+        if not real:
+            row.update(how="keywords", note="no boolean query: every source gets keywords")
+            out.append(row)
+            continue
+        if carriage == "keywords":
+            row.update(how="keywords", note="this API reads free text, never a boolean")
+        elif carriage == "body":
+            row.update(how="body", encoded=_url_encoded_len(clean or portable))
+        elif carriage == "body_above":
+            enc = _url_encoded_len(epmc_query(boolean))
+            row.update(how="body" if enc > EPMC_POST_ABOVE_ENCODED else "whole",
+                       encoded=enc, limit_value=EPMC_POST_ABOVE_ENCODED)
+        elif carriage == "operators":
+            n = _count_operators(clean)
+            cap = OPENAIRE_MAX_OPERATORS
+            parts = _split_boolean(portable, 10 ** 6, max_operators=cap) if n > cap else []
+            row.update(how="parts" if parts else ("whole" if n <= cap else "reduced"),
+                       operators=n, limit_value=cap, parts=len(parts) or None)
+        else:                                   # url
+            if name == "semantic_scholar":
+                rendered, cap = (_boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(portable)))
+                                 or ""), S2_MAX_QUERY_ENCODED
+            elif name == "arxiv":
+                rendered, cap = (_boolean_to_arxiv(_parse_boolean_ast(_tokenize_boolean(portable)))
+                                 or ""), URL_QUERY_MAX_ENCODED
+            elif name == "doaj":
+                rendered, cap = clean, DOAJ_MAX_QUERY_CHARS
+            else:
+                rendered, cap = clean, URL_QUERY_MAX_ENCODED
+            measure = len if name == "doaj" else _url_encoded_len
+            if not rendered:
+                row.update(how="keywords", note="this API cannot express the query (a NOT it "
+                                                "has no syntax for)")
+            elif measure(rendered) <= cap:
+                row.update(how="whole", encoded=measure(rendered), limit_value=cap)
+            else:
+                parts = _split_boolean(portable, cap, measure=measure)
+                row.update(how="parts" if parts else "reduced", encoded=measure(rendered),
+                           limit_value=cap, parts=len(parts) or None)
+        out.append(row)
+    return out

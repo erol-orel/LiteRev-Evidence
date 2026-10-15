@@ -575,6 +575,14 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
             "7. Le bloc EXTRACTION STRUCTUREE compte les articles qui rapportent sexe, age, "
             "profession, CAP, EPI, vaccination : cite toujours son denominateur (articles "
             "extraits sur articles pertinents) et ne generalise pas aux articles non extraits.\n"
+            "8. Sa section PAR LIEU croise la couverture et le lieu : une question du type "
+            "\"combien d'articles europeens rapportent par sexe\" se repond avec ce chiffre, "
+            "pas en comptant les SOURCES, et en disant \"pays NUTS\" plutot que \"UE\".\n"
+            "9. Le bloc GROUPES THEMATIQUES donne le nom, la taille et le resume de chaque "
+            "groupe : une question sur un groupe se repond avec lui. Un groupe n'est jamais "
+            "designe par sa position dans la liste, et les articles d'un groupe ne sont pas "
+            "dans le contexte : ce qui se dit d'un groupe vient de son resume, ou de la "
+            "section Visualisation.\n"
         ) + _llm_lang_directive(payload.lang)
         # Même forme que le brief : le digest (tout le corpus pertinent, en SQL) porte
         # les chiffres, les sources reproduites portent les citations.
@@ -588,6 +596,13 @@ def user_scenario_rag_assistant(scenario_id: str, payload: AskIn) -> dict[str, A
         _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, eff_thr))
         if _extraction_block:
             _digest_block = f"{_digest_block}\n\n{_extraction_block}" if _digest_block else _extraction_block
+        # The thematic groups of the projection, by name and size. Without them a question
+        # about a cluster had nothing to stand on and was declined, which read as a refusal
+        # rather than as the missing context it was.
+        from .clustering import clusters_to_prompt
+        _clusters_block = clusters_to_prompt(scenario_id)
+        if _clusters_block:
+            _digest_block = f"{_digest_block}\n\n{_clusters_block}" if _digest_block else _clusters_block
         _coverage = digest_coverage_note(_digest, len(sources), chosen_by=VERBATIM_BY_QUESTION)
         response = client.chat.completions.create(
             model=_model("chat"),

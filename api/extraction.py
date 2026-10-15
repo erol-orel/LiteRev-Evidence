@@ -915,6 +915,34 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             out["n_unread"] = out["n_relevant"] - out["n_extracted"]
             out["coverage"] = {k: int(head[f"c_{k}"] or 0) for k in COVERAGE_KEYS}
             out["coverage_fulltext"] = {k: int(head[f"f_{k}"] or 0) for k in COVERAGE_KEYS}
+            # Coverage CROSSED with place. The digest already said how many articles report
+            # sex or age, and the corpus digest already said how many are European, but the
+            # two were counted apart, so "how many European articles report by sex" could
+            # not be answered from them: the intersection is a third count, and it is the
+            # question a reviewer actually asks. Counted here over the same relevant,
+            # extracted set, in SQL, with no sampling.
+            from .geography import NUTS_ISO
+            place_sql = ",\n".join(
+                f"COUNT(*) FILTER (WHERE d.extraction_json->'coverage'->>'{k}' = 'true'"
+                f" AND UPPER(TRIM(d.country)) = ANY(:eu)) AS e_{k}" for k in COVERAGE_KEYS)
+            place = _rows(conn, f"""
+                SELECT COUNT(*) FILTER (WHERE UPPER(TRIM(d.country)) = ANY(:eu)) AS n_europe,
+                       COUNT(*) FILTER (WHERE d.country IS NOT NULL
+                                          AND UPPER(TRIM(d.country)) <> ALL(:eu)) AS n_elsewhere,
+                       COUNT(*) FILTER (WHERE d.country IS NULL) AS n_no_country,
+                       {place_sql}
+                FROM literature_document d
+                JOIN article_scenarios ars ON ars.document_id = d.id
+                WHERE ars.scenario_id = :sid AND {gate}
+                  AND jsonb_typeof(d.extraction_json) = 'object'
+            """, scenario_id, thr, eu=sorted(NUTS_ISO))[0]
+            out["by_place"] = {
+                "europe_iso": sorted(NUTS_ISO),
+                "n_europe": int(place["n_europe"] or 0),
+                "n_elsewhere": int(place["n_elsewhere"] or 0),
+                "n_no_country": int(place["n_no_country"] or 0),
+                "coverage_europe": {k: int(place[f"e_{k}"] or 0) for k in COVERAGE_KEYS},
+            }
 
             out["by_model"] = [
                 {"model": r["model"], "prompt_sha": r["prompt_sha"], "n": int(r["n"])}
@@ -1002,6 +1030,21 @@ def extraction_to_prompt(d: dict | None, max_chars: int = 6000) -> str:
            for k in COVERAGE_KEYS if d["coverage"].get(k)]
     sections.append(("Couverture", f"Parmi les {n} articles extraits, rapportent des donnees sur : "
                      + (", ".join(cov) if cov else "aucun des elements suivis (sexe, age, profession, CAP, EPI, vaccination...)") + "."))
+    # Coverage crossed with place: the one count a reviewer asks for and that neither the
+    # coverage line nor the corpus digest's country list can give, since both are counted
+    # on their own. Without it the honest answer was "that would need another step".
+    place = d.get("by_place") or {}
+    if place.get("n_europe") or place.get("n_elsewhere"):
+        euro_cov = [f"{_COVERAGE_LABELS_FR[k]} {place['coverage_europe'][k]}"
+                    for k in COVERAGE_KEYS if (place.get("coverage_europe") or {}).get(k)]
+        sections.append(("Europe", (
+            f"PAR LIEU, sur les {n} articles extraits : {place['n_europe']} sont situes dans un pays NUTS "
+            f"(UE, EEE, Royaume-Uni, Suisse et pays candidats), {place['n_elsewhere']} ailleurs, "
+            f"{place.get('n_no_country', 0)} sans pays resolu. Parmi les articles NUTS, rapportent des "
+            f"donnees sur : " + (", ".join(euro_cov) if euro_cov else "aucun des elements suivis")
+            + ". Ces chiffres croisent la couverture et le lieu : ils repondent a \"combien d'articles "
+              "europeens rapportent par sexe\", et ne doivent jamais etre presentes comme \"dans l'UE\" "
+              "puisque l'ensemble NUTS est plus large.")))
     if d.get("by_sheet"):
         sections.append(("Lignes extraites", "Lignes extraites : " + ", ".join(
             f"{r['sheet']} {r['n_rows']} ({r['n_articles']} articles, citation retrouvee {r['n_quote_found']})"

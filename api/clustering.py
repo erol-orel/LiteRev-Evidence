@@ -784,3 +784,31 @@ def get_user_scenario_clustering_status(scenario_id: str, lang: str | None = Que
         return {"scenario_id": scenario_id, "status": "not_started",
                 "message": "Aucun calcul lancé." if want == "fr" else "No computation started."}
     return {**_localize_clusters_payload(job["result"], want), "status": "done"}
+
+
+def clusters_to_prompt(scenario_id: str, max_chars: int = 2000) -> str:
+    """The scenario's clusters as a block for a prompt, or "" when none is computed.
+
+    The assistant answers from article passages, so a question about a cluster had no
+    ground to stand on: it could not name a cluster, say how large it was, or tell one from
+    another, and it said so honestly, which read as a refusal. The clusters are a
+    projection over the relevant subset, already computed and cached for the screen, so
+    naming them here costs a cache read and no model call.
+
+    Only what identifies a cluster is sent: its name, its size and the first lines of its
+    summary. The points are not, being coordinates no answer needs."""
+    cached = _load_viz_cache(scenario_id, "clustering")
+    clusters = (cached or {}).get("clusters") or []
+    if not clusters:
+        return ""
+    lines = []
+    for c in clusters:
+        name = str(c.get("cluster_name") or f"Cluster {c.get('cluster_id')}")
+        summary = " ".join(str(c.get("summary") or "").split())[:240]
+        lines.append(f"- {name} ({c.get('n_docs')} articles) : {summary}")
+    block = ("GROUPES THEMATIQUES (clustering de la projection, calcule sur le sous-ensemble "
+             f"pertinent ; {len(clusters)} groupes). Un groupe nomme \"Unclassified\" ou "
+             "\"Background noise\" rassemble les articles que l'algorithme n'a pas groupes, ce "
+             "n'est pas un theme. Les groupes sont numerotes par l'algorithme et affiches par "
+             "taille : citer le NOM, jamais une position dans une liste.\n" + "\n".join(lines))
+    return block[:max_chars]
