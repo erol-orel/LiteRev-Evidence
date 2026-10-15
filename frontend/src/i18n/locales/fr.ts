@@ -43,6 +43,7 @@ export const fr = {
     unauthorized: "Accès non autorisé.",
     notFound: "Ressource introuvable.",
     serviceUnavailable: "Service momentanément indisponible - réessayez dans un instant.",
+    fileTooLarge: "Fichier refusé avant d'arriver : trop volumineux. Découpez-le, ou envoyez un export plus léger.",
     serverError: "Erreur serveur - réessayez plus tard.",
     genericPrefix: "Erreur",
   },

@@ -58,6 +58,35 @@ def test_a_cell_that_decides_nothing_decides_nothing():
         assert d(value) is None, value
 
 
+def test_a_rayyan_note_carries_the_decision_and_its_reason():
+    """Rayyan's export, the one a team most often arrives with, puts the decision inside
+    its notes field, under no column of its own: read as a plain reason column, every row
+    of the ISS team's 1,524 came back undecided."""
+    r = main.rayyan_decision
+    assert r('RAYYAN-INCLUSION: {"Claudia"=>"Excluded"} | RAYYAN-EXCLUSION-REASONS: wrong study design') \
+        == ("excluded", "wrong study design")
+    assert r('RAYYAN-INCLUSION: {"Claudia"=>"Included"}') == ("included", None)
+    assert r('RAYYAN-INCLUSION: {"Claudia"=>"Included"} | RAYYAN-LABELS: persistence') == ("included", None)
+    # Several reviewers are read as this project reads its own votes: agreement decides.
+    assert r('RAYYAN-INCLUSION: {"A"=>"Included", "B"=>"Included"}') == ("included", None)
+    assert r('RAYYAN-INCLUSION: {"A"=>"Included", "B"=>"Excluded"}')[0] is None
+    assert r('RAYYAN-INCLUSION: {"A"=>"Maybe"}')[0] is None
+    assert r("a plain note") == (None, None) and r(None) == (None, None)
+
+
+def test_a_rayyan_row_never_carries_a_reviewer_name_into_the_corpus():
+    """The note holds who voted. The corpus needs the decision, not the person."""
+    row = ("key,title,doi,notes\n"
+           'k1,A paper about poultry workers,10.5555/imp.9,"RAYYAN-INCLUSION: {""Claudia""=>""Excluded""}'
+           ' | RAYYAN-EXCLUSION-REASONS: Extra EU"\n')
+    recs, _header, cols = main.records_with_decisions(row.encode(), "csv", None)
+    assert cols.get("reason") == "notes" and "decision" not in cols
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "excluded"
+    assert recs[0]["reason"] == "Extra EU", "the reason Rayyan names, not the whole note"
+    assert "Claudia" not in str(recs[0]["reason"]) and "RAYYAN" not in str(recs[0]["reason"])
+
+
 def test_the_decision_and_reason_columns_are_found_by_name():
     cols = main.map_decision_columns(["Key", "Title", "Authors", "DOI", "Decision", "Exclusion Reason", "Year"])
     assert cols["decision"] == "Decision" and cols["reason"] == "Exclusion Reason"

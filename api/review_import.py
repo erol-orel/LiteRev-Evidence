@@ -28,6 +28,7 @@ Preview first (`/decisions/preview`), apply second (`/decisions/import`), undo i
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -115,6 +116,37 @@ def decision_of(value: Any) -> str | None:
     return None
 
 
+#: Rayyan's CSV export carries the decision INSIDE its notes field, as
+#: `RAYYAN-INCLUSION: {"Claudia"=>"Excluded"} | RAYYAN-EXCLUSION-REASONS: wrong study design`.
+#: It is the export a team most often arrives with (the ISS team's own file holds 1,524
+#: records this way), and no column of it says "decision": read as a plain reason column,
+#: every row came back undecided.
+_RAYYAN_VOTES = re.compile(r"RAYYAN-INCLUSION:\s*\{(.*?)\}", re.S)
+_RAYYAN_ONE_VOTE = re.compile(r'"[^"]*"\s*=>\s*"([^"]+)"')
+_RAYYAN_REASONS = re.compile(r"RAYYAN-EXCLUSION-REASONS:\s*([^|]+)")
+
+
+def rayyan_decision(note: Any) -> tuple[str | None, str | None]:
+    """(decision, reason) read from a Rayyan note, or (None, None).
+
+    Several reviewers may have voted. They are read exactly as this project reads its own
+    double-blind votes: agreement decides, a disagreement decides nothing until someone
+    arbitrates. The reviewers' NAMES are never kept: the import needs the decision, and a
+    name here is personal data that has no reason to travel into the corpus."""
+    text_ = str(note or "")
+    m = _RAYYAN_VOTES.search(text_)
+    if not m:
+        return None, None
+    votes = {decision_of(v) for v in _RAYYAN_ONE_VOTE.findall(m.group(1))}
+    reason = None
+    mr = _RAYYAN_REASONS.search(text_)
+    if mr:
+        reason = _clean(mr.group(1))
+    if len(votes) != 1:
+        return None, reason                                  # nobody voted, or they disagree
+    return votes.pop(), reason
+
+
 def map_decision_columns(header: list) -> dict[str, Any]:
     """Which column carries what: the bibliographic fields `additions` already knows, plus
     the decision and its reason. The first header that matches a known name wins."""
@@ -177,6 +209,20 @@ def records_with_decisions(data: bytes, kind: str, mapping: dict | None = None) 
             rec["decision"] = decision_of(raw)
             rec["decision_raw"] = _clean(raw)
             rec["reason"] = _clean(r.get(cols.get("reason"))) if cols.get("reason") else None
+            # Rayyan writes the decision inside its notes field, under no column of its own.
+            # Looked for in every cell, so it is found whichever column holds it.
+            if rec["decision"] is None or "RAYYAN-INCLUSION" in str(rec["reason"] or ""):
+                for value in r.values():
+                    if "RAYYAN-INCLUSION" not in str(value or ""):
+                        continue
+                    found, why = rayyan_decision(value)
+                    rec["decision"] = rec["decision"] or found
+                    # The reason is the one Rayyan names, never the whole note: that string
+                    # carries the reviewer's name, which has no reason to enter the corpus.
+                    if "RAYYAN-INCLUSION" in str(rec["reason"] or "") or not rec["reason"]:
+                        rec["reason"] = why
+                    rec["decision_raw"] = rec["decision_raw"] or "RAYYAN-INCLUSION"
+                    break
             out.append(rec)
         return out, header, cols
     parser = {"ris": parse_ris, "nbib": parse_nbib, "bibtex": parse_bibtex}.get(kind)
