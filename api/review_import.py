@@ -160,12 +160,19 @@ def map_decision_columns(header: list) -> dict[str, Any]:
 
 
 def rows_from_table(data: bytes, kind: str) -> tuple[list[dict], list]:
-    """The rows of a table and its header, whatever the delimiter."""
+    """The rows of a table and its header, whatever the delimiter.
+
+    A file that cannot be read raises ValueError, never the parser's own error: `_prepare`
+    turns a ValueError into a 422 that names the trouble, while anything else reached the
+    client as a 500 about nothing. A cell past `CSV_MAX_FIELD_BYTES` did exactly that."""
     import csv
     import io
     if kind == "xlsx":
         import pandas as pd
-        df = pd.read_excel(io.BytesIO(data), dtype=str)
+        try:
+            df = pd.read_excel(io.BytesIO(data), dtype=str)
+        except Exception as e:                               # noqa: BLE001 - not a readable workbook
+            raise ValueError(f"Excel unreadable: {str(e)[:200]}") from None
         df = df.where(df.notna(), None)
         return df.to_dict(orient="records"), [str(c) for c in df.columns]
     from .additions import _decode
@@ -173,7 +180,10 @@ def rows_from_table(data: bytes, kind: str) -> tuple[list[dict], list]:
     first = text_.splitlines()[0] if text_.strip() else ""
     delim = max(",;\t|", key=first.count) if first else ","
     reader = csv.DictReader(io.StringIO(text_), delimiter=delim)
-    rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    try:
+        rows = [{k: v for k, v in r.items() if k is not None} for r in reader]
+    except csv.Error as e:                                   # a cell past the limit, a broken quote
+        raise ValueError(f"CSV unreadable: {e}") from None
     return rows, list(reader.fieldnames or [])
 
 

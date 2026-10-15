@@ -305,3 +305,22 @@ def test_the_import_needs_the_key_and_refuses_what_it_cannot_read(seeded):
     assert r.status_code == 422
     assert c.post("/user-scenarios/usr-nope/decisions/import", headers=KEY,
                   files=_file(EXPORT)).status_code == 404
+
+
+def test_a_table_it_cannot_read_is_a_sentence_not_a_500(seeded):
+    """A cell past csv's raised limit made the reader raise its own error, which no caller
+    caught: production answered 500, about nothing, on a file the user could have fixed.
+    The preview reports it as unreadable and still hands back what it could see; the
+    import refuses it with a message."""
+    from api.additions import CSV_MAX_FIELD_BYTES
+    monstrous = ('Title,DOI,Decision\n"%s",10.5555/imp.huge,Include\n'
+                 % ("x" * (CSV_MAX_FIELD_BYTES + 16)))
+    c = _client()
+    r = c.post(f"/user-scenarios/{SID}/decisions/preview", headers=KEY,
+               files=_file(monstrous, "huge.csv"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["unreadable"] and "CSV" in body["unreadable"]
+    assert body["counts"]["records"] == 0 and body["plan"] == []
+    r = c.post(f"/user-scenarios/{SID}/decisions/import", headers=KEY, files=_file(monstrous, "huge.csv"))
+    assert r.status_code == 422 and "CSV" in r.json()["detail"]
