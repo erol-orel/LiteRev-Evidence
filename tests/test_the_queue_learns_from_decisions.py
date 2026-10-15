@@ -145,6 +145,11 @@ def seeded(db_conn, monkeypatch):
         main._ensure_learning_tables()
         cur.execute("DELETE FROM scenario_learning WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM scenario_reviewer WHERE scenario_id = %s", (SID,))
+        # The settings row outlives the tables above, and the audit sample is one of its
+        # columns: left on by a run that switched it on, it draws every below-threshold
+        # article into the blind sample and the queue tests read a different queue than
+        # they were written for. The seed owns this scenario's settings, so it clears them.
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         cur.execute("INSERT INTO user_scenarios (id, name, query, mode, filters)"
                     " VALUES (%s, 'The queue learns', 'avian influenza', 'boolean', '{}')", (SID,))
@@ -164,6 +169,7 @@ def seeded(db_conn, monkeypatch):
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM scenario_learning WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM scenario_reviewer WHERE scenario_id = %s", (SID,))
+        cur.execute("DELETE FROM scenario_settings WHERE scenario_id = %s", (SID,))
         cur.execute("DELETE FROM user_scenarios WHERE id = %s", (SID,))
         db_conn.commit()
 
@@ -246,12 +252,19 @@ def test_the_audit_sample_is_never_dressed_up_as_a_suggestion(seeded):
     c = _client()
     r = c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 100}, headers=KEY)
     assert r.status_code == 200, r.text
-    q = _queue(c, R1)
-    for a in q["articles"]:
-        assert not (a["audit_sample"] and a["below_threshold"]), \
-            f"article {a['id']} is in the blind audit sample and marked as a suggestion"
-    assert q["remaining_suggested"] == 0, "the sample already screens them, blind"
-    assert q["remaining_audit"] > 0
+    try:
+        q = _queue(c, R1)
+        for a in q["articles"]:
+            assert not (a["audit_sample"] and a["below_threshold"]), \
+                f"article {a['id']} is in the blind audit sample and marked as a suggestion"
+        assert q["remaining_suggested"] == 0, "the sample already screens them, blind"
+        assert q["remaining_audit"] > 0
+    finally:
+        # The setting lives in the database and outlives this test, its file and this
+        # run: left on, it puts every below-threshold article of this scenario into the
+        # audit sample, and the test above that expects a suggestion in the queue fails
+        # on the NEXT run, not this one.
+        c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 0}, headers=KEY)
 
 
 def test_every_suggestion_can_be_read_not_only_counted(seeded):
