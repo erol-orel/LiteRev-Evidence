@@ -536,28 +536,53 @@ def get_user_scenario_double_blind_queue(
         col = f"reviewer_{reviewer}_status"
         # Ce que CE relecteur n'a pas encore jugé : le sous-ensemble pertinent, plus
         # l'échantillon d'audit (le même pour les deux relecteurs).
+        # Les suggestions du modèle, sous le seuil, entrent DANS le lot : la carte en
+        # nommait cinq et renvoyait l'utilisateur chercher les autres dans le corpus, où
+        # rien ne les trie, donc elles étaient comptées et jamais lues. Elles n'écrasent
+        # pas l'échantillon d'audit, tiré du même vivier : son tirage doit rester aveugle
+        # pour que son kappa vérifie le seuil, donc un article d'audit n'est jamais marqué
+        # comme suggéré, et les suggestions l'excluent.
+        suggested = f"""
+            SELECT ars.document_id
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid
+              AND d.is_duplicate IS NOT TRUE
+              AND d.abstract IS NOT NULL AND length(d.abstract) > 30
+              AND ars.learned_score >= :smin
+              AND ({relevant_gate_sql('d', 'ars', ':thr')}) IS NOT TRUE
+              AND ars.document_id NOT IN (SELECT document_id FROM audit)
+            ORDER BY ars.learned_score DESC, ars.document_id
+            LIMIT :n_suggest
+        """
         pending = f"""
             WITH audit AS ({_audit_pool_sql()}),
+            sugg AS ({suggested}),
             q AS (
                 SELECT d.id, d.title, d.abstract, d.year, d.journal, d.doi,
                        ars.similarity_score, ars.rerank_score, ars.learned_score,
                        ars.reviewer_1_status, ars.reviewer_2_status,
                        (au.document_id IS NOT NULL) AS audit_sample,
+                       (sg.document_id IS NOT NULL) AS below_threshold,
                        CASE WHEN au.document_id IS NOT NULL
                             THEN md5(ars.scenario_id || ':' || ars.document_id::text) END AS audit_key
                 FROM article_scenarios ars
                 JOIN literature_document d ON d.id = ars.document_id
                 LEFT JOIN audit au ON au.document_id = ars.document_id
+                LEFT JOIN sugg sg ON sg.document_id = ars.document_id
                 WHERE ars.scenario_id = :sid
                   AND ars.{col} IS NULL
-                  AND (au.document_id IS NOT NULL OR {relevant_gate_sql('d', 'ars', ':thr')})
+                  AND (au.document_id IS NOT NULL OR sg.document_id IS NOT NULL
+                       OR {relevant_gate_sql('d', 'ars', ':thr')})
             )
         """
-        params = {"sid": scenario_id, "thr": thr, "n_audit": n_audit}
+        params = {"sid": scenario_id, "thr": thr, "n_audit": n_audit,
+                  "smin": _learning().SUGGEST_MIN_SCORE, "n_suggest": _learning().SUGGESTED_IN_QUEUE}
         rows = conn.execute(text(f"""
             {pending}
             SELECT id, title, abstract, year, journal, doi, similarity_score, rerank_score,
-                   learned_score, reviewer_1_status, reviewer_2_status, audit_sample
+                   learned_score, reviewer_1_status, reviewer_2_status, audit_sample,
+                   below_threshold
             FROM (
                 SELECT q.*,
                        ROW_NUMBER() OVER (PARTITION BY audit_sample
@@ -573,15 +598,22 @@ def get_user_scenario_double_blind_queue(
         """), {**params, "lim": max(1, min(int(limit), 200))}).mappings().all()
         counts = conn.execute(text(f"""
             {pending}
-            SELECT COUNT(*) FILTER (WHERE NOT audit_sample) AS relevant,
-                   COUNT(*) FILTER (WHERE audit_sample) AS audit
+            SELECT COUNT(*) FILTER (WHERE NOT audit_sample AND NOT below_threshold) AS relevant,
+                   COUNT(*) FILTER (WHERE audit_sample) AS audit,
+                   COUNT(*) FILTER (WHERE below_threshold) AS suggested
             FROM q
         """), params).mappings().first() or {}
     n_rel, n_aud = int(counts.get("relevant") or 0), int(counts.get("audit") or 0)
+    n_sug = int(counts.get("suggested") or 0)
     learning = _learning().learning_summary(scenario_id)
+    # Combien de suggestions le lot porte, et combien le modèle en compte : la carte doit
+    # pouvoir dire "les 97" ou "les 200 premières des 1 442", sans quoi un reviewer croit
+    # avoir tout vu.
+    learning["suggested_in_queue"] = n_sug
     return {
         "scenario_id": scenario_id, "reviewer": reviewer, "reviewer_code": code,
-        "remaining": n_rel + n_aud, "remaining_relevant": n_rel, "remaining_audit": n_aud,
+        "remaining": n_rel + n_aud + n_sug, "remaining_relevant": n_rel, "remaining_audit": n_aud,
+        "remaining_suggested": n_sug,
         "audit_sample_size": n_audit, "returned": len(rows),
         "ordering": "learned" if learning.get("trained") else "relevance",
         "learning": learning,

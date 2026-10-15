@@ -215,7 +215,15 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     q = _queue(_client(), R1)
     assert q["ordering"] == "learned"
     undecided = [a["id"] for a in q["articles"] if not a["audit_sample"]]
-    assert undecided == [806, 807], "the relevant set's undecided articles, the likely one first"
+    # 808 sits below the threshold and the model would include it, so it is IN the list to
+    # screen, between the two relevant ones by learned score. It used to be named in the
+    # card and left in the corpus for the reviewer to find, which on a real review meant
+    # a hundred articles counted and never read.
+    assert undecided == [806, 808, 807], "the relevant ones and the suggestion, by learned score"
+    by_id = {a["id"]: a for a in q["articles"]}
+    assert by_id[808]["below_threshold"] is True, "and it says it came in below the threshold"
+    assert by_id[806]["below_threshold"] is False and by_id[807]["below_threshold"] is False
+    assert q["remaining_suggested"] == 1 and q["remaining_relevant"] == 2
     assert q["articles"][0]["learned_score"] == pytest.approx(scores[806])
     info = q["learning"]
     assert info["remaining_relevant"] == 2
@@ -225,6 +233,25 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     assert [s["id"] for s in info["suggested"]] == [808]
     r = _client().get(f"/user-scenarios/{SID}/learned-ranking")
     assert r.status_code == 200 and r.json()["suggested"][0]["id"] == 808
+
+
+def test_the_audit_sample_is_never_dressed_up_as_a_suggestion(seeded):
+    """The audit sample and the model's suggestions are drawn from the same pool: the
+    below-threshold articles nobody judged. The sample exists to check the threshold
+    blind, so an article in it must never be marked as something the model likes, or its
+    kappa stops being an independent check. With the sample at 100 percent there is
+    nothing left to suggest, and the queue says so rather than double-counting."""
+    pytest.importorskip("sklearn")
+    main.retrain(SID)
+    c = _client()
+    r = c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 100}, headers=KEY)
+    assert r.status_code == 200, r.text
+    q = _queue(c, R1)
+    for a in q["articles"]:
+        assert not (a["audit_sample"] and a["below_threshold"]), \
+            f"article {a['id']} is in the blind audit sample and marked as a suggestion"
+    assert q["remaining_suggested"] == 0, "the sample already screens them, blind"
+    assert q["remaining_audit"] > 0
 
 
 def test_every_suggestion_can_be_read_not_only_counted(seeded):

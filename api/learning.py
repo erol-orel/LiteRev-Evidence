@@ -50,6 +50,15 @@ TFIDF_MAX_FEATURES = 60_000
 #: way to see the rest: a caller asks for more with `limit`, and the export takes them all.
 SUGGESTED_LIMIT = 10
 SUGGESTED_LIMIT_MAX = 2000
+#: A below-threshold article is a suggestion from this score up. One number, used by the
+#: list that counts them and by the screening queue that now carries them.
+SUGGEST_MIN_SCORE = 0.5
+#: How many suggestions the screening queue admits beside the relevant subset. A margin on
+#: the review, not a second review: the model offers 97 suggestions on one HPAI corpus and
+#: 1,442 on another, and a queue of 1,442 articles the search did not retain is a different
+#: piece of work, which a reviewer must choose rather than inherit. The rest stay in the
+#: export, which takes them all.
+SUGGESTED_IN_QUEUE = 200
 #: Cross-validated AUC is reported from this many decisions of each kind: fewer folds
 #: would say little.
 CV_MIN_PER_CLASS = 10
@@ -302,11 +311,11 @@ def learning_summary(scenario_id: str, conn=None, suggested_limit: int | None = 
             SELECT COUNT(*) FILTER (WHERE {undecided} AND {gate}) AS remaining_relevant,
                    SUM(ars.learned_score) FILTER (WHERE {undecided} AND {gate}) AS expected_left,
                    COUNT(*) FILTER (WHERE {undecided} AND ({gate}) IS NOT TRUE AND {has_abstract_sql('d')}
-                                      AND ars.learned_score >= 0.5) AS below_suggested
+                                      AND ars.learned_score >= :smin) AS below_suggested
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-        """), {"sid": scenario_id, "thr": thr}).mappings().first() or {}
+        """), {"sid": scenario_id, "thr": thr, "smin": SUGGEST_MIN_SCORE}).mappings().first() or {}
         suggested = []
         if status.get("trained"):
             suggested = [dict(r) for r in conn.execute(text(f"""
@@ -315,10 +324,10 @@ def learning_summary(scenario_id: str, conn=None, suggested_limit: int | None = 
                 JOIN literature_document d ON d.id = ars.document_id
                 WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
                   AND {undecided} AND ({gate}) IS NOT TRUE AND {has_abstract_sql('d')}
-                  AND ars.learned_score >= 0.5
+                  AND ars.learned_score >= :smin
                 ORDER BY ars.learned_score DESC, ars.document_id
                 LIMIT :lim
-            """), {"sid": scenario_id, "thr": thr,
+            """), {"sid": scenario_id, "thr": thr, "smin": SUGGEST_MIN_SCORE,
                    "lim": max(1, min(int(suggested_limit or SUGGESTED_LIMIT), SUGGESTED_LIMIT_MAX))}
             ).mappings().all()]
     finally:

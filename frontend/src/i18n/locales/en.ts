@@ -1137,14 +1137,14 @@ export const en: Translations = {
       learningTrained:
         "Trained on {included} included and {excluded} excluded decisions: the list puts first what your decisions make likely. Among the {remaining} relevant articles left, the model expects about {left} to be included.",
       learningAuc: "Cross-validated AUC {auc} (1 means it separates your decisions perfectly, 0.5 means chance).",
-      learningSuggested:
-        "{n} articles below the relevance threshold look like what you include. Find them in the Corpus tab to include them by hand:",
+      learningSuggested: "{n} articles below the relevance threshold look like what you include. The top {inQueue} are already in the list below, marked as suggestions:",
       learningBadge: "learned {score}",
       learningDownloadAll: "Download all {n} as a CSV, in the model's order",
       auditToggle: "Also screen a random sample of {n} articles below the threshold",
       auditToggleHint: "Audits the automatic exclusion: the same sample for both reviewers, marked in the list, with its own kappa.",
       auditToggleFailed: "The option was not saved: try again (API key or network).",
       auditBadge: "Audit sample · below the threshold",
+      suggestedBadge: "suggested, below threshold",
       strataRelevant: "Relevant set: above the threshold or included by hand",
       strataRelevantNote: "This kappa only measures agreement on what the machine kept.",
       strataAudit: "Audit sample: {n} random articles below the threshold",

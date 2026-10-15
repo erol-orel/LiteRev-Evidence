@@ -2673,6 +2673,10 @@ export interface LearningStatus {
   expected_relevant_left?: number | null;
   /** Undecided articles below the threshold the model would include, and the first of them. */
   below_threshold_suggested?: number;
+  /** How many of those the screening queue carries. The rest are in the export: the
+   *  model offers 97 suggestions on one corpus and 1,442 on another, and a queue of
+   *  1,442 articles the search did not retain is a different review. */
+  suggested_in_queue?: number;
   suggested?: Array<{ id: number; title: string; year?: number | null; learned_score?: number | null }>;
 }
 
@@ -2685,6 +2689,8 @@ export interface DoubleBlindQueue {
   remaining_relevant?: number;
   remaining_audit?: number;
   audit_sample_size?: number;
+  /** Of `remaining`, how many came in below the threshold on the model's suggestion. */
+  remaining_suggested?: number;
   returned: number;
   /** "learned" once a model trained on this scenario's decisions orders the list. */
   ordering?: "learned" | "relevance";
@@ -2704,6 +2710,9 @@ export interface DoubleBlindQueue {
     reviewer_2_status?: string | null;
     /** Drawn below the threshold to audit the automatic exclusion. */
     audit_sample?: boolean;
+    /** Came in from below the relevance threshold because the learned model would include
+     *  it: part of the list to screen, marked so a reviewer knows what they are judging. */
+    below_threshold?: boolean;
   }>;
 }
 
