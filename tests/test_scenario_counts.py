@@ -128,13 +128,47 @@ def test_the_endpoint_agrees_when_everything_matches(seeded):
     assert c["consistent"] is True and c["mismatches"] == []
 
 
-def test_the_endpoint_names_a_stale_stored_count(seeded):
-    """The exact production shape: the card's stored copy lags the database."""
+def test_the_endpoint_repairs_a_stale_stored_count(seeded):
+    """The exact production shape: the stored copy lags the database, because six papers
+    were added by hand after the search. It is a cache, so it is repaired rather than
+    shown: the red banner said "52,759, expected 52,765" and left the reviewer to guess
+    which of the two numbers to believe."""
     with seeded.cursor() as cur:
         cur.execute("UPDATE user_scenarios SET article_count = 2 WHERE id = %s", (SID,))
     c = _counts(SID)
-    assert c["consistent"] is False
-    assert c["mismatches"] == [{"field": "article_count", "value": 2, "expected": 3}]
+    assert c["stored_count_healed"] is True
+    assert c["article_count"] == 3
+    assert c["consistent"] is True and c["mismatches"] == []
+    # And repaired in the database, not only in the answer: the next reader sees 3.
+    with seeded.cursor() as cur:
+        cur.execute("SELECT article_count FROM user_scenarios WHERE id = %s", (SID,))
+        assert cur.fetchone()[0] == 3
+    assert _counts(SID)["stored_count_healed"] is False      # nothing left to repair
+
+
+def test_a_running_search_keeps_its_provisional_count(seeded):
+    """While a search runs, the two numbers diverge legitimately: the stored copy is NOT
+    rewritten under the pipeline that owns it, and the banner says "in progress"."""
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE user_scenarios SET article_count = 2, populate_status = 'running' WHERE id = %s", (SID,))
+    c = _counts(SID)
+    assert c["in_progress"] is True and c["stored_count_healed"] is False
+    assert c["article_count"] == 2
+    with seeded.cursor() as cur:
+        cur.execute("SELECT article_count FROM user_scenarios WHERE id = %s", (SID,))
+        assert cur.fetchone()[0] == 2
+
+
+def test_the_heal_does_not_move_the_scenario_up_the_list(seeded):
+    """The list is ordered by `updated_at`: opening a scenario page must not bring it
+    back to the top just because its cached count was behind."""
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE user_scenarios SET article_count = 2, updated_at = '2001-01-01' WHERE id = %s", (SID,))
+    assert _counts(SID)["stored_count_healed"] is True
+    with seeded.cursor() as cur:
+        cur.execute("SELECT article_count, updated_at FROM user_scenarios WHERE id = %s", (SID,))
+        count, updated_at = cur.fetchone()
+    assert count == 3 and updated_at.year == 2001
 
 
 def test_a_stale_search_figure_is_reported_as_drift_not_as_a_mismatch(seeded):

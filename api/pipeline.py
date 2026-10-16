@@ -805,6 +805,115 @@ except Exception as _e:                                      # noqa: BLE001
     logger.warning(f"_ensure_source_query_cache: {_e}")
 
 
+# ── Où une source COUPÉE par le budget s'était arrêtée de lire ───────────────────────
+# Une recherche exhaustive demande à chaque base TOUT ce qu'elle apparie. Europe PMC en
+# annonce 72 847 sur la question COVID exposition, OpenAlex 66 395 : cela ne tient pas dans
+# le budget d'une fédération, donc la source est coupée en route et la carte le dit.
+# Jusqu'ici la reprise repartait du DÉBUT (curseur « * », décalage 0) : elle relisait les
+# mêmes pages, le budget s'épuisait au même endroit, et la quatrième reprise sur ce
+# scénario n'a rapporté AUCUNE notice nouvelle. Autrement dit, enchaîner les reprises ne
+# convergeait pas, et « exhaustif » ne pouvait pas se terminer au-delà d'une certaine
+# taille. La position de lecture est donc gardée, par scénario, par source et par requête,
+# et la reprise continue là où la précédente s'est arrêtée.
+def _ensure_source_fetch_cursor() -> None:
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                CREATE TABLE IF NOT EXISTS source_fetch_cursor (
+                    scenario_id VARCHAR(64) NOT NULL,
+                    fetcher     VARCHAR(40) NOT NULL,
+                    query_hash  VARCHAR(40) NOT NULL,
+                    position    TEXT,
+                    fetched     BIGINT NOT NULL DEFAULT 0,
+                    rounds      INTEGER NOT NULL DEFAULT 0,
+                    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (scenario_id, fetcher, query_hash)
+                )
+            """))
+    except Exception as _e:                                  # noqa: BLE001 - never blocks boot
+        logger.warning(f"_ensure_source_fetch_cursor: {_e}")
+
+
+try:
+    _ensure_source_fetch_cursor()
+except Exception as _e:                                      # noqa: BLE001
+    logger.warning(f"_ensure_source_fetch_cursor: {_e}")
+
+
+def cursor_action(outcome: str, has_position: bool, resumed: bool) -> str | None:
+    """Que faire de la position de lecture d'une source, selon son issue.
+
+    `save` : coupée en route, on garde où elle en était pour que la prochaine reprise
+    continue. `clear` : elle a fini de lire (plus rien à reprendre), ou elle est repartie
+    d'une position mémorisée et n'a pas pu lire une seule page, ce qui arrive quand l'API
+    a périmé le curseur : l'oublier fait repartir le tour suivant du début plutôt que de
+    rester bloqué. `None` : rien à changer (une source rejouée depuis le cache, écartée
+    faute de clé, ou en erreur sans reprise en cours).
+    """
+    if outcome == "cut_by_budget":
+        return "save" if has_position else None
+    if outcome in ("ok", "empty"):
+        return "clear"
+    if outcome == "error" and resumed and not has_position:
+        return "clear"
+    return None
+
+
+def _load_fetch_cursors(scenario_id: str, query_hash: str) -> dict[str, dict]:
+    """{fetcher: {position, fetched, rounds}} pour CETTE requête et CE scénario.
+
+    La clé porte le hash de la requête : changer la requête invalide la position, puisque
+    le curseur d'une base ne veut rien dire pour une autre question."""
+    out: dict[str, dict] = {}
+    try:
+        with engine.connect() as _c:
+            rows = _c.execute(text(
+                "SELECT fetcher, position, fetched, rounds FROM source_fetch_cursor "
+                "WHERE scenario_id = :s AND query_hash = :h"
+            ), {"s": scenario_id, "h": query_hash}).mappings().all()
+        for r in rows:
+            out[r["fetcher"]] = {"position": r["position"], "fetched": int(r["fetched"] or 0),
+                                 "rounds": int(r["rounds"] or 0)}
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_load_fetch_cursors: {_e}")
+    return out
+
+
+def _save_fetch_cursor(scenario_id: str, fetcher: str, query_hash: str,
+                       position: Any, fetched: int, rounds: int) -> None:
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                INSERT INTO source_fetch_cursor (scenario_id, fetcher, query_hash, position,
+                                                 fetched, rounds, updated_at)
+                VALUES (:s, :f, :h, :p, :n, :r, NOW())
+                ON CONFLICT (scenario_id, fetcher, query_hash) DO UPDATE
+                SET position = :p, fetched = :n, rounds = :r, updated_at = NOW()
+            """), {"s": scenario_id, "f": fetcher, "h": query_hash,
+                   "p": None if position is None else str(position)[:2000],
+                   "n": int(fetched or 0), "r": int(rounds or 0)})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_save_fetch_cursor {fetcher}: {_e}")
+
+
+def _clear_fetch_cursor(scenario_id: str, fetcher: str | None = None,
+                        query_hash: str | None = None) -> None:
+    """Oublier la position : la source a fini de lire, ou la requête a changé."""
+    try:
+        where = ["scenario_id = :s"]
+        params: dict[str, Any] = {"s": scenario_id}
+        if fetcher:
+            where.append("fetcher = :f")
+            params["f"] = fetcher
+        if query_hash:
+            where.append("query_hash = :h")
+            params["h"] = query_hash
+        with engine.begin() as _c:
+            _c.execute(text("DELETE FROM source_fetch_cursor WHERE " + " AND ".join(where)), params)
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_clear_fetch_cursor: {_e}")
+
+
 def _source_query_hash(query: str, filters: dict | None, max_results: int,
                        mode: str = "standard") -> str:
     """Clé de cache : même requête, mêmes filtres, même plafond par source, même mode.
@@ -1036,6 +1145,11 @@ def _run_user_scenario_populate(
     # source coupée revenait avec 0 et sans erreur, donc d'issue `empty` : « rien dans la
     # littérature » pour une source qu'on avait cessé de lire.
     _fetcher_cut: set[str] = set()
+    # Où chaque source en est de sa lecture, {fetcher: (position, notices lues en tout)},
+    # et d'où elle repart, lu en base au début de la fédération. Une source coupée garde
+    # sa position ; une source qui va au bout l'efface.
+    _fetch_pos: dict[str, tuple] = {}
+    _resume_state: dict[str, dict] = {}
     # Fetchers dont la réponse ne doit pas être mise en cache même complète : OpenAlex
     # quand son filtre titre+résumé a été refusé, pour que la relance le retente.
     _no_cache: set[str] = set()
@@ -1099,6 +1213,29 @@ def _run_user_scenario_populate(
             with _counter_lock:
                 _fetcher_cut.add(_f)
         return True
+
+    # ── La position de lecture, pour que la reprise continue au lieu de recommencer ──
+    # Chaque boucle de pagination dit où elle en est ; une source coupée garde sa position
+    # (voir `_save_fetch_cursor`), une source qui va au bout l'efface. Les boucles lisent
+    # `_tls.fetcher` comme `_budget_exhausted`, donc elles n'ont pas à se nommer.
+    def _note_pos(position: Any, fetched: int) -> None:
+        _f = getattr(_tls, "fetcher", None)
+        if not _f:
+            return
+        with _counter_lock:
+            _fetch_pos[_f] = (position, int(fetched or 0))
+
+    def _resume(default: Any = None) -> Any:
+        """La position d'où repartir, ou `default` pour une première lecture."""
+        _f = getattr(_tls, "fetcher", None)
+        got = (_resume_state.get(_f) or {}).get("position") if _f else None
+        return default if got in (None, "") else got
+
+    def _resume_fetched() -> int:
+        """Ce que cette source a DÉJÀ rapporté lors des tours précédents, pour que le
+        plafond par source compte la lecture entière et non le seul tour en cours."""
+        _f = getattr(_tls, "fetcher", None)
+        return int((_resume_state.get(_f) or {}).get("fetched") or 0) if _f else 0
 
     # Un 429 se réessaie un nombre BORNÉ de fois. Trois fetchers bouclaient sans limite
     # (`if 429: sleep(2); continue`) : Semantic Scholar répond 429 à la moindre rafale
@@ -1182,6 +1319,13 @@ def _run_user_scenario_populate(
         if resp is not None:
             return resp
         raise last_exc if last_exc is not None else RuntimeError(f"{source} : aucune réponse")
+
+    def _part_resume() -> dict:
+        """La position retenue pour une source qui lit le booléen morceau par morceau."""
+        try:
+            return json.loads(_resume("") or "") or {}
+        except Exception:                                    # noqa: BLE001 - position illisible
+            return {}
 
     def _run_fetcher(fn):
         _tls.fetcher = fn.__name__
@@ -1877,6 +2021,18 @@ def _run_user_scenario_populate(
         else:
             _passes = [("fulltext_all", _bool_query, _send_bool, _cap_strategy)]
         _seen: set = set()
+        # Reprise : OpenAlex lit passage par passage (un par morceau du booléen découpé),
+        # et sa liste de passages se réécrit en cours de route (un morceau refusé est coupé
+        # en deux). Un NUMÉRO de passage ne serait donc pas stable d'un tour à l'autre : la
+        # position retenue nomme le passage par son type ET sa requête, et le tour suivant
+        # saute les passages déjà lus jusqu'à retrouver celui-là. Si la liste a changé au
+        # point de ne plus le contenir, on repart du début, ce qui est sûr.
+        _oa_skip = None
+        try:
+            _oa_skip = json.loads(_resume("") or "") or None
+        except Exception:                                    # noqa: BLE001 - position illisible
+            _oa_skip = None
+        _oa_total = [_resume_fetched()]
         # Un morceau qu'OpenAlex refuse (4xx à sa première page) est coupé en deux et relancé,
         # jusqu'à OPENALEX_BISECT_DEPTH fois : un seul morceau refusé faisait échouer toute la
         # source (le 400 levait), et les morceaux suivants n'étaient jamais demandés.
@@ -1887,6 +2043,13 @@ def _run_user_scenario_populate(
                 _pass, _ox_q, _ox_native, _oa_limit = _passes.pop(0)
                 _oa_page, _oa_fetched = 1, 0
                 _oa_cursor = "*"
+                if _oa_skip is not None:
+                    if _oa_skip.get("kind") != _pass or _oa_skip.get("q") != _ox_q:
+                        continue                 # passage déjà lu lors d'un tour précédent
+                    _oa_cursor = _oa_skip.get("cursor") or "*"
+                    _oa_page = int(_oa_skip.get("page") or 1)
+                    _oa_fetched = int(_oa_skip.get("fetched_pass") or 0)
+                    _oa_skip = None
                 while _oa_fetched < _oa_limit:
                     if _budget_exhausted():
                         break  # budget fédération dépassé - on arrête de paginer
@@ -1985,6 +2148,7 @@ def _run_user_scenario_populate(
                         except Exception:
                             _inc("openalex", 0, 1)
                     _oa_fetched += len(_oa_results)
+                    _oa_total[0] += len(_oa_results)
                     if _pass == "fulltext_top":
                         if len(_oa_results) < _oa_batch or _oa_fetched >= _oa_limit:
                             break
@@ -1993,6 +2157,9 @@ def _run_user_scenario_populate(
                         _oa_cursor = (_oa_json.get("meta") or {}).get("next_cursor")
                         if not _oa_cursor or _oa_fetched >= _oa_limit:
                             break
+                    _note_pos(json.dumps({"kind": _pass, "q": _ox_q, "cursor": _oa_cursor,
+                                          "page": _oa_page, "fetched_pass": _oa_fetched}),
+                              _oa_total[0])
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"OpenAlex populate {scenario_id}: {_e}")
@@ -2002,8 +2169,9 @@ def _run_user_scenario_populate(
     def _fetch_crossref():
         count = 0
         try:
-            _cr_offset = 0
-            _cr_fetched = 0
+            # Reprise : le décalage est la position, et il vaut pour la même requête.
+            _cr_offset = int(_resume(0) or 0)
+            _cr_fetched = _resume_fetched()
             _cr_limit = _cap_ranked
             _cr_rows = min(1000, _cr_limit)   # max Crossref : 10× moins d'allers-retours
             while _cr_fetched < _cr_limit:
@@ -2058,6 +2226,7 @@ def _run_user_scenario_populate(
                 if len(_cr_items) < _cr_rows or _cr_fetched >= _cr_limit:
                     break
                 _cr_offset += _cr_rows
+                _note_pos(_cr_offset, _cr_fetched)
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Crossref populate {scenario_id}: {_e}")
@@ -2067,8 +2236,10 @@ def _run_user_scenario_populate(
     def _fetch_europepmc():
         count = 0
         try:
-            _ep_cursor_mark = "*"
-            _ep_fetched = 0
+            # Reprise : le curseur d'Europe PMC est opaque et stable pour une requête
+            # donnée, donc il repart exactement où le tour précédent s'est arrêté.
+            _ep_cursor_mark = _resume("*")
+            _ep_fetched = _resume_fetched()
             _ep_limit = _cap_strategy
             _ep_page_size = 1000   # max Europe PMC : moins d'allers-retours → fédération plus rapide
             while _ep_fetched < _ep_limit:
@@ -2131,6 +2302,7 @@ def _run_user_scenario_populate(
                 if not _ep_next_cursor or _ep_next_cursor == _ep_cursor_mark or len(_ep_results) < _ep_page_size or _ep_fetched >= _ep_limit:
                     break
                 _ep_cursor_mark = _ep_next_cursor
+                _note_pos(_ep_cursor_mark, _ep_fetched)
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"EuropePMC populate {scenario_id}: {_e}")
@@ -2144,7 +2316,7 @@ def _run_user_scenario_populate(
         # trouvait rien, et a quitté la fédération ; Europe PMC indexe les deux serveurs.
         count = 0
         try:
-            _pp_cursor = "*"
+            _pp_cursor = _resume("*")
             _pp_fetched = 0
             _pp_query = f"({_epmc_q}) AND (SRC:PPR)"
             while _pp_fetched < _cap_strategy:
@@ -2205,6 +2377,7 @@ def _run_user_scenario_populate(
                 if not _pp_next or _pp_next == _pp_cursor or len(_pp_results) < 100:
                     break
                 _pp_cursor = _pp_next
+                _note_pos(_pp_cursor, _pp_fetched)
                 _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"Préprints (Europe PMC) populate {scenario_id}: {_e}")
@@ -2250,8 +2423,14 @@ def _run_user_scenario_populate(
         # la boucle finit sans break, donc après un passage réussi.
         _s2_queries = list(_s2_parts) or ([_s2_bool] if _s2_bool else [])
         try:
+            _skip, _total = _part_resume(), [_resume_fetched()]
             for _s2_bool in _s2_queries:
                 _tok, _fetched, _429 = None, 0, 0
+                if _skip:
+                    if _skip.get("q") != _s2_bool:
+                        continue
+                    _tok, _fetched = _skip.get("pos"), int(_skip.get("fetched_part") or 0)
+                    _skip = {}
                 while _fetched < _cap_strategy:
                     if _budget_exhausted():
                         break
@@ -2276,6 +2455,9 @@ def _run_user_scenario_populate(
                     _tok = _payload.get("token")
                     if not _tok or _n == 0:
                         break
+                    _total[0] += _n
+                    _note_pos(json.dumps({"q": _s2_bool, "pos": _tok, "fetched_part": _fetched}),
+                              _total[0])
                     _time.sleep(0.3)
             if not _s2_queries:
                 _off, _cap, _429 = 0, min(max_results, 1000), 0   # search classique : offset+limit ≤ 1000
@@ -2315,8 +2497,14 @@ def _run_user_scenario_populate(
             # par deux morceaux n'est comptée qu'une fois, sinon elle gonflerait le compte de
             # DOAJ et les doublons du PRISMA d'une notice que la base n'a rendue qu'une fois.
             _seen: set = set()
+            _skip, _total = _part_resume(), [_resume_fetched()]
             for _dq in (_doaj_parts or [_doaj_q]):
                 _page, _fetched = 1, 0
+                if _skip:
+                    if _skip.get("q") != _dq:
+                        continue              # morceau déjà lu lors d'un tour précédent
+                    _page, _fetched = int(_skip.get("pos") or 1), int(_skip.get("fetched_part") or 0)
+                    _skip = {}
                 while _fetched < _cap_strategy:
                     if _budget_exhausted():
                         break
@@ -2350,6 +2538,9 @@ def _run_user_scenario_populate(
                     if _n < 100:
                         break
                     _page += 1
+                    _total[0] += _n
+                    _note_pos(json.dumps({"q": _dq, "pos": _page, "fetched_part": _fetched}),
+                              _total[0])
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"DOAJ populate {scenario_id}: {_e}")
@@ -2364,7 +2555,7 @@ def _run_user_scenario_populate(
             _ct_seen: set = set()
             _ct_native = _send_bool or bool(_ct_parts)
             for _ctq in (_ct_parts or [_bool_query]):
-                _ct_token, _ct_fetched = None, 0
+                _ct_token, _ct_fetched = _resume(None), _resume_fetched()
                 while _ct_fetched < _cap_strategy:
                     if _budget_exhausted():
                         break
@@ -2390,6 +2581,7 @@ def _run_user_scenario_populate(
                     _ct_token = _payload.get("nextPageToken")
                     if not _ct_token:
                         break
+                    _note_pos(_ct_token, _ct_fetched)
                     _time.sleep(0.3)
         except Exception as _e:
             logger.warning(f"ClinicalTrials.gov populate {scenario_id}: {_e}")
@@ -2406,7 +2598,7 @@ def _run_user_scenario_populate(
             return ("core", 0)
         count = 0
         try:
-            _core_offset, _core_fetched, _429 = 0, 0, 0
+            _core_offset, _core_fetched, _429 = int(_resume(0) or 0), _resume_fetched(), 0
             while _core_fetched < _cap_strategy:
                 if _budget_exhausted():
                     break
@@ -2433,6 +2625,7 @@ def _run_user_scenario_populate(
                 count += _ingest_parsed("core", _parse_core(_payload), boolean_native=_core_native)
                 _core_fetched += _n
                 _core_offset += _bulk
+                _note_pos(_core_offset, _core_fetched)
                 if _n < _bulk:
                     break
                 _time.sleep(0.3)
@@ -2447,8 +2640,14 @@ def _run_user_scenario_populate(
             # Une requête, ou le booléen découpé : une notice rendue par deux morceaux n'est
             # comptée qu'une fois.
             _ax_seen: set = set()
+            _skip, _total = _part_resume(), [_resume_fetched()]
             for _axq in (_arxiv_parts or [_arxiv_q]):
                 _ax_start = 0
+                if _skip:
+                    if _skip.get("q") != _axq:
+                        continue
+                    _ax_start = int(_skip.get("pos") or 0)
+                    _skip = {}
                 while _ax_start < _cap_strategy:
                     if _budget_exhausted():
                         break
@@ -2470,6 +2669,8 @@ def _run_user_scenario_populate(
                     if len(_page_docs) < _bulk:
                         break
                     _ax_start += _bulk
+                    _total[0] += len(_page_docs)
+                    _note_pos(json.dumps({"q": _axq, "pos": _ax_start}), _total[0])
                     _time.sleep(3)      # arXiv demande ≥3 s entre requêtes
                 if _arxiv_parts:
                     _time.sleep(3)
@@ -2494,8 +2695,15 @@ def _run_user_scenario_populate(
             _oa_native = True
         try:
             _oa_seen: set = set()
+            _skip, _total = _part_resume(), [_resume_fetched()]
             for _oaq in (_openaire_parts or [_oa_q]):
                 _cursor, _fetched = "*", 0
+                if _skip:
+                    if _skip.get("q") != _oaq:
+                        continue
+                    _cursor = _skip.get("pos") or "*"
+                    _fetched = int(_skip.get("fetched_part") or 0)
+                    _skip = {}
                 while _fetched < _cap_strategy:
                     if _budget_exhausted():
                         break
@@ -2515,6 +2723,9 @@ def _run_user_scenario_populate(
                     if not _page_docs or not _next or _next == _cursor:
                         break
                     _cursor = _next
+                    _total[0] += len(_page_docs)
+                    _note_pos(json.dumps({"q": _oaq, "pos": _cursor, "fetched_part": _fetched}),
+                              _total[0])
                     _time.sleep(0.5)
         except Exception as _e:
             logger.warning(f"OpenAIRE (Graph API v2) populate {scenario_id}: {_e}")
@@ -2563,6 +2774,18 @@ def _run_user_scenario_populate(
         # fraîche (SOURCE_CACHE_TTL_S) sont rejoués depuis la base, sans appel réseau,
         # avec les mêmes compteurs ; les autres partent normalement.
         _cached = {} if force_live else _load_source_cache(_qhash)
+        # D'où chaque source coupée doit repartir. `force_live` veut dire « relis tout
+        # depuis le début », donc il oublie aussi les positions : sans cela, une relance
+        # demandée pour repartir à neuf aurait sauté ce qui avait déjà été lu.
+        if force_live:
+            _clear_fetch_cursor(scenario_id, query_hash=_qhash)
+        else:
+            _resume_state.update(_load_fetch_cursors(scenario_id, _qhash))
+            if _resume_state:
+                logger.info(f"Populate {scenario_id}: reprise de "
+                            + ", ".join(f"{k} (après {v.get('fetched')} notices, "
+                                        f"tour {int(v.get('rounds') or 0) + 1})"
+                                        for k, v in sorted(_resume_state.items())))
         for _fname, _entry in _cached.items():
             for _cd, _cs, _cn in _entry["links"]:
                 _link_to_scenario(_cd, boolean_native=_cn, source=_cs)
@@ -2681,6 +2904,19 @@ def _run_user_scenario_populate(
             _fetcher_outcome[_n] = _outcome
             if _outcome in SOURCE_OUTCOMES_COUNTED:
                 _queried.add(_n)
+            # ── La position de lecture, gardée ou oubliée selon l'issue ──────────
+            # Coupée : on garde où elle en était, pour que la prochaine reprise
+            # continue au lieu de relire les mêmes pages. Terminée : on oublie, sinon
+            # une relance de la même question repartirait du milieu.
+            with _counter_lock:
+                _pos = _fetch_pos.get(_n)
+            _prev = _resume_state.get(_n) or {}
+            _act = cursor_action(_outcome, _pos is not None, bool(_prev))
+            if _act == "save":
+                _save_fetch_cursor(scenario_id, _n, _qhash, _pos[0], _pos[1],
+                                   int(_prev.get("rounds") or 0) + 1)
+            elif _act == "clear":
+                _clear_fetch_cursor(scenario_id, _n, _qhash)
         t_elapsed = _time.time() - t_start
         logger.info(f"Populate {scenario_id}: fédération terminée en {t_elapsed:.1f}s "
                     f"({len(_cached)} fetcher(s) depuis le cache, {len(_completed_ok)} mémorisé(s)) ; "

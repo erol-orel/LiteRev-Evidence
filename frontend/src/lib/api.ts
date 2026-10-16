@@ -2986,6 +2986,11 @@ export interface EmbeddingStatus {
     rerank_scorable?: number;
     rerank_missing?: number;
     rerank_complete?: boolean;
+    /** Les articles qu'un passage de plus ne sauvera pas : l'API d'embedding les refuse
+     *  ou les omet depuis plusieurs essais. Les compter à part évite d'afficher « en
+     *  cours » pour un travail qui ne se fera jamais. */
+    failed?: number;
+    failed_reason?: string | null;
   };
   score_availability: {
     semantic: boolean;            // vert seulement quand TOUT le corpus est scoré
@@ -3132,8 +3137,10 @@ export interface ScenarioCounts {
   populate_status?: string | null;
   current_step?: string | null;
   threshold: number;
-  /** Copie stockée, lue par la liste des scénarios (mise à jour par étapes pendant une recherche). */
+  /** Copie stockée, écrite par la recherche (mise à jour par étapes pendant celle-ci). */
   article_count: number;
+  /** Vrai quand cette lecture a remis la copie stockée au compte réel du corpus. */
+  stored_count_healed?: boolean;
   /** Référence : liens en base hors doublons (onglet Corpus). */
   corpus_links: number;
   /** « Passés au screening » du PRISMA, figé à la fin de la dernière recherche ; null avant. */

@@ -920,28 +920,46 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             # two were counted apart, so "how many European articles report by sex" could
             # not be answered from them: the intersection is a third count, and it is the
             # question a reviewer actually asks. Counted here over the same relevant,
-            # extracted set, in SQL, with no sampling.
-            from .geography import NUTS_ISO
-            place_sql = ",\n".join(
-                f"COUNT(*) FILTER (WHERE d.extraction_json->'coverage'->>'{k}' = 'true'"
-                f" AND UPPER(TRIM(d.country)) = ANY(:eu)) AS e_{k}" for k in COVERAGE_KEYS)
-            place = _rows(conn, f"""
-                SELECT COUNT(*) FILTER (WHERE UPPER(TRIM(d.country)) = ANY(:eu)) AS n_europe,
-                       COUNT(*) FILTER (WHERE d.country IS NOT NULL
-                                          AND UPPER(TRIM(d.country)) <> ALL(:eu)) AS n_elsewhere,
-                       COUNT(*) FILTER (WHERE d.country IS NULL) AS n_no_country,
-                       {place_sql}
+            # extracted set, every row of it, with no sampling.
+            #
+            # Le pays n'est PAS une colonne : `literature_document.country` est presque
+            # toujours vide, et le pays d'une étude est RÉSOLU à la lecture, depuis le texte
+            # de lieu que l'extraction a relevé (« Lombardy, Italy »), par le même résolveur
+            # et le même index NUTS que l'onglet Géographie. Une première version croisait
+            # `d.country` en SQL et comptait donc zéro article européen partout, ce qui est
+            # pire qu'une absence de réponse : c'est une réponse fausse, et un test le fixe.
+            from .geography import NUTS_ISO, get_nuts_index, resolve_location
+            index = get_nuts_index()
+            place_rows = _rows(conn, f"""
+                SELECT d.country AS country,
+                       d.extraction_json->'ref'->>'location' AS location,
+                       d.extraction_json->'coverage' AS coverage
                 FROM literature_document d
                 JOIN article_scenarios ars ON ars.document_id = d.id
                 WHERE ars.scenario_id = :sid AND {gate}
                   AND jsonb_typeof(d.extraction_json) = 'object'
-            """, scenario_id, thr, eu=sorted(NUTS_ISO))[0]
+            """, scenario_id, thr)
+            n_europe = n_elsewhere = n_no_country = 0
+            cov_europe = dict.fromkeys(COVERAGE_KEYS, 0)
+            for r in place_rows:
+                iso = (resolve_location(r["location"], r["country"], index) or {}).get("country")
+                if not iso:
+                    n_no_country += 1
+                    continue
+                if iso not in NUTS_ISO:
+                    n_elsewhere += 1
+                    continue
+                n_europe += 1
+                cov = r["coverage"] if isinstance(r["coverage"], dict) else {}
+                for k in COVERAGE_KEYS:
+                    if cov.get(k) is True or str(cov.get(k)).lower() == "true":
+                        cov_europe[k] += 1
             out["by_place"] = {
                 "europe_iso": sorted(NUTS_ISO),
-                "n_europe": int(place["n_europe"] or 0),
-                "n_elsewhere": int(place["n_elsewhere"] or 0),
-                "n_no_country": int(place["n_no_country"] or 0),
-                "coverage_europe": {k: int(place[f"e_{k}"] or 0) for k in COVERAGE_KEYS},
+                "n_europe": n_europe,
+                "n_elsewhere": n_elsewhere,
+                "n_no_country": n_no_country,
+                "coverage_europe": cov_europe,
             }
 
             out["by_model"] = [

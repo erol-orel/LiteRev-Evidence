@@ -111,16 +111,116 @@ def _fallback_text(row: dict) -> str:
                                                                            row.get("abstract")))
 
 
+# ── Un article que l'API d'embedding refuse n'est pas ré-essayé sans fin ─────────────
+#: Essais avant de cesser de re-sélectionner un article pour le scoring automatique.
+#: Sans cette borne, un article que l'API omet de sa réponse (son indice manque) ou qui
+#: fait échouer son lot restait « sans score », donc re-sélectionné à chaque passage, à
+#: chaque ouverture de la page du corpus, indéfiniment : la carte affichait « 5 en
+#: cours… » des jours après la fin de la recherche. Le relancer à la main reste possible
+#: (`/rerank` sans `missing_only` remet les compteurs à zéro), et l'écran dit ce qui
+#: n'a pas pu être scoré au lieu de faire croire à un travail en cours.
+SCORE_MAX_ATTEMPTS = _env_int("SCORE_MAX_ATTEMPTS", 3, 1)
+
+
+def _ensure_score_columns() -> None:
+    """Les colonnes de comptage des essais existent-elles ? Elles sont posées au démarrage
+    (api/scenarios.py), mais pas sur une base montée après coup ni sur une table que des
+    tests reconstruisent. Le catalogue est interrogé à chaque fois plutôt que mémorisé :
+    une réponse gardée en mémoire survivait à la reconstruction de la table, et la
+    requête suivante tombait sur une colonne absente. Jamais bloquant."""
+    try:
+        with engine.begin() as _c:
+            have = {r[0] for r in _c.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'article_scenarios' "
+                "AND column_name IN ('score_attempts', 'score_failed_reason')"))}
+            if "score_attempts" not in have:
+                _c.execute(text("ALTER TABLE article_scenarios "
+                                "ADD COLUMN IF NOT EXISTS score_attempts INTEGER DEFAULT 0"))
+            if "score_failed_reason" not in have:
+                _c.execute(text("ALTER TABLE article_scenarios "
+                                "ADD COLUMN IF NOT EXISTS score_failed_reason TEXT"))
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"_ensure_score_columns: {_e}")
+
+
+def _not_given_up_sql(link: str = "asn") -> str:
+    _ensure_score_columns()
+    return f"COALESCE({link}.score_attempts, 0) < {int(SCORE_MAX_ATTEMPTS)}"
+
+
+def _note_score_attempts(scenario_id: str, doc_ids: list, reason: str) -> None:
+    """Compter un essai manqué sur ces articles, avec sa raison. Jamais d'erreur : c'est
+    de la comptabilité, elle ne doit pas faire échouer un passage de scoring."""
+    _ensure_score_columns()
+    if not doc_ids:
+        return
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                UPDATE article_scenarios
+                   SET score_attempts = COALESCE(score_attempts, 0) + 1,
+                       score_failed_reason = :why
+                 WHERE scenario_id = :sid AND document_id = ANY(:ids)
+            """), {"sid": scenario_id, "ids": [int(d) for d in doc_ids], "why": str(reason)[:200]})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"Rerank {scenario_id}: essais non comptés ({_e}).")
+
+
+def _clear_score_attempts(scenario_id: str, doc_ids: list | None = None) -> None:
+    """Oublier les essais manqués : le score est tombé, ou on repart de zéro à la demande."""
+    _ensure_score_columns()
+    try:
+        with engine.begin() as _c:
+            if doc_ids:
+                _c.execute(text("""
+                    UPDATE article_scenarios SET score_attempts = 0, score_failed_reason = NULL
+                     WHERE scenario_id = :sid AND document_id = ANY(:ids)
+                       AND (COALESCE(score_attempts, 0) > 0 OR score_failed_reason IS NOT NULL)
+                """), {"sid": scenario_id, "ids": [int(d) for d in doc_ids]})
+            else:
+                _c.execute(text("""
+                    UPDATE article_scenarios SET score_attempts = 0, score_failed_reason = NULL
+                     WHERE scenario_id = :sid
+                       AND (COALESCE(score_attempts, 0) > 0 OR score_failed_reason IS NOT NULL)
+                """), {"sid": scenario_id})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"Rerank {scenario_id}: essais non remis à zéro ({_e}).")
+
+
+def scenario_score_failures(scenario_id: str) -> dict[str, Any]:
+    """Les articles qu'un passage ne parvient PAS à scorer : combien, et pourquoi.
+
+    C'est ce que l'écran doit montrer à la place d'un « en cours… » qui ne finit jamais."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"""
+                SELECT COUNT(*) AS n,
+                       MODE() WITHIN GROUP (ORDER BY asn.score_failed_reason) AS reason
+                FROM article_scenarios asn
+                JOIN literature_document ld ON ld.id = asn.document_id
+                WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
+                  AND {unscored_sql('ld', 'asn')} AND {_scorable_text_sql('ld')}
+                  AND NOT ({_not_given_up_sql('asn')})
+            """), {"sid": scenario_id}).mappings().first() or {}
+        return {"n": int(row.get("n") or 0), "reason": row.get("reason")}
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"Rerank {scenario_id}: échecs de score non comptés ({_e}).")
+        return {"n": 0, "reason": None}
+
+
 def _retryable_unscored(scenario_id: str) -> int:
-    """Les articles sans score qu'un nouveau passage peut scorer : ceux qui ont du texte.
-    Un article sans titre ni résumé exploitables n'en aura jamais, inutile de relancer pour
-    lui."""
+    """Les articles sans score qu'un nouveau passage peut scorer : ceux qui ont du texte
+    ET qui n'ont pas déjà épuisé leurs essais. Un article sans titre ni résumé
+    exploitables n'en aura jamais, et un article que l'API refuse trois fois de suite non
+    plus : relancer pour eux ne ferait que répéter l'échec."""
     with engine.connect() as conn:
         return int(conn.execute(text(f"""
             SELECT COUNT(*) FROM article_scenarios asn
             JOIN literature_document ld ON ld.id = asn.document_id
             WHERE asn.scenario_id = :sid AND ld.is_duplicate IS NOT TRUE
               AND {unscored_sql('ld', 'asn')} AND {_scorable_text_sql('ld')}
+              AND {_not_given_up_sql('asn')}
         """), {"sid": scenario_id}).scalar() or 0)
 
 
@@ -254,6 +354,13 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | Non
              "(asn.similarity_score IS NULL OR NOT EXISTS ("
              " SELECT 1 FROM document_chunk c WHERE c.document_id = ld.id"
              " AND c.chunk_type = 'title_abstract' AND c.embedding IS NOT NULL))")
+    # Un passage DEMANDÉ (rescore complet) repart de zéro : l'utilisateur qui clique veut
+    # qu'on réessaie, y compris ce qui avait échoué. Un passage automatique, lui, laisse
+    # de côté ce qui a déjà épuisé ses essais, sinon il le redemande sans fin.
+    if not missing_only:
+        _clear_score_attempts(scenario_id)
+    else:
+        _need += f" AND {_not_given_up_sql('asn')}"
     import numpy as _np
     _q = _np.asarray(q_emb, dtype=float)
     _qn = float(_np.linalg.norm(_q)) or 1.0
@@ -315,6 +422,13 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | Non
                     """), ups)
             rep["fallback"] += len(ups)
             rep["fallback_failed"] += len(batch) - len(ups)
+            # Un article que l'API a OMIS de sa réponse (son indice manque) : son essai est
+            # compté, sinon il revenait à chaque passage sans que rien ne le dise.
+            _scored_ids = {u["doc_id"] for u in ups}
+            _missed = [r["id"] for r in batch if r["id"] not in _scored_ids]
+            _note_score_attempts(scenario_id, _missed, "omitted by the embedding API")
+            if _scored_ids:
+                _clear_score_attempts(scenario_id, list(_scored_ids))
             stalled = 0 if ups else stalled + 1
         except Exception as _e:
             # Le lot est SAUTÉ (le curseur a déjà avancé) et compté ; les suivants tentent
@@ -324,6 +438,15 @@ def _run_semantic_rerank_inline(scenario_id: str, query: str, report: dict | Non
             rep["fallback_failed"] += len(batch)
             rep["fallback_batches_failed"] += 1
             stalled += 1
+            # Un seul article au texte impossible faisait échouer son lot entier, donc
+            # quarante-neuf articles sains perdaient leur score à cause de lui, à chaque
+            # passage. L'essai est compté sur CHAQUE article du lot : au bout de
+            # SCORE_MAX_ATTEMPTS lots qui échouent ensemble, ils sortent de la sélection
+            # automatique et l'écran dit lesquels, au lieu d'un « en cours » perpétuel.
+            # (Une panne générale, elle, est déjà bornée par _FALLBACK_MAX_STALLED.)
+            if not _is_openai_quota_error(_e):
+                _note_score_attempts(scenario_id, [r["id"] for r in batch],
+                                     f"{type(_e).__name__}: {str(_e)[:120]}")
             if _is_openai_quota_error(_e):
                 _trip_openai_cooldown()
         if stalled >= _FALLBACK_MAX_STALLED:
@@ -1081,6 +1204,13 @@ def get_rerank_status(scenario_id: str) -> dict[str, Any]:
         out.update(_rerank_coverage(scenario_id))
         # Et la similarité : les articles qui attendent un score pour pouvoir entrer.
         out["similarity_unscored"] = scenario_unscored_count(scenario_id)
+        # Parmi eux, ceux qu'un passage de plus ne sauvera pas : l'API les refuse ou les
+        # omet depuis SCORE_MAX_ATTEMPTS essais. Les dire, plutôt que de les laisser dans
+        # « en attente d'un score » où ils se lisent comme un travail en cours.
+        _failed = scenario_score_failures(scenario_id)
+        out["similarity_failed"] = _failed["n"]
+        out["similarity_failed_reason"] = _failed["reason"]
+        out["similarity_retryable"] = max(0, int(out["similarity_unscored"]) - int(_failed["n"]))
     except Exception as _e:
         logger.warning(f"rerank coverage {scenario_id}: {_e}")
     return out

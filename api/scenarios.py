@@ -162,6 +162,14 @@ def _ensure_user_scenarios_table() -> None:
             # bibliothèque lié plus tard au scénario n'était jamais signalé.
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP",
             "ALTER TABLE article_scenarios ALTER COLUMN assigned_at SET DEFAULT now()",
+            # Même borne que `embedding_attempts` plus bas, mais pour le score sémantique
+            # d'un article DANS UN SCÉNARIO : un article que l'API d'embedding refuse ou
+            # omet n'était compté nulle part, donc il était re-sélectionné à chaque
+            # passage, et la carte des scores affichait « 5 en cours… » indéfiniment.
+            # Au-delà de SCORE_MAX_ATTEMPTS essais il sort de la sélection automatique,
+            # et l'écran dit qu'il n'a PAS pu être scoré, avec la raison.
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS score_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS score_failed_reason TEXT",
             # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
             # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
             # /admin/embed-pending - sinon un chunk que l'API refuse (contenu invalide)
@@ -1368,6 +1376,24 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
         logger.warning(f"failed-sources cache {scenario_id}: {_e}")
     replayed = sorted({_source_label(name) for name in cached})
     job = _user_scenario_populate_jobs.get(scenario_id) or {}
+    # Où en est une source coupée. Sans cela, l'écran disait « coupée par le budget » sans
+    # dire si relancer servait à quelque chose : la reprise repart maintenant de la
+    # position retenue, donc chaque tour avance, et le lecteur peut le voir.
+    progress: dict[str, dict] = {}
+    try:
+        from .pipeline import _load_fetch_cursors
+        _by_source = {}
+        for fetcher, state in _load_fetch_cursors(scenario_id, _hash).items():
+            label = _source_label(fetcher)
+            _by_source[label] = {"read_so_far": int(state.get("fetched") or 0),
+                                 "rounds": int(state.get("rounds") or 0)}
+        totals = {str(k): int(v) for k, v in (figures.get("by_source") or {}).items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        for label, state in _by_source.items():
+            state["reported_by_source"] = totals.get(label)
+            progress[label] = state
+    except Exception as _e:                                  # noqa: BLE001 - an answer, never fatal
+        logger.warning(f"failed-sources progress {scenario_id}: {_e}")
     return {
         "scenario_id": scenario_id,
         "failed": failed,
@@ -1377,6 +1403,9 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
         "cache_ttl_hours": round(SOURCE_CACHE_TTL_S / 3600, 1),
         "retryable": bool(failed) and job.get("status") != "running",
         "search_running": job.get("status") == "running",
+        # Par source coupée : ce qu'elle a déjà lu, en combien de tours, et ce que la base
+        # annonce en tout. Une reprise continue de là, elle ne relit pas.
+        "resume": progress,
     }
 
 
@@ -1546,9 +1575,10 @@ def _counts_consistency(counts: dict) -> tuple[bool, list[dict]]:
     """Compare entre eux les nombres d'articles que l'interface affiche pour UN scénario.
 
     Référence = `corpus_links`, les liens en base hors doublons (ce que l'onglet Corpus
-    liste). La liste des scénarios affiche `article_count`, une COPIE stockée, mise à jour
-    par étapes pendant une recherche (d'abord les correspondances locales, puis le corpus
-    nettoyé) ; le PRISMA affiche `records_screened`, figé à la fin de la dernière
+    liste). `article_count` est une COPIE stockée, mise à jour par étapes pendant une
+    recherche (d'abord les correspondances locales, puis le corpus nettoyé) et réparée
+    par `_heal_stored_article_count` une fois la recherche finie ; le PRISMA affiche
+    `records_screened`, figé à la fin de la dernière
     recherche ; l'étape 2 compte au-dessus/en dessous du seuil en direct. Le temps d'un
     pipeline, ces trois lectures divergent légitimement ; à la fin, elles doivent
     coïncider - et c'est ce que vérifie cette fonction (pure, testée hors base)."""
@@ -1564,6 +1594,31 @@ def _counts_consistency(counts: dict) -> tuple[bool, list[dict]]:
     if ab is not None and be is not None and int(ab) + int(be) != ref:
         mismatches.append({"field": "above_plus_below", "value": int(ab) + int(be), "expected": ref})
     return (not mismatches), mismatches
+
+
+def _heal_stored_article_count(scenario_id: str, ref: int) -> bool:
+    """Remet la copie stockée du nombre d'articles au compte réel du corpus.
+
+    `user_scenarios.article_count` est un cache écrit par la recherche. Un article ajouté
+    ou retiré à la main depuis ne le touche pas, et l'écart s'affichait en rouge sur la
+    page du scénario : six articles importés à la main donnaient « 52 759, attendu
+    52 765 », à charge pour le relecteur de deviner lequel des deux nombres croire. Aucun
+    panneau n'a besoin de cette copie (la liste comme l'en-tête comptent en direct), donc
+    hors recherche en cours on la remet d'aplomb, sans bannière.
+
+    `updated_at` n'est PAS touché : ouvrir la page d'un scénario ne doit pas le faire
+    remonter en tête de la liste, qui est triée par cette colonne.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE user_scenarios SET article_count = :n
+                WHERE id = :sid AND COALESCE(article_count, -1) <> :n
+            """), {"sid": scenario_id, "n": int(ref)})
+        return True
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"article_count heal {scenario_id}: {_e}")
+        return False
 
 
 def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any]:
@@ -1616,9 +1671,20 @@ def _scenario_counts(scenario_id: str, row: dict | None = None) -> dict[str, Any
         "embedded": embedded,
     }
     ok, mismatches = _counts_consistency(counts)
+    # Un cache en retard se répare, il ne s'affiche pas : hors recherche en cours, la
+    # copie stockée du compte est remise au compte réel, et la bannière rouge est gardée
+    # pour ce qui reste vraiment à expliquer (la somme au-dessus/en dessous du seuil).
+    healed = False
+    if not in_progress and any(m["field"] == "article_count" for m in mismatches):
+        if _heal_stored_article_count(scenario_id, _corpus_links):
+            counts["article_count"] = _corpus_links
+            healed = True
+            ok, mismatches = _counts_consistency(counts)
     return {
         "scenario_id": scenario_id,
         "in_progress": bool(in_progress),
+        # Ce que cette lecture a réparé elle-même, pour les journaux et l'audit.
+        "stored_count_healed": healed,
         "pipeline_status": row.get("pipeline_status"),
         "populate_status": row.get("populate_status"),
         "current_step": job.get("current_step") or row.get("pipeline_step"),
@@ -1680,6 +1746,18 @@ def get_activity() -> dict[str, Any]:
             "article_count": int(r["article_count"] or 0),
         })
     return {"running": items, "count": len(items), "checked_at": _dt.now(_tz.utc).isoformat()}
+
+
+def _score_failures_for(scenario_id: str) -> dict[str, Any]:
+    """Ce qu'un passage de scoring ne parvient plus à scorer, pour la carte des scores.
+    Import tardif : api.relevance est chargé après ce module. Jamais d'erreur."""
+    try:
+        from .relevance import scenario_score_failures
+        got = scenario_score_failures(scenario_id)
+        return {"failed": int(got.get("n") or 0), "failed_reason": got.get("reason")}
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"score failures {scenario_id}: {_e}")
+        return {"failed": 0, "failed_reason": None}
 
 
 @app.get("/user-scenarios/{scenario_id}/embedding-status")
@@ -1850,6 +1928,11 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "reranked": rank_reranked,
             "no_abstract": int(ranking["no_abstract"] or 0),
             "complete": semantic_ready,
+            # Les articles qu'un passage de plus ne sauvera pas : l'API d'embedding les
+            # refuse ou les omet depuis plusieurs essais. Sans ce compte, l'écran les
+            # rangeait dans « en cours… », et cinq articles perdus faisaient croire à un
+            # scoring sans fin, des jours après la recherche.
+            **_score_failures_for(scenario_id),
             # Le dénominateur du rerank : les articles qui ont un résumé exploitable.
             "rerank_scorable": rerank_scorable,
             "rerank_missing": rerank_missing,

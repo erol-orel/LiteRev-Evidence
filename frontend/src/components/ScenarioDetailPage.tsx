@@ -350,6 +350,35 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
         title={t("scenarioDetail.queries.title")}
         subtitle={t("scenarioDetail.queries.subtitle")}
       />
+      {/* LA requête du scénario, celle qui part réellement aux bases. Elle vivait en tête
+          de la page du scénario, où une stratégie de revue de plusieurs milliers de
+          caractères repoussait tout le reste ; c'est ici qu'elle se lit, avec sa longueur,
+          puis juste en dessous ce que chaque base en recevra. */}
+      {isUserScenario(scenarioId) && (detail.combined_query || detail.query) && (
+        <div className="rounded-2xl border border-white/10 bg-white/3 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <Terminal size={12} className="text-brand-400" />
+            <span className="text-xs font-semibold text-brand-300 uppercase tracking-wider">
+              {t("scenarioDetail.queries.scenarioQuery")}
+            </span>
+            <span className="text-[10px] text-white/35">
+              {t("scenarioDetail.queries.queryChars")
+                .replace("{chars}", (detail.combined_query || detail.query || "").length.toLocaleString())}
+            </span>
+            <button
+              type="button"
+              onClick={() => { void navigator.clipboard?.writeText(detail.combined_query || detail.query || ""); }}
+              className="ml-auto rounded-lg border border-white/15 bg-white/5 px-2 py-0.5 text-[10px] text-white/70 hover:bg-white/10 transition"
+            >
+              {t("scenarioDetail.queries.copyQuery")}
+            </button>
+          </div>
+          <code className="block max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xl
+                           bg-white/[0.03] p-2 font-mono text-[11px] leading-5 text-white/75">
+            {detail.combined_query || detail.query}
+          </code>
+        </div>
+      )}
       {/* Recherche multi-facettes : les facettes DANS L'ORDRE avec l'opérateur
           réellement appliqué à chacune, puis l'expression complète. Les listes
           booléen/naturel ci-dessous perdent l'ordre et les opérateurs - le ET entre
@@ -2847,6 +2876,10 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
         const scored = embeddingStatus.counts?.scored ?? embeddingStatus.ranking?.scored ?? 0;
         const reranked = embeddingStatus.ranking?.reranked ?? embeddingStatus.counts?.reranked ?? 0;
         const rerankScorable = embeddingStatus.ranking?.rerank_scorable ?? total;
+        // Ce que l'API d'embedding ne parvient plus à scorer, et ce qui attend vraiment.
+        const scoreFailed = embeddingStatus.ranking?.failed ?? 0;
+        const scoreFailedReason = embeddingStatus.ranking?.failed_reason ?? null;
+        const waiting = Math.max(0, total - scored - scoreFailed);
         const semanticReady = embeddingStatus.score_availability.semantic;
         const cohereReady = embeddingStatus.score_availability.cohere;
         const coherePartial = embeddingStatus.score_availability.cohere_partial ?? false;
@@ -2878,8 +2911,18 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
                 {t("scenarioDetail.corpus.semanticLine")
                   .replace("{scored}", scored.toLocaleString())
                   .replace("{total}", total.toLocaleString())}
-                {!semanticReady && scored < total && ` · ${(total - scored).toLocaleString()} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
+                {/* Ce qui manque n'est pas forcément « en cours » : un article que l'API
+                    d'embedding refuse ou omet ne sera pas sauvé par un passage de plus.
+                    Les deux comptes sont distingués, sinon cinq articles perdus se
+                    lisaient comme un scoring qui tourne encore, des jours après. */}
+                {!semanticReady && waiting > 0 && ` · ${waiting.toLocaleString()} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
               </p>
+              {scoreFailed > 0 && (
+                <p className="text-[11px] text-gold-300/90" title={scoreFailedReason ?? undefined}>
+                  {t("scenarioDetail.corpus.scoreFailedLine").replace("{n}", scoreFailed.toLocaleString())}
+                  {scoreFailedReason ? ` (${scoreFailedReason})` : ""}
+                </p>
+              )}
               {cohereConfigured && (
                 <p className={`text-[11px] ${cohereReady ? 'text-white/70' : 'text-gold-300/90'}`}>
                   {t("scenarioDetail.corpus.rerankLine")
@@ -10030,14 +10073,20 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               </div>
             )}
           </div>
+          {/* La requête n'est plus déversée ici. Une stratégie de revue fait des milliers
+              de caractères : en tête de page elle poussait tout le reste sous la ligne de
+              flottaison et ne se lisait pas. Sa place est l'onglet Stratégie, qui la montre
+              en entier avec ce que chaque base en recevra. Ici, de quoi se repérer. */}
           <p className="mt-1 text-sm text-white/50 leading-5">
             {isUserScenario(scenarioId) && detail.query
-              ? `${t("scenarios.savedSearchPrefix")}${detail.combined_query || detail.query}`
+              ? t("scenarioDetail.page.queryInStrategy")
+                  .replace("{chars}", (detail.combined_query || detail.query || "").length.toLocaleString())
               : detail.description}
           </p>
-          
-          {/* Mots-clés */}
-          {detail.keywords && detail.keywords.length > 0 && (
+
+          {/* Mots-clés : sur un scénario utilisateur ils sont découpés dans le booléen et
+              donnent des bribes comme « #((("Disease », qui n'aident personne. */}
+          {!isUserScenario(scenarioId) && detail.keywords && detail.keywords.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {detail.keywords.map((kw, i) => (
                 <span key={i} className="rounded-md border border-white/5 bg-white/2 px-1.5 py-0.5 text-[10px] text-white/40 font-medium tracking-wide">
@@ -10101,6 +10150,12 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               </li>
             ))}
           </ul>
+          {/* Ce que le relecteur doit en faire. La bannière listait deux nombres sans
+              dire lequel croire : « 52 759, attendu 52 765 » pour six articles importés
+              à la main, un écart que la lecture répare désormais elle-même. */}
+          <p className="text-[11px] text-rose-200/70 leading-relaxed">
+            {t("scenarioDetail.page.countsMismatchHelp")}
+          </p>
         </div>
       )}
       {counts && !counts.in_progress && counts.consistent && justFinished && (

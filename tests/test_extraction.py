@@ -677,3 +677,45 @@ def test_the_text_window_endpoint_returns_the_quote_with_its_context(extracted):
     assert c.get(f"/user-scenarios/{SID}/articles/9702/text", params={"context": 99999}).status_code == 422
     assert c.get(f"/user-scenarios/{SID}/articles/99999/text").status_code == 404
     assert c.get(f"/user-scenarios/nope/articles/9702/text").status_code == 404
+
+
+def test_the_place_crossing_reads_the_location_the_extraction_found(extracted, seeded):
+    """Le pays d'une étude n'est PAS la colonne `country` : il est RÉSOLU depuis le texte
+    de lieu relevé par l'extraction, comme le fait l'onglet Géographie.
+
+    Première version de ce croisement : un `WHERE UPPER(d.country) = ANY(:eu)` en SQL.
+    Or `literature_document.country` est vide sur tout le corpus réel, donc le bloc
+    annonçait zéro article européen partout, ce qui est pire qu'une absence de réponse.
+    Ici les deux articles pertinents lus en entier portent un lieu européen en TEXTE et
+    aucun `country` : ils doivent être comptés comme européens."""
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE literature_document SET country = NULL, extraction_json = "
+                    "jsonb_set(extraction_json, '{ref}', %s::jsonb) WHERE id = 9701",
+                    (json.dumps({"location": "Lombardy, Italy"}),))
+        cur.execute("UPDATE literature_document SET country = NULL, extraction_json = "
+                    "jsonb_set(extraction_json, '{ref}', %s::jsonb) WHERE id = 9702",
+                    (json.dumps({"location": "Brittany, France"}),))
+        cur.execute("UPDATE literature_document SET country = NULL, extraction_json = "
+                    "jsonb_set(extraction_json, '{ref}', %s::jsonb) WHERE id = 9703",
+                    (json.dumps({"location": "Guangdong, China"}),))
+    d = extraction.extraction_digest(SID)
+    place = d["by_place"]
+    assert place["n_europe"] == 2, "deux lieux européens en texte, aucun `country` renseigné"
+    assert place["n_elsewhere"] == 1
+    assert place["n_no_country"] == 0
+    # Et le croisement lui-même : ces deux articles européens rapportent le sexe.
+    assert place["coverage_europe"]["sex_gender"] == 2
+    assert place["coverage_europe"]["ppe"] == 0, "l'article hors Europe ne compte pas ici"
+    # Le total corpus reste ce qu'il était : les deux comptes ne se confondent pas.
+    assert d["coverage"]["sex_gender"] == 2
+
+
+def test_a_study_whose_place_is_not_stated_is_counted_apart(extracted, seeded):
+    """« Not reported » n'est pas un pays, et ne doit pas tomber dans « ailleurs »."""
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE literature_document SET country = NULL, extraction_json = "
+                    "jsonb_set(extraction_json, '{ref}', %s::jsonb) WHERE id IN (9701, 9702, 9703)",
+                    (json.dumps({"location": "Not reported"}),))
+    place = extraction.extraction_digest(SID)["by_place"]
+    assert (place["n_europe"], place["n_elsewhere"]) == (0, 0)
+    assert place["n_no_country"] == 3
