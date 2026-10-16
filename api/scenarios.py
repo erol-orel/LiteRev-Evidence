@@ -1368,6 +1368,24 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
         logger.warning(f"failed-sources cache {scenario_id}: {_e}")
     replayed = sorted({_source_label(name) for name in cached})
     job = _user_scenario_populate_jobs.get(scenario_id) or {}
+    # Où en est une source coupée. Sans cela, l'écran disait « coupée par le budget » sans
+    # dire si relancer servait à quelque chose : la reprise repart maintenant de la
+    # position retenue, donc chaque tour avance, et le lecteur peut le voir.
+    progress: dict[str, dict] = {}
+    try:
+        from .pipeline import _load_fetch_cursors
+        _by_source = {}
+        for fetcher, state in _load_fetch_cursors(scenario_id, _hash).items():
+            label = _source_label(fetcher)
+            _by_source[label] = {"read_so_far": int(state.get("fetched") or 0),
+                                 "rounds": int(state.get("rounds") or 0)}
+        totals = {str(k): int(v) for k, v in (figures.get("by_source") or {}).items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        for label, state in _by_source.items():
+            state["reported_by_source"] = totals.get(label)
+            progress[label] = state
+    except Exception as _e:                                  # noqa: BLE001 - an answer, never fatal
+        logger.warning(f"failed-sources progress {scenario_id}: {_e}")
     return {
         "scenario_id": scenario_id,
         "failed": failed,
@@ -1377,6 +1395,9 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
         "cache_ttl_hours": round(SOURCE_CACHE_TTL_S / 3600, 1),
         "retryable": bool(failed) and job.get("status") != "running",
         "search_running": job.get("status") == "running",
+        # Par source coupée : ce qu'elle a déjà lu, en combien de tours, et ce que la base
+        # annonce en tout. Une reprise continue de là, elle ne relit pas.
+        "resume": progress,
     }
 
 
