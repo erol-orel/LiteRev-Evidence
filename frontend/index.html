@@ -33,6 +33,29 @@
     <meta name="twitter:image" content="https://literev-scenario.com/literev-logo.png" />
 
     <title>LiteRev Evidence to Scenario</title>
+
+    <!-- Le thème est posé AVANT le premier rendu : sans cela, une page choisie en clair
+         apparaîtrait sombre le temps que React démarre. Même clé et même logique que
+         src/theme/ThemeProvider.tsx ; en cas de doute, le thème sombre, qui est celui
+         d'origine. -->
+    <script>
+      (function () {
+        try {
+          var c = localStorage.getItem('literev-theme');
+          if (c !== 'dark' && c !== 'light') {
+            c = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light' : 'dark';
+          }
+          document.documentElement.setAttribute('data-theme', c);
+          if (c === 'light') {
+            var m = document.querySelector('meta[name="theme-color"]');
+            if (m) m.setAttribute('content', '#f7faf8');
+          }
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

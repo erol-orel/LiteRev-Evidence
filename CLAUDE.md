@@ -46,6 +46,16 @@ and the interface says how many articles they draw.
   a presentation.
 - Frontend strings live in `frontend/src/i18n/locales/{fr,en}.ts`; both files must carry
   the same keys and the same `{placeholders}`.
+- The interface has two themes, and **no colour is written in stone**. Tailwind's hues are
+  CSS variables, so a class like `text-rose-300` flips on its own: the light theme gives
+  each shade the opposite shade of the same hue. `white` means the foreground, not the
+  colour white, so `text-white/70` reads dark on a light page; the white that must stay
+  white, on a solid button, is `text-onsolid`. A new hue goes in `HUES`
+  (`frontend/tailwind.config.js`) and in `frontend/scripts/gen-theme.mjs`, then
+  `node scripts/gen-theme.mjs` regenerates `src/theme.css`. Never write `bg-[#0a1410]`:
+  use a theme variable, as in `bg-[rgb(var(--surface))]`. An SVG attribute cannot read a
+  CSS variable, so a chart takes its colours from `chartColors(useResolvedTheme())`.
+  `tests/test_the_interface_has_two_themes.py` pins all of this.
 
 ## Where the keys live (names only, never a value)
 

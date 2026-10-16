@@ -17,6 +17,10 @@ export const en: Translations = {
     adminKeySetTooltip:
       "Set the admin key (X-API-Key) to enable writes",
     languageLabel: "Language",
+    themeLabel: "Theme",
+    themeSystem: "Follow the system",
+    themeLight: "Light",
+    themeDark: "Dark",
     demoVideo: "Demo video",
     demoVideoTitle: "LiteRev, a guided tour (about {minutes} minutes)",
     demoVideoTitleShort: "LiteRev, a guided tour",

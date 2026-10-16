@@ -6,6 +6,7 @@ import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { levelBadge, levelText } from "../lib/gradeLevels";
 import { useI18n } from "../i18n/LanguageProvider";
+import { chartColors, useResolvedTheme } from "../theme/ThemeProvider";
 import {
   ArrowLeft, Brain,
   ChevronDown, ChevronUp, Database, ExternalLink, FileText,
@@ -3605,7 +3606,7 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
                 <div className="rounded-2xl border border-white/5 bg-white/2 p-4 flex flex-col gap-3">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-gold-400">{t("scenarioDetail.clustering.umapProjection")}</span>
                   <p className="text-[10px] text-white/40 leading-4">{t("scenarioDetail.clustering.umapCaption")}</p>
-                  <div className="w-full bg-[#0a1410] rounded-xl border border-white/5 overflow-hidden">
+                  <div className="w-full bg-[rgb(var(--surface))] rounded-xl border border-white/5 overflow-hidden">
                     <UmapScatterPlot clusters={data.clusters} selectedCluster={selectedCluster} onSelectCluster={setSelectedCluster}/>
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-white/25 font-mono">
@@ -3879,8 +3880,8 @@ function SubsetNarrowPanel({ scenarioId, selection, enabled, onApplied }: {
   );
 }
 
-function getClusterColor(clusterId: number, isNoise: boolean): string {
-  if (isNoise) return "#94a3b8";
+function getClusterColor(clusterId: number, isNoise: boolean, noise = "#94a3b8"): string {
+  if (isNoise) return noise;
   return CLUSTER_VIVID[clusterId % CLUSTER_VIVID.length];
 }
 // Convex hull (gift wrapping)
@@ -3912,6 +3913,9 @@ function expandHull(hull: Array<{x:number;y:number}>, margin: number): Array<{x:
 // Scatter plot UMAP moderne avec nuages pastel
 function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:ClusterResult[];selectedCluster:number|null;onSelectCluster:(id:number)=>void}) {
   const { t } = useI18n();
+  // Le liseré d'un point sélectionné doit contraster avec le fond du graphique, qui
+  // suit le thème : blanc sur fond sombre, vert très foncé sur fond clair.
+  const chart = chartColors(useResolvedTheme());
   const allPoints: Array<ClusterPoint&{cluster_id:number;is_noise:boolean}>=[];
   clusters.forEach(c=>{if(c.points) c.points.forEach(p=>allPoints.push({...p,cluster_id:c.cluster_id,is_noise:c.is_noise}));});
   if(!allPoints.length) return <span className="text-xs text-white/40">{t("scenarioDetail.clustering.noPoint")}</span>;
@@ -3949,13 +3953,13 @@ function UmapScatterPlot({clusters,selectedCluster,onSelectCluster}:{clusters:Cl
       {allPoints.map(p=>{
         const{cx,cy}=sv(p.x,p.y);
         const sel=selectedCluster===p.cluster_id;
-        const col=getClusterColor(p.cluster_id,p.is_noise);
+        const col=getClusterColor(p.cluster_id,p.is_noise,chart.noise);
         const r=p.is_noise?2.5:sel?7:4.5;
         return(<g key={p.id} className="cursor-pointer" onClick={()=>onSelectCluster(p.cluster_id)}>
           {sel&&!p.is_noise&&<circle cx={cx} cy={cy} r={r+6} fill={col} opacity={0.14}/>}
           <circle cx={cx} cy={cy} r={r} fill={col}
             opacity={p.is_noise?0.22:sel?1:0.78}
-            stroke={sel?"#fff":p.is_noise?"transparent":col}
+            stroke={sel?chart.ink:p.is_noise?"transparent":col}
             strokeWidth={sel?2:0.5} strokeOpacity={0.5}
             filter={sel?"url(#ptglow)":undefined}
             className="transition-all duration-200">
@@ -5516,7 +5520,7 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
           {(['all','with_pico','without_pico'] as const).map(f=>(
             <button key={f} onClick={()=>setFilter(f)}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition ${
-                filter===f?'bg-brand-700 text-gold-400 font-semibold':'text-white/60 hover:text-white hover:bg-white/8'
+                filter===f?'bg-pill text-onpill font-semibold':'text-white/60 hover:text-white hover:bg-white/8'
               }`}
             >
               {f==='all'?t("scenarioDetail.pico.filterAll"):f==='with_pico'?t("scenarioDetail.pico.filterWithPico"):t("scenarioDetail.pico.filterWithoutPico")}
@@ -5667,6 +5671,7 @@ function KnowledgeGraphSection({ scenarioId }: { scenarioId: string }) {
 }
 
 function ConceptMapView({ scenarioId }: { scenarioId: string }) {
+  const chart = chartColors(useResolvedTheme());
   const { t, lang } = useI18n();
   const [data, setData] = React.useState<ConceptGraphData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -5948,7 +5953,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 overflow-x-auto">
-          <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[#070f0a] rounded-2xl border border-white/5" style={{ minWidth: 640 }}>
+          <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="bg-[rgb(var(--chart-surface))] rounded-2xl border border-white/5" style={{ minWidth: 640 }}>
             {types.map((ty, ci) => (
               <g key={ty}>
                 <circle cx={colW * ci + 14} cy={18} r={3} fill={CONCEPT_TYPE_COLORS[ty]} />
@@ -5964,7 +5969,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
               const base = 0.10 + 0.30 * (e.weight / maxW);
               return (
                 <path key={i} d={`M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`} fill="none"
-                  stroke={hot ? "#fff" : "#9be7c4"} strokeWidth={0.6 + 3 * (e.weight / maxW)}
+                  stroke={hot ? chart.ink : chart.edge} strokeWidth={0.6 + 3 * (e.weight / maxW)}
                   strokeOpacity={focus === null ? base : hot ? 0.85 : 0.04} className="cursor-pointer"
                   onClick={() => setSelected(e.source)}>
                   <title>{`${nameOf(e.source)} - ${nameOf(e.target)} · ${e.weight}`}</title>
@@ -5985,9 +5990,9 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
                   onClick={() => setSelected(isSel ? null : n.id)}
                   onMouseEnter={() => setHovered(n.id)} onMouseLeave={() => setHovered(null)}>
                   <title>{`${txt} · ${n.count}`}</title>
-                  {isSel && <circle cx={p.x} cy={p.y} r={r + 5} fill="none" stroke="#fff" strokeWidth="1.2" strokeDasharray="3,2" opacity={0.8} />}
+                  {isSel && <circle cx={p.x} cy={p.y} r={r + 5} fill="none" stroke={chart.ink} strokeWidth="1.2" strokeDasharray="3,2" opacity={0.8} />}
                   {latestOnly && n.new_count > 0 && <circle cx={p.x} cy={p.y} r={r + 3} fill="none" stroke="#fbbf24" strokeWidth="1.5" />}
-                  <circle cx={p.x} cy={p.y} r={r} fill={color} fillOpacity={0.85} stroke={isSel ? "#fff" : color} strokeWidth={isSel ? 1.5 : 0.6} />
+                  <circle cx={p.x} cy={p.y} r={r} fill={color} fillOpacity={0.85} stroke={isSel ? chart.ink : color} strokeWidth={isSel ? 1.5 : 0.6} />
                   <text x={rightSide ? p.x + r + 4 : p.x - r - 4} y={p.y + 3} fontSize="9" fill="rgba(255,255,255,0.85)"
                     textAnchor={rightSide ? "start" : "end"} className="select-none">
                     {txt.length > 26 ? `${txt.slice(0, 25)}…` : txt}
@@ -6130,6 +6135,7 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
 }
 
 function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
+  const chart = chartColors(useResolvedTheme());
   const { t } = useI18n();
   const [data, setData] = React.useState<KnowledgeGraphData | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -6248,7 +6254,7 @@ function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
         {/* SVG Graph */}
         <div className="lg:col-span-2">
           <svg width="100%" viewBox={`0 0 ${W} ${H}`}
-            className="bg-[#070f0a] rounded-2xl border border-white/5 overflow-visible"
+            className="bg-[rgb(var(--chart-surface))] rounded-2xl border border-white/5 overflow-visible"
             style={{maxHeight: 500}}
           >
             <defs>
@@ -6317,7 +6323,7 @@ function ArticleSimilarityGraph({ scenarioId }: { scenarioId: string }) {
                   <circle
                     cx={pos.x} cy={pos.y} r={sel || hov ? r + 2 : r}
                     fill={`url(#kg-rg-${n.cluster})`}
-                    stroke={sel ? "#fff" : color}
+                    stroke={sel ? chart.ink : color}
                     strokeWidth={sel ? 1.5 : 0.8}
                     opacity={active ? 1 : 0.15}
                     filter={(sel || hov) ? "url(#kg-glow)" : undefined}
@@ -6927,7 +6933,7 @@ function AlertsSection({ scenarioId }: { scenarioId: string }) {
                 <button key={f} onClick={() => setFrequency(f)}
                   className={`px-3 py-1.5 rounded-lg text-[10px] font-medium transition ${
                     frequency === f
-                      ? 'bg-brand-700 text-gold-400 font-semibold'
+                      ? 'bg-pill text-onpill font-semibold'
                       : 'text-white/60 hover:text-white hover:bg-white/8'
                   }`}
                 >{f === 'immediate' ? t("scenarioDetail.alerts.frequencyImmediate") : f === 'daily' ? t("scenarioDetail.alerts.frequencyDaily") : t("scenarioDetail.alerts.frequencyWeekly")}</button>
@@ -7891,7 +7897,7 @@ function ThresholdCurvePanel({ scenarioId, onPick, onPickRerank }: { scenarioId:
             <button key={k}
               onClick={() => { setScore(k); load(askedFor > 0 ? askedFor : undefined, k); }}
               className={`rounded-md px-2 py-0.5 text-[10px] transition ${
-                score === k ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/45 hover:text-white"
+                score === k ? "bg-pill text-onpill font-semibold" : "text-white/45 hover:text-white"
               }`}>
               {t(k === "rerank" ? "scenarioDetail.seuil.curve.scoreRerank" : "scenarioDetail.seuil.curve.scoreSimilarity")}
             </button>
@@ -8020,7 +8026,7 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
         {SUB.map(s => (
           <button key={s.key} onClick={() => setSub(s.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
-              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+              sub === s.key ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
             {s.icon}{s.label}
           </button>
@@ -8964,7 +8970,7 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
         {SUB.map(s => (
           <button key={s.key} onClick={() => setSub(s.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
-              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+              sub === s.key ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
             {s.icon}{s.label}
           </button>
@@ -8996,7 +9002,7 @@ function VizTab({ scenarioId }: { scenarioId: string }) {
         {SUB.map(s => (
           <button key={s.key} onClick={() => setSub(s.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
-              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+              sub === s.key ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
             {s.icon}{s.label}
           </button>
@@ -9030,7 +9036,7 @@ function VariablesModelTab({ scenarioId, detail, initialSub }: { scenarioId: str
         {SUB.map(s => (
           <button key={s.key} onClick={() => setSub(s.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
-              sub === s.key ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
+              sub === s.key ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"
             }`}>
             {s.icon}{s.label}
           </button>
@@ -10012,7 +10018,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
                     disabled={savingKind}
                     className={`rounded-lg px-2.5 py-1 text-[11px] transition disabled:opacity-50 ${
                       (detail.kind ?? "predictive") === k
-                        ? "bg-brand-700 text-gold-400 font-semibold"
+                        ? "bg-pill text-onpill font-semibold"
                         : "text-white/45 hover:text-white hover:bg-white/8"
                     }`}
                   >
@@ -10113,7 +10119,7 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
             onClick={() => setActiveSection(section.key)}
             className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition ${
               activeSection === section.key
-                ? "bg-brand-700 text-gold-400 font-semibold"
+                ? "bg-pill text-onpill font-semibold"
                 : "border border-transparent text-white/60 hover:text-white hover:bg-white/8"
             }`}
           >
