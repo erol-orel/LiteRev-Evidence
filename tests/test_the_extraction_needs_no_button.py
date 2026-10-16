@@ -38,7 +38,9 @@ def test_the_extraction_is_a_step_between_the_metadata_and_the_clustering():
 def test_the_step_extracts_every_relevant_article_with_no_cap_and_waits_for_it():
     src = _pipeline_src()
     step = src[src.index('update_step("extraction", "running")'):src.index('update_step("clustering"')]
-    assert "start_extraction(scenario_id, None, 0)" in step, "the step caps the articles"
+    assert "start_extraction(scenario_id, _ex_hint, 0)" in step, "the step caps the articles"
+    # The same disease hint the button passes, so both read the papers the same way.
+    assert "_get_user_scenario_or_404(scenario_id) or {}).get(\"name\")" in step
     assert "extraction_status(scenario_id)" in step, "the step does not follow the run"
     assert "_extraction_wait_budget_s()" in step, "the wait is not bounded"
     # A run still going when the budget runs out is NOT reported as done.

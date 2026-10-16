@@ -3930,7 +3930,13 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                             extracted=_ex0.get("n_extracted", 0), pending=0,
                             observations=_ex0.get("n_observations", 0))
             else:
-                _ex_out = start_extraction(scenario_id, None, 0)
+                # Le nom du scénario sert d'indice de maladie dans le prompt, comme
+                # pour le bouton : sans lui l'étape extrairait autrement que lui.
+                try:
+                    _ex_hint = (_get_user_scenario_or_404(scenario_id) or {}).get("name")
+                except Exception:                            # noqa: BLE001
+                    _ex_hint = None
+                _ex_out = start_extraction(scenario_id, _ex_hint, 0)
                 if _ex_out.get("status") in ("no_llm", "paused"):
                     update_step("extraction", "skipped",
                                 reason=_ex_out.get("reason") or _ex_out.get("status"))
