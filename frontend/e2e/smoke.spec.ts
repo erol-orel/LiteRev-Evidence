@@ -58,10 +58,15 @@ test("opens the scenario page: header, corpus, PRISMA flow and clustering", asyn
   await nav(page, en.nav.scenarios).click();
   await seededCard(page).getByRole("button", { name: en.scenarios.detailPage, exact: true }).click();
 
-  // Header: title, corpus size and the saved query.
+  // Header: title and corpus size. The query is NOT here: a review strategy runs to
+  // thousands of characters and used to push the page below the fold, so the header says
+  // how long it is and where it lives, and the Strategy tab holds the query itself.
   await expect(page.getByRole("heading", { level: 2, name: SCENARIO_NAME })).toBeVisible();
   await expect(page.getByText(`${ARTICLES} ${en.scenarioDetail.page.articles}`, { exact: true })).toBeVisible();
-  await expect(page.getByText(`${en.scenarios.savedSearchPrefix}${SCENARIO_QUERY}`)).toBeVisible();
+  await expect(page.getByText(`${en.scenarios.savedSearchPrefix}${SCENARIO_QUERY}`)).toHaveCount(0);
+  await expect(page.getByText(
+    en.scenarioDetail.page.queryInStrategy.replace("{chars}", String(SCENARIO_QUERY.length)),
+  )).toBeVisible();
 
   // Corpus & Review → Corpus: the article list with the seeded titles.
   await expect(page.getByText(/Benchmark article \d+/).first()).toBeVisible();
@@ -73,6 +78,18 @@ test("opens the scenario page: header, corpus, PRISMA flow and clustering", asyn
   await expect(page.getByText(en.scenarioDetail.prisma.stage1)).toBeVisible();
   await expect(page.getByText(en.scenarioDetail.prisma.duplicatesRemoved)).toBeVisible();
   await expect(page.getByText(en.scenarioDetail.prisma.stage2)).toBeVisible();
+
+  // Strategy: the query the header no longer carries, with its length, and the plan of
+  // what each database will receive of it.
+  await page.getByRole("button", { name: en.scenarioDetail.page.sections.queries, exact: true }).click();
+  await expect(page.getByText(en.scenarioDetail.queries.scenarioQuery, { exact: true })).toBeVisible();
+  await expect(page.getByText(SCENARIO_QUERY, { exact: true }).first()).toBeVisible();
+  // `exact` matters: the header sentence names the same length, so a substring match
+  // would find two elements and say nothing about where the query itself is.
+  await expect(page.getByText(
+    en.scenarioDetail.queries.queryChars.replace("{chars}", String(SCENARIO_QUERY.length)),
+    { exact: true },
+  )).toBeVisible();
 
   // Visualization: the cached clustering is rendered in the interface language.
   await page.getByRole("button", { name: en.scenarioDetail.page.sections.viz, exact: true }).click();

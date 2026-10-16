@@ -1711,7 +1711,6 @@ def get_activity() -> dict[str, Any]:
     return {"running": items, "count": len(items), "checked_at": _dt.now(_tz.utc).isoformat()}
 
 
-@app.get("/user-scenarios/{scenario_id}/embedding-status")
 def _score_failures_for(scenario_id: str) -> dict[str, Any]:
     """Ce qu'un passage de scoring ne parvient plus à scorer, pour la carte des scores.
     Import tardif : api.relevance est chargé après ce module. Jamais d'erreur."""
@@ -1724,6 +1723,7 @@ def _score_failures_for(scenario_id: str) -> dict[str, Any]:
         return {"failed": 0, "failed_reason": None}
 
 
+@app.get("/user-scenarios/{scenario_id}/embedding-status")
 def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     """
     Embedding status for a user scenario.
