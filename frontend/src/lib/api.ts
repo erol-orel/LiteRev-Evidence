@@ -3137,8 +3137,10 @@ export interface ScenarioCounts {
   populate_status?: string | null;
   current_step?: string | null;
   threshold: number;
-  /** Copie stockée, lue par la liste des scénarios (mise à jour par étapes pendant une recherche). */
+  /** Copie stockée, écrite par la recherche (mise à jour par étapes pendant celle-ci). */
   article_count: number;
+  /** Vrai quand cette lecture a remis la copie stockée au compte réel du corpus. */
+  stored_count_healed?: boolean;
   /** Référence : liens en base hors doublons (onglet Corpus). */
   corpus_links: number;
   /** « Passés au screening » du PRISMA, figé à la fin de la dernière recherche ; null avant. */

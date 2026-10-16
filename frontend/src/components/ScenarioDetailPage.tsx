@@ -10150,6 +10150,12 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
               </li>
             ))}
           </ul>
+          {/* Ce que le relecteur doit en faire. La bannière listait deux nombres sans
+              dire lequel croire : « 52 759, attendu 52 765 » pour six articles importés
+              à la main, un écart que la lecture répare désormais elle-même. */}
+          <p className="text-[11px] text-rose-200/70 leading-relaxed">
+            {t("scenarioDetail.page.countsMismatchHelp")}
+          </p>
         </div>
       )}
       {counts && !counts.in_progress && counts.consistent && justFinished && (
