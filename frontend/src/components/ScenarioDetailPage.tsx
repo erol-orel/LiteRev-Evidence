@@ -2876,6 +2876,10 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
         const scored = embeddingStatus.counts?.scored ?? embeddingStatus.ranking?.scored ?? 0;
         const reranked = embeddingStatus.ranking?.reranked ?? embeddingStatus.counts?.reranked ?? 0;
         const rerankScorable = embeddingStatus.ranking?.rerank_scorable ?? total;
+        // Ce que l'API d'embedding ne parvient plus à scorer, et ce qui attend vraiment.
+        const scoreFailed = embeddingStatus.ranking?.failed ?? 0;
+        const scoreFailedReason = embeddingStatus.ranking?.failed_reason ?? null;
+        const waiting = Math.max(0, total - scored - scoreFailed);
         const semanticReady = embeddingStatus.score_availability.semantic;
         const cohereReady = embeddingStatus.score_availability.cohere;
         const coherePartial = embeddingStatus.score_availability.cohere_partial ?? false;
@@ -2907,8 +2911,18 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
                 {t("scenarioDetail.corpus.semanticLine")
                   .replace("{scored}", scored.toLocaleString())
                   .replace("{total}", total.toLocaleString())}
-                {!semanticReady && scored < total && ` · ${(total - scored).toLocaleString()} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
+                {/* Ce qui manque n'est pas forcément « en cours » : un article que l'API
+                    d'embedding refuse ou omet ne sera pas sauvé par un passage de plus.
+                    Les deux comptes sont distingués, sinon cinq articles perdus se
+                    lisaient comme un scoring qui tourne encore, des jours après. */}
+                {!semanticReady && waiting > 0 && ` · ${waiting.toLocaleString()} ${t("scenarioDetail.corpus.inProgressSuffix")}`}
               </p>
+              {scoreFailed > 0 && (
+                <p className="text-[11px] text-gold-300/90" title={scoreFailedReason ?? undefined}>
+                  {t("scenarioDetail.corpus.scoreFailedLine").replace("{n}", scoreFailed.toLocaleString())}
+                  {scoreFailedReason ? ` (${scoreFailedReason})` : ""}
+                </p>
+              )}
               {cohereConfigured && (
                 <p className={`text-[11px] ${cohereReady ? 'text-white/70' : 'text-gold-300/90'}`}>
                   {t("scenarioDetail.corpus.rerankLine")

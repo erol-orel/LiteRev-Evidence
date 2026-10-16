@@ -162,6 +162,14 @@ def _ensure_user_scenarios_table() -> None:
             # bibliothèque lié plus tard au scénario n'était jamais signalé.
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP",
             "ALTER TABLE article_scenarios ALTER COLUMN assigned_at SET DEFAULT now()",
+            # Même borne que `embedding_attempts` plus bas, mais pour le score sémantique
+            # d'un article DANS UN SCÉNARIO : un article que l'API d'embedding refuse ou
+            # omet n'était compté nulle part, donc il était re-sélectionné à chaque
+            # passage, et la carte des scores affichait « 5 en cours… » indéfiniment.
+            # Au-delà de SCORE_MAX_ATTEMPTS essais il sort de la sélection automatique,
+            # et l'écran dit qu'il n'a PAS pu être scoré, avec la raison.
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS score_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS score_failed_reason TEXT",
             # Borne anti « lot empoisonné » : nb d'échecs d'embedding pour un chunk.
             # Au-delà de 3, il est exclu du worker / du compteur « en attente » / de
             # /admin/embed-pending - sinon un chunk que l'API refuse (contenu invalide)
@@ -1704,6 +1712,18 @@ def get_activity() -> dict[str, Any]:
 
 
 @app.get("/user-scenarios/{scenario_id}/embedding-status")
+def _score_failures_for(scenario_id: str) -> dict[str, Any]:
+    """Ce qu'un passage de scoring ne parvient plus à scorer, pour la carte des scores.
+    Import tardif : api.relevance est chargé après ce module. Jamais d'erreur."""
+    try:
+        from .relevance import scenario_score_failures
+        got = scenario_score_failures(scenario_id)
+        return {"failed": int(got.get("n") or 0), "failed_reason": got.get("reason")}
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"score failures {scenario_id}: {_e}")
+        return {"failed": 0, "failed_reason": None}
+
+
 def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
     """
     Embedding status for a user scenario.
@@ -1871,6 +1891,11 @@ def get_user_scenario_embedding_status(scenario_id: str) -> dict[str, Any]:
             "reranked": rank_reranked,
             "no_abstract": int(ranking["no_abstract"] or 0),
             "complete": semantic_ready,
+            # Les articles qu'un passage de plus ne sauvera pas : l'API d'embedding les
+            # refuse ou les omet depuis plusieurs essais. Sans ce compte, l'écran les
+            # rangeait dans « en cours… », et cinq articles perdus faisaient croire à un
+            # scoring sans fin, des jours après la recherche.
+            **_score_failures_for(scenario_id),
             # Le dénominateur du rerank : les articles qui ont un résumé exploitable.
             "rerank_scorable": rerank_scorable,
             "rerank_missing": rerank_missing,

@@ -669,6 +669,7 @@ copyQuery: "Copy",
       semanticLine: "Semantic score: {scored} of {total} articles",
       rerankLine: "Rerank score (Cohere): {reranked} of {scorable} articles",
       inProgressSuffix: "in progress…",
+      scoreFailedLine: "{n} could not be scored: the embedding API refused or omitted them. Recalculating the scores tries again.",
       semanticTooltip:
         "Vector similarity (meaning). Green when the WHOLE corpus is scored.",
       semantic: "Semantic",

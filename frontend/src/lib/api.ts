@@ -2986,6 +2986,11 @@ export interface EmbeddingStatus {
     rerank_scorable?: number;
     rerank_missing?: number;
     rerank_complete?: boolean;
+    /** Les articles qu'un passage de plus ne sauvera pas : l'API d'embedding les refuse
+     *  ou les omet depuis plusieurs essais. Les compter à part évite d'afficher « en
+     *  cours » pour un travail qui ne se fera jamais. */
+    failed?: number;
+    failed_reason?: string | null;
   };
   score_availability: {
     semantic: boolean;            // vert seulement quand TOUT le corpus est scoré
