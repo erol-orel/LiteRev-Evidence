@@ -1152,6 +1152,7 @@ copyQuery: "Copy",
       learningTrained:
         "Trained on {included} included and {excluded} excluded decisions: the list puts first what your decisions make likely. Among the {remaining} relevant articles left, the model expects about {left} to be included.",
       learningAuc: "Cross-validated AUC {auc} (1 means it separates your decisions perfectly, 0.5 means chance).",
+      learningAboveSplit: "Above the threshold, of the articles still to screen, the model would keep {keep} and drop {drop}.",
       learningSuggested: "{n} articles below the relevance threshold look like what you include. The top {inQueue} are already in the list below, marked as suggestions:",
       learningBadge: "learned {score}",
       learningDownloadAll: "Download all {n} as a CSV, in the model's order",

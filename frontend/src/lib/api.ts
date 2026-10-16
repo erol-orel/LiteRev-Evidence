@@ -2676,6 +2676,9 @@ export interface LearningStatus {
   expected_relevant_left?: number | null;
   /** Undecided articles below the threshold the model would include, and the first of them. */
   below_threshold_suggested?: number;
+  /** Au-dessus du seuil : ce que le modèle garderait, ce qu'il écarterait. */
+  above_threshold_suggested?: number;
+  above_threshold_rejected?: number;
   /** How many of those the screening queue carries. The rest are in the export: the
    *  model offers 97 suggestions on one corpus and 1,442 on another, and a queue of
    *  1,442 articles the search did not retain is a different review. */

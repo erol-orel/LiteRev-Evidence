@@ -310,6 +310,13 @@ def learning_summary(scenario_id: str, conn=None, suggested_limit: int | None = 
         row = conn.execute(text(f"""
             SELECT COUNT(*) FILTER (WHERE {undecided} AND {gate}) AS remaining_relevant,
                    SUM(ars.learned_score) FILTER (WHERE {undecided} AND {gate}) AS expected_left,
+                   -- Les deux côtés du seuil comptés de la même manière, ce qui manquait :
+                   -- on savait combien d'articles SOUS le seuil le modèle garderait, et
+                   -- rien de ce qu'il pense des articles AU-DESSUS, où se fait le travail.
+                   COUNT(*) FILTER (WHERE {undecided} AND {gate}
+                                      AND ars.learned_score >= :smin) AS above_suggested,
+                   COUNT(*) FILTER (WHERE {undecided} AND {gate}
+                                      AND ars.learned_score < :smin) AS above_rejected,
                    COUNT(*) FILTER (WHERE {undecided} AND ({gate}) IS NOT TRUE AND {has_abstract_sql('d')}
                                       AND ars.learned_score >= :smin) AS below_suggested
             FROM article_scenarios ars
@@ -339,6 +346,11 @@ def learning_summary(scenario_id: str, conn=None, suggested_limit: int | None = 
         "scenario_id": scenario_id,
         "remaining_relevant": int(row.get("remaining_relevant") or 0),
         "expected_relevant_left": None if expected is None else round(float(expected), 1),
+        # Au-dessus du seuil, ce que le modèle garderait et ce qu'il écarterait : un
+        # relecteur qui a déjà jugé quelques centaines d'articles veut savoir ce qui
+        # l'attend dans la file, pas seulement ce que le seuil a laissé dehors.
+        "above_threshold_suggested": int(row.get("above_suggested") or 0),
+        "above_threshold_rejected": int(row.get("above_rejected") or 0),
         "below_threshold_suggested": int(row.get("below_suggested") or 0),
         "suggested": suggested,
     }

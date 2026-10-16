@@ -237,6 +237,12 @@ def test_the_queue_follows_the_decisions_once_trained(seeded):
     # The exposure paper below the threshold is the one the model would include.
     assert info["below_threshold_suggested"] == 1
     assert [s["id"] for s in info["suggested"]] == [808]
+    # And the same count on the other side of the threshold, which is where the reviewer
+    # actually works: of the two relevant articles left to screen, what the model would
+    # keep and what it would drop. The card only ever said what slept below the threshold.
+    assert info["above_threshold_suggested"] + info["above_threshold_rejected"] == 2
+    assert info["above_threshold_suggested"] == sum(
+        1 for a in q["articles"] if a["below_threshold"] is False and (a["learned_score"] or 0) >= 0.5)
     r = _client().get(f"/user-scenarios/{SID}/learned-ranking")
     assert r.status_code == 200 and r.json()["suggested"][0]["id"] == 808
 

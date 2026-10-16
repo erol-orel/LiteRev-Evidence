@@ -3324,10 +3324,18 @@ def _run_user_scenario_populate(
         if True:
             def _post_done_bg(_sid, _query):
                 try:
-                    _ce = _run_cross_encoder_rerank(_sid, _query)
+                    # Après une recherche, la question n'a pas changé : seuls les articles
+                    # que la recherche vient d'ajouter n'ont pas de note. Les renvoyer tous
+                    # à Cohere coûtait un corpus entier d'appels payants par recherche.
+                    from .relevance import needs_full_score_pass, note_full_score_pass
+                    _full = needs_full_score_pass(_sid, _query, "rerank")
+                    _ce = _run_cross_encoder_rerank(_sid, _query, only_missing=not _full)
+                    if _full and not _ce.get("stopped") and not _ce.get("skipped_no_key"):
+                        note_full_score_pass(_sid, _query, "rerank")
                     if _ce.get("scored"):
                         logger.info(f"Post-populate cross-encoder {_sid}: {_ce['scored']}/"
-                                    f"{_ce['candidates']} notés, {_ce['batches_failed']} lots en échec.")
+                                    f"{_ce['candidates']} notés, {_ce['batches_failed']} lots en échec"
+                                    f" ({'complet' if _full else 'manques seulement'}).")
                 except Exception as _ece:
                     logger.warning(f"cross-encoder arrière-plan {_sid}: {_ece}")
                 finally:
@@ -3567,8 +3575,17 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
                 # Mesuré sur HPAI_last : les 6 453 articles communs aux deux chemins ont
                 # tous changé de score (−0,024 en moyenne), et le seuil réglé pour garder
                 # 1 000 articles n'en gardait plus que 288 après une recherche relancée.
-                n_reranked = _run_semantic_rerank_inline(scenario_id, query)
-                update_step("semantic_scoring", "done", updated=n_reranked)
+                # Tout rebalayer, ou seulement combler les manques ? Le score est le
+                # cosinus question-article : à question inchangée, un article déjà scoré
+                # donnerait exactement le même nombre. Le pipeline rebalayait pourtant
+                # tout à chaque passage, et il repart à chaque redémarrage de l'API.
+                from .relevance import needs_full_score_pass, note_full_score_pass
+                _full_sem = needs_full_score_pass(scenario_id, query, "semantic")
+                n_reranked = _run_semantic_rerank_inline(scenario_id, query,
+                                                         missing_only=not _full_sem)
+                if _full_sem:
+                    note_full_score_pass(scenario_id, query, "semantic")
+                update_step("semantic_scoring", "done", updated=n_reranked, full_pass=_full_sem)
 
                 # Seuil SÉMANTIQUE = SOFT : on ne supprime JAMAIS d'article du
                 # corpus. Le corpus = résultat INTÉGRAL de la requête booléenne
@@ -3604,17 +3621,26 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         update_step("cross_encoder", "running")
         try:
             if os.getenv("COHERE_API_KEY"):
-                _ce_res = _run_cross_encoder_rerank(scenario_id, query)
+                # Celle-ci appelle une API PAYANTE, un lot d'articles à la fois : la
+                # relancer en entier sur un corpus déjà noté, c'est renvoyer 81 766
+                # articles à Cohere pour réécrire les mêmes nombres. À question
+                # inchangée, on ne note donc que ce qui n'a pas de note.
+                from .relevance import needs_full_score_pass, note_full_score_pass
+                _full_ce = needs_full_score_pass(scenario_id, query, "rerank")
+                _ce_res = _run_cross_encoder_rerank(scenario_id, query, only_missing=not _full_ce)
                 if _ce_res.get("skipped_no_key"):
                     update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
                 else:
+                    if _full_ce and not _ce_res.get("stopped"):
+                        note_full_score_pass(scenario_id, query, "rerank")
                     # `stopped` : le fournisseur a refusé et le balayage s'est arrêté avant
                     # la fin (les articles non notés restent sans score, donc gardés).
                     update_step("cross_encoder", "done",
                                 scored=_ce_res.get("scored", 0),
                                 candidates=_ce_res.get("candidates", 0),
                                 batches_failed=_ce_res.get("batches_failed", 0),
-                                stopped=_ce_res.get("stopped"))
+                                stopped=_ce_res.get("stopped"),
+                                full_pass=_full_ce)
             else:
                 update_step("cross_encoder", "skipped", reason="Clé Cohere non configurée")
         except Exception as _ce_ex:

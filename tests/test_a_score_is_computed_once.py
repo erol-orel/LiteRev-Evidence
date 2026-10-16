@@ -85,3 +85,65 @@ def test_the_status_says_what_could_not_be_scored():
     src = inspect.getsource(R.get_rerank_status)
     for field in ("similarity_failed", "similarity_failed_reason", "similarity_retryable"):
         assert field in src, f"{field} doit être exposé pour que l'écran cesse de dire « en cours »"
+
+
+# ── Un corpus déjà noté n'est pas renvoyé en entier aux APIs ─────────────────
+# La plainte d'origine, mesurée : le pipeline complet relançait les deux balayages
+# ENTIERS à chaque passage, et il repart à chaque redémarrage de l'API. Sur le scénario
+# COVID exposition, cela veut dire 81 766 articles renvoyés à Cohere, lot par lot, pour
+# réécrire exactement les mêmes nombres.
+
+def test_the_question_decides_whether_everything_is_rescanned(db_conn):
+    """Un balayage complet n'est refait que si la question a changé."""
+    sid = "score-pass-scenario"
+    R.forget_score_passes(sid)
+    assert R.needs_full_score_pass(sid, "influenza AND birds", "rerank") is True
+    R.note_full_score_pass(sid, "influenza AND birds", "rerank")
+    assert R.needs_full_score_pass(sid, "influenza AND birds", "rerank") is False
+    # Une autre question, un autre balayage. Un autre score, aussi : les deux sont séparés.
+    assert R.needs_full_score_pass(sid, "influenza AND cats", "rerank") is True
+    assert R.needs_full_score_pass(sid, "influenza AND birds", "semantic") is True
+    # Et un rescore demandé à la main efface la trace : tout est refait.
+    R.forget_score_passes(sid)
+    assert R.needs_full_score_pass(sid, "influenza AND birds", "rerank") is True
+
+
+def test_the_fingerprint_is_the_question_and_nothing_else():
+    assert R.score_query_sha("  influenza AND birds ") == R.score_query_sha("influenza AND birds")
+    assert R.score_query_sha("influenza AND birds") != R.score_query_sha("influenza AND cats")
+
+
+def test_the_pipeline_only_fills_the_gaps_when_the_question_has_not_changed():
+    import inspect
+    from api import pipeline as P
+    src = inspect.getsource(P._run_user_scenario_full_pipeline)
+    assert 'needs_full_score_pass(scenario_id, query, "semantic")' in src
+    assert "missing_only=not _full_sem" in src
+    assert 'needs_full_score_pass(scenario_id, query, "rerank")' in src
+    assert "only_missing=not _full_ce" in src
+
+
+def test_a_search_does_not_rerank_the_whole_corpus_again():
+    """Le chemin /populate note en arrière-plan ce que la recherche vient d'ajouter."""
+    import inspect
+    from api import pipeline as P
+    src = inspect.getsource(P._run_user_scenario_populate)
+    assert 'needs_full_score_pass(_sid, _query, "rerank")' in src
+    assert "only_missing=not _full" in src
+
+
+def test_a_rescore_asked_for_by_hand_still_redoes_everything():
+    import inspect
+    src = inspect.getsource(R.trigger_rerank)
+    assert "forget_score_passes(scenario_id)" in src
+    assert 'note_full_score_pass(scenario_id, query, "semantic")' in src
+    assert 'note_full_score_pass(scenario_id, query, "rerank")' in src
+
+
+def test_an_interrupted_pass_is_not_recorded_as_complete():
+    """Un balayage que le fournisseur a interrompu laisse des articles sans note : le
+    noter comme complet les condamnerait à ne jamais être notés."""
+    import inspect
+    from api import pipeline as P
+    src = inspect.getsource(P._run_user_scenario_full_pipeline)
+    assert 'if _full_ce and not _ce_res.get("stopped"):' in src

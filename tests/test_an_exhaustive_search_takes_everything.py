@@ -412,7 +412,10 @@ def test_the_search_and_the_pipeline_score_with_the_same_query_vector():
     from api import relevance as R
 
     src = inspect.getsource(P._run_user_scenario_full_pipeline)
-    assert "_run_semantic_rerank_inline(scenario_id, query)" in src
+    # The whole query, unsliced, handed to the ONE scoring function (which may be asked to
+    # fill the gaps only, that is another question: see test_a_score_is_computed_once.py).
+    assert "_run_semantic_rerank_inline(scenario_id, query," in src
+    assert "_run_semantic_rerank_inline(scenario_id, query[" not in src       # never a slice
     assert "input=query" not in src
     assert "embedding_text_for_query(query)" in inspect.getsource(R._run_semantic_rerank_inline)
 
