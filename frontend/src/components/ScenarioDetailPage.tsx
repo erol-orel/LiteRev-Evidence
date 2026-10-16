@@ -2741,8 +2741,11 @@ function ImportDecisionsPanel({ scenarioId, onClose, onApplied }:
   );
 }
 
-function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged }:
+function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged, refreshNonce }:
   { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts;
+    /** Change quand des scores ont été recalculés : la liste se relit sur place, sans
+        remonter la section (ce qui perdait la recherche, la page et l'article déplié). */
+    refreshNonce?: number;
     onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void;
     onCorpusChanged?: () => void }) {
   const { t } = useI18n();
@@ -2815,6 +2818,20 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
     }, 4000);
     return () => clearTimeout(id);
   }, [data, scenarioId, threshold, search]);
+
+  // Un recalcul de scores vient de finir : relire exactement les pages affichées, et le
+  // statut d'embedding avec elles (la carte des scores en vit). Pas de remontage : ce qui
+  // est à l'écran reste à l'écran.
+  const firstNonce = useRef(true);
+  useEffect(() => {
+    if (firstNonce.current) { firstNonce.current = false; return; }
+    const shown = Math.max(CORPUS_PAGE_SIZE, data?.articles.length ?? 0);
+    fetchScenarioCorpus(scenarioId, {
+      limit: shown, ...(threshold != null ? { threshold } : {}), ...search,
+    }).then(setData).catch(() => {});
+    fetchUserScenarioEmbeddingStatus(scenarioId).then(setEmbeddingStatus).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNonce]);
 
   const loadMore = () => {
     if (!data || loadingMore) return;
@@ -5323,6 +5340,20 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               <PrismaBigNum value={num(sem.below_threshold)} sub={t("scenarioDetail.prisma.belowThresholdDeprioritised")} />
             </div>
           </div>
+          {/* Le TOTAL de l'étape, et son addition. Les deux grands nombres sont le corpus
+              SCORÉ partagé par le seuil ; les notices sans résumé ne passent pas par lui et
+              figuraient sur une ligne à part, sans jamais être additionnées : l'étape 2 ne
+              retombait donc pas sur les « notices passées au screening » de l'étape 1, et
+              le total n'était écrit nulle part. */}
+          <p className="text-[10px] text-violet-200/70 leading-relaxed">
+            {t(num(sem.no_abstract) > 0 ? "scenarioDetail.prisma.stage2TotalNoAbs"
+                                        : "scenarioDetail.prisma.stage2Total")
+              .replace("{total}", (num(sem.above_threshold) + num(sem.below_threshold)
+                                   + num(sem.no_abstract)).toLocaleString())
+              .replace("{above}", num(sem.above_threshold).toLocaleString())
+              .replace("{below}", num(sem.below_threshold).toLocaleString())
+              .replace("{noabs}", num(sem.no_abstract).toLocaleString())}
+          </p>
           <div className="space-y-1">
             {/* Les notices sans résumé ne passent pas par le seuil : ni au-dessus ni
                 au-dessous, elles attendent un relecteur qui les juge sur leur titre. */}
@@ -7381,7 +7412,12 @@ function fmtThreshold(v: number): string {
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
 function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
-  scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void;
+  scenarioId: string;
+  /** `threshold` : le seuil enregistré a changé, les compteurs suivent, la liste non (elle
+      affiche déjà ce seuil, au curseur). `scores` : des scores ont été recalculés, donc la
+      liste elle-même doit être relue. */
+  onSaved?: (reason: "threshold" | "scores") => void;
+  onThresholdChange?: (v: number) => void;
   /** Un seuil demandé depuis ailleurs (le score d'un article). `nonce` change à chaque
       demande, y compris quand la valeur est la même : sans lui, recliquer le même
       article ne ferait rien. */
@@ -7476,7 +7512,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
               .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString())
               .replace("{reason}", s.rerank_stopped || s.error || "?"));
       }
-      onSaved?.();   // final refresh so the computed scores/badges show
+      onSaved?.("scores");   // final refresh so the computed scores/badges show
     });
   };
 
@@ -7533,7 +7569,11 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
       setSaveError(null);
-      onSaved?.();
+      // Appliquer un seuil ne change AUCUN article : la liste affiche déjà ce seuil (le
+      // curseur la pilote). Seuls les compteurs enregistrés changent. Remonter toute la
+      // section rechargeait la liste, et perdait au passage la recherche en cours, la
+      // page atteinte et l'article déplié.
+      onSaved?.("threshold");
     } catch (e: any) {
       // L'erreur était AVALÉE : un 401 sans clé, un 422 sur une valeur hors de [0, 1]
       // ou une coupure réseau laissaient l'interface sur un seuil que le serveur n'a
@@ -7556,12 +7596,19 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       }
       // Refresh the corpus so it picks up rerank_running and auto-refreshes the
       // relevance (Cohere) badges live, instead of only on a manual page reload.
-      onSaved?.();
+      onSaved?.("scores");
       startPolling();
     } catch (e: any) {
       setRerankStatus(t("scenarioDetail.seuil.errorPrefix") + e.message);
     }
   };
+
+  // Y a-t-il quelque chose à appliquer ? Non quand les deux seuils affichés sont déjà
+  // enregistrés ET que le seuil de similarité est un choix assumé.
+  const canApply = savedThresholds === null
+    || threshold !== savedThresholds.similarity
+    || rerankThreshold !== savedThresholds.rerank
+    || !thresholdChosen;
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-3 flex flex-wrap items-center gap-4">
@@ -7622,10 +7669,21 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         </span>
       </div>
       <div className="flex items-center gap-2">
-        <button onClick={handleSave} disabled={saving}
-          className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50">
+        {/* Rien à appliquer quand les deux seuils affichés sont ceux qui sont déjà en
+            vigueur : le bouton devient gris et inerte, et dit que c'est le seuil appliqué.
+            Il restait vif, invitait un second clic qui renvoyait les mêmes valeurs et
+            rechargeait la liste pour rien. Exception : un seuil de départ que personne n'a
+            choisi s'applique tel quel, et ce clic-là est une décision (`thresholdChosen`). */}
+        <button onClick={handleSave} disabled={saving || !canApply}
+          title={canApply ? undefined : t("scenarioDetail.seuil.inForceHint")}
+          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+            canApply
+              ? "bg-brand-500/15 hover:bg-brand-500/25 border-brand-500/20 text-brand-300"
+              : "bg-white/5 border-white/10 text-white/35 cursor-default"
+          } disabled:opacity-100`}>
           {saving ? (<Loader2 size={10} className="animate-spin" />) : (<CheckCircle2 size={10} />)}
-          {saved ? t("scenarioDetail.seuil.saved") : t("scenarioDetail.seuil.save")}
+          {saved ? t("scenarioDetail.seuil.saved")
+                 : canApply ? t("scenarioDetail.seuil.save") : t("scenarioDetail.seuil.inForce")}
         </button>
         <button onClick={() => handleRerank(false)}
           title={t("scenarioDetail.seuil.rescoreAllHint")}
@@ -8090,11 +8148,17 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
         <div className="space-y-4">
           <SeuilSection
             scenarioId={scenarioId}
-            onSaved={() => { setCorpusRefreshKey(k => k + 1); onRefreshCounts?.(); }}
+            onSaved={(reason) => {
+              onRefreshCounts?.();
+              // Des scores ont bougé : la liste se relit. Un seuil appliqué ne bouge aucun
+              // score, et la liste l'affiche déjà : la relire coûtait une requête et
+              // remettait la section à zéro (recherche, page, article déplié).
+              if (reason === "scores") setCorpusRefreshKey(k => k + 1);
+            }}
             onThresholdChange={setLiveThreshold}
             incoming={askedThreshold} />
           <CorpusSection
-            key={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
+            refreshNonce={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
             threshold={liveThreshold} counts={counts}
             onCorpusChanged={() => onRefreshCounts?.()}
             onUseAsThreshold={(kind, value) =>
