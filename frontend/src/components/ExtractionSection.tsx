@@ -351,7 +351,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
                 {(["reports", "missing"] as const).map((m) => (
                   <button key={m} onClick={() => setItemMode(m)}
                     className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                      itemMode === m ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"}`}>
+                      itemMode === m ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"}`}>
                     {m === "reports" ? T("modeReports") : T("modeMissing")}
                   </button>
                 ))}
@@ -403,7 +403,7 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
           {(["all", "extracted", "pending", "quote_missing", "to_review", "conflict"] as const).map((f) => (
             <button key={f} onClick={() => setFilter(f)}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-medium transition ${
-                filter === f ? "bg-brand-700 text-gold-400 font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"}`}>
+                filter === f ? "bg-pill text-onpill font-semibold" : "text-white/60 hover:text-white hover:bg-white/8"}`}>
               {T(`filter.${f}`)}{f === "quote_missing" && toCheck > 0 ? ` (${toCheck})` : ""}
             </button>
           ))}

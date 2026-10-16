@@ -15,6 +15,10 @@ export const fr = {
     adminKeySetTooltip:
       "Définir la clé admin (X-API-Key) pour activer les écritures",
     languageLabel: "Langue",
+    themeLabel: "Thème",
+    themeSystem: "Suivre le système",
+    themeLight: "Clair",
+    themeDark: "Sombre",
     demoVideo: "Vidéo de démonstration",
     demoVideoTitle: "LiteRev, visite guidée (environ {minutes} minutes)",
     demoVideoTitleShort: "LiteRev, visite guidée",

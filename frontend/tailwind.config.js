@@ -1,57 +1,50 @@
 /** @type {import('tailwindcss').Config} */
+
+// ── Les couleurs passent par des variables CSS, pour que le thème puisse les changer ──
+// L'interface a été écrite en mode sombre : ~3 000 classes de couleur (`text-white/80`,
+// `border-white/10`, `text-brand-300`, `bg-rose-500/10`...). Les réécrire une à une avec
+// une variante `dark:` serait des milliers de modifications à la main et autant d'oublis.
+// Donc chaque nuance pointe vers une variable, et c'est `src/theme.css` (généré par
+// `scripts/gen-theme.mjs`) qui donne les deux jeux de valeurs. En clair, la nuance n prend
+// la nuance opposée de la même teinte, ce qui convient au style du code : nuances claires
+// pour le texte et les filets, fonds en transparence.
+const SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
+
+/** Les nuances d'une teinte, chacune lue dans sa variable, avec l'alpha de Tailwind. */
+const themed = (hue) =>
+  Object.fromEntries(SHADES.map(s => [s, `rgb(var(--c-${hue}-${s}) / <alpha-value>)`]))
+
+// Toute teinte employée dans src/ doit figurer ici ET dans scripts/gen-theme.mjs, sinon
+// elle garderait la valeur fixe de Tailwind et ne suivrait pas le thème.
+const HUES = ['brand', 'gold', 'forest', 'rose', 'amber', 'emerald', 'violet', 'red',
+              'blue', 'teal', 'slate', 'sky', 'cyan', 'pink', 'green', 'orange',
+              'fuchsia', 'purple', 'indigo', 'lime', 'yellow', 'stone']
+
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        // ── Palette LiteRev - couleurs exactes du logo ───────────────
-        // Vert foncé (tronc + livre) : #0A3621
-        // Or/Ambre  (feuillage)      : #E3AC3B
-        // ─────────────────────────────────────────────────────────────
-        brand: {
-          50:  '#f0f7f3',
-          100: '#d6eade',
-          200: '#aed4bc',
-          300: '#7db897',
-          400: '#4d9c72',
-          500: '#2d7a52',
-          600: '#1f5c3c',
-          700: '#0A3621',
-          800: '#082a1a',
-          900: '#051d12',
-          950: '#030f09',
-        },
-        gold: {
-          50:  '#fdf8ec',
-          100: '#faefd0',
-          200: '#f5dea0',
-          300: '#efc96a',
-          400: '#E3AC3B',
-          500: '#d4941a',
-          600: '#b07612',
-          700: '#8a5a0e',
-          800: '#6b4410',
-          900: '#573711',
-          950: '#311d05',
-        },
-        forest: {
-          50:  '#f2f5f3',
-          100: '#e0e8e3',
-          200: '#c1d1c7',
-          300: '#9ab4a4',
-          400: '#6e9280',
-          500: '#4d7461',
-          600: '#3a5c4c',
-          700: '#2c4739',
-          800: '#1e3028',
-          900: '#121e19',
-          950: '#0a1410',
-        },
+        ...Object.fromEntries(HUES.map(h => [h, themed(h)])),
+        // Dans ce code, « white » veut dire premier plan et non la couleur blanche :
+        // `text-white/70` est du texte, `bg-white/[0.03]` un panneau, `border-white/10`
+        // un filet. C'est donc l'encre du thème, blanche en sombre, presque noire en clair.
+        white: 'rgb(var(--ink) / <alpha-value>)',
+        // Le blanc qui doit RESTER blanc : le texte posé sur un bouton plein de couleur,
+        // dont le fond ne change pas avec le thème.
+        onsolid: '#ffffff',
+        // Le fond de page, pour les rares endroits qui le peignent eux-mêmes.
+        page: 'rgb(var(--page) / <alpha-value>)',
+        // La pastille sélectionnée et son texte, identiques dans les deux thèmes.
+        pill: 'rgb(var(--pill) / <alpha-value>)',
+        onpill: 'rgb(var(--on-pill) / <alpha-value>)',
       },
       boxShadow: {
-        panel: '0 10px 40px rgba(10, 54, 33, 0.35)',
-        gold:  '0 4px 20px rgba(227, 172, 59, 0.25)',
-        green: '0 4px 20px rgba(10, 54, 33, 0.40)',
+        // Définies en entier dans le thème : l'opacité d'une ombre n'est pas la même sur
+        // fond sombre et sur fond clair.
+        panel: 'var(--shadow-panel)',
+        gold: 'var(--shadow-gold)',
+        green: 'var(--shadow-green)',
       },
     }
   },

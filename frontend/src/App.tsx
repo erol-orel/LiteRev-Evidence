@@ -83,6 +83,7 @@ import { pollDelay, pollJob, POLL_MAX_ERRORS } from "./lib/poll";
 import { acceptProposal, keepEnteredQuery } from "./lib/queryProposal";
 import { QueryProposal } from "./components/QueryProposal";
 import { SourcePlanPanel } from "./components/SourcePlanPanel";
+import { ThemeSwitch } from "./components/ThemeSwitch";
 import {
   combinedQueryText,
   effectiveKind,
@@ -2966,8 +2967,8 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(10,54,33,0.18),transparent_35%),linear-gradient(180deg,#0a1410_0%,#121e19_100%)] text-white">
-      <header className="border-b border-white/8 bg-[#0a1410]/80 backdrop-blur-xl">
+    <div className="min-h-screen bg-[image:var(--app-shell)] text-white">
+      <header className="border-b border-white/8 bg-[rgb(var(--surface)/0.8)] backdrop-blur-xl">
         <div className="mx-auto max-w-[1380px] px-6 py-6">
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
@@ -2994,13 +2995,14 @@ export default function App() {
                     type="button"
                     onClick={() => setLang(l)}
                     className={`rounded-lg px-2 py-1 font-semibold transition ${
-                      lang === l ? "bg-brand-700 text-gold-400" : "text-white/50 hover:text-white"
+                      lang === l ? "bg-pill text-onpill" : "text-white/50 hover:text-white"
                     }`}
                   >
                     {l.toUpperCase()}
                   </button>
                 ))}
               </div>
+              <ThemeSwitch />
               <button
                 type="button"
                 onClick={handleManageApiKey}
@@ -3055,7 +3057,7 @@ export default function App() {
                 onClick={() => setActiveTab(tab.id)}
                   className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition ${
                   activeTab === tab.id
-                    ? "bg-brand-700 text-gold-400 font-semibold shadow-inner"
+                    ? "bg-pill text-onpill font-semibold shadow-inner"
                     : "text-white/60 hover:text-white hover:bg-white/8"
                 }`}
               >
@@ -3797,7 +3799,7 @@ export default function App() {
                   {/* Modal de sauvegarde comme scénario */}
                   {showSaveDialog && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-                      <div className="w-full max-w-md rounded-3xl border border-gold-400/30 bg-[#0a1410] p-6 shadow-2xl">
+                      <div className="w-full max-w-md rounded-3xl border border-gold-400/30 bg-[rgb(var(--surface))] p-6 shadow-2xl">
                         <h3 className="text-lg font-bold text-white mb-1">{t("search.saveAsScenario")}</h3>
                         <p className="text-sm text-white/60 mb-4">{t("search.saveDialogDesc")}</p>
                         <input

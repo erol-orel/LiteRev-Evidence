@@ -42,7 +42,7 @@ export function SourceTextDrawer({ scenarioId, articleId, quote, onClose }: {
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
       <aside role="dialog" aria-modal="true" aria-label={T("title")} onClick={(e) => e.stopPropagation()}
-        className="flex h-full w-full max-w-[600px] flex-col border-l border-white/10 bg-[#0b1020] shadow-2xl">
+        className="flex h-full w-full max-w-[600px] flex-col border-l border-white/10 bg-[rgb(var(--surface))] shadow-2xl">
         <header className="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
           <div className="min-w-0">
             <h3 className="text-xs font-semibold text-white uppercase tracking-wider">{T("title")}</h3>
