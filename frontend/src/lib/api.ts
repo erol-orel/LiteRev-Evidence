@@ -2179,6 +2179,10 @@ export interface PooledGroup {
   /** The spellings merged under `disease`, most frequent first. */
   disease_spellings?: DiseaseSpelling[];
   label_path: string | null;
+  /** The codebook's own name for the group and the value ("Sex or gender > Male"),
+   *  beside the keys the pooling groups by. Display only. */
+  label_display?: string | null;
+  group_display?: string | null;
   mapped: boolean;
   k: number;
   n_total: number;
@@ -2199,6 +2203,10 @@ export interface PooledComparison {
   disease_spellings?: DiseaseSpelling[];
   a: string;
   b: string;
+  /** The two labels as the codebook names them. Display only. */
+  a_display?: string | null;
+  b_display?: string | null;
+  group_display?: string | null;
   k: number;
   /** Papers reporting both labels that were left out because a row gives the composition of
    *  their sample: 142 men and 81 women among 225 people are not two groups with cases. */

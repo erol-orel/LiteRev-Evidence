@@ -131,7 +131,10 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
 
   const big = (data?.pooled ?? []).filter((g) => g.pooled);
   const small = (data?.pooled ?? []).filter((g) => !g.pooled);
-  const name = (g: { label: string; label_path?: string | null }) => (g.label_path ?? g.label).replace(/_/g, " ");
+  // The codebook's own name ("Sex or gender > Male"), not the key it groups by
+  // ("sex_gender > male"). The key stays the key; only the reading changes.
+  const name = (g: { label: string; label_path?: string | null; label_display?: string | null }) =>
+    g.label_display ?? (g.label_path ?? g.label).replace(/_/g, " ");
   const excluded = data ? Object.entries(data.excluded).filter(([, n]) => n > 0) : [];
 
   const toggles: { k: keyof typeof opts; label: string; hint?: string }[] = [
@@ -247,7 +250,7 @@ export function PooledPanel({ scenarioId, tick }: { scenarioId: string; tick: nu
               return (
                 <div key={id} className="rounded-xl border border-white/5">
                   <button onClick={() => setOpen(isOpen ? null : id)} className="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2 text-left text-[11px]">
-                    <span className="text-white/80">{c.a.replace(/_/g, " ")} <span className="text-white/35">{T("versus")}</span> {c.b.replace(/_/g, " ")}
+                    <span className="text-white/80">{c.a_display ?? c.a.replace(/_/g, " ")} <span className="text-white/35">{T("versus")}</span> {c.b_display ?? c.b.replace(/_/g, " ")}
                       <span className="ml-2 text-white/40"><DiseaseName disease={c.disease} spellings={c.disease_spellings} T={T} />, {T("papers").replace("{n}", String(c.k))}
                         {(c.excluded_composition ?? 0) > 0 && `, ${T("papersLeftOut").replace("{n}", String(c.excluded_composition))}`}</span></span>
                     <span className="font-mono text-white">OR {fmtOr(c.pooled.or)} <span className="text-white/40">({intervalText(c.pooled.ci_low, c.pooled.ci_high, fmtOr)})</span>

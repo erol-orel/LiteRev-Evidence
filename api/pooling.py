@@ -507,16 +507,54 @@ def collect_rows(scenario_id: str, reviewed_only: bool = False, verified_only: b
     return rows, excl, index
 
 
+def display_names(index, lang: str = "en") -> dict[tuple, str]:
+    """{(sheet, l1, l2): the name the codebook gives that node}. Pur.
+
+    Le codebook porte deux choses par noeud : une CLÉ (`sex_gender`, `pcr_positive`), qui
+    sert à regrouper, et un NOM (`Sex or gender`, `PCR positive`), qui sert à lire. Le
+    panneau groupé affichait la clé, underscores remplacés par des espaces, d'où des
+    libellés comme « sex gender > pcr positive » qu'un relecteur ne reconnaît pas comme
+    son propre vocabulaire."""
+    out: dict[tuple, str] = {}
+    for n in getattr(index, "nodes", []) or []:
+        name = n.get(f"label_{lang}") or n.get("label_en")
+        if name:
+            out[(n.get("sheet"), n.get("l1"), n.get("l2") or None)] = name
+    return out
+
+
+def display_path(names: dict[tuple, str], sheet: str, group: str, label: str | None,
+                 lang: str = "en") -> str:
+    """« Sex or gender > Male » : le groupe et sa valeur tels que le codebook les nomme.
+    Une clé sans nom retombe sur elle-même, lisible (underscores en espaces). Pur."""
+    def _one(l1: str | None, l2: str | None) -> str:
+        return names.get((sheet, l1, l2)) or str(l2 or l1 or "").replace("_", " ")
+
+    head = _one(group, None)
+    return f"{head} > {_one(group, label)}" if label else head
+
+
 def pooled_estimates(scenario_id: str, reviewed_only: bool = False, verified_only: bool = True,
-                     split_disease: bool = True, min_studies: int = MIN_STUDIES, full: bool = False) -> dict[str, Any]:
+                     split_disease: bool = True, min_studies: int = MIN_STUDIES, full: bool = False,
+                     lang: str = "en") -> dict[str, Any]:
     rows, excl, index = collect_rows(scenario_id, reviewed_only, verified_only)
     order = {(n["sheet"], n["l1"], n["l2"]): i for i, n in enumerate(index.nodes) if n.get("l2")}
+    names = display_names(index, lang)
     _groups, dropped = build_groups(rows, split_disease)
     # Pairs, where the other reasons count rows: a row that gives the composition of a sample
     # still counts in the proportions, marked, and only the odds ratios leave it out.
     excl = {**excl, "composition": composition_pairs(_groups)}
     _all_pooled = pooled_groups(rows, min_studies, split_disease)
     _all_comps = pooled_comparisons(rows, order, min_studies, split_disease)
+    # Le nom lisible, à côté de la clé qui reste la clé : rien en aval ne change de
+    # regroupement, seul l'affichage cesse de montrer l'identifiant interne.
+    for g in _all_pooled:
+        g["label_display"] = display_path(names, g["sheet"], g["group"], g["label"], lang)
+        g["group_display"] = display_path(names, g["sheet"], g["group"], None, lang)
+    for c in _all_comps:
+        c["group_display"] = display_path(names, c["sheet"], c["group"], None, lang)
+        c["a_display"] = display_path(names, c["sheet"], c["group"], c["a"], lang).split(" > ")[-1]
+        c["b_display"] = display_path(names, c["sheet"], c["group"], c["b"], lang).split(" > ")[-1]
     pooled, pooled_total = (_all_pooled if full else _all_pooled[:_MAX_GROUPS]), len(_all_pooled)
     (comps, over_group), comps_total = ((_all_comps, 0) if full else _listed_comparisons(_all_comps)), len(_all_comps)
     # Compté sur TOUT ce qui existe, pas sur la page servie : c'est la ligne que le
