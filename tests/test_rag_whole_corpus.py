@@ -119,6 +119,68 @@ def test_the_stream_reports_how_many_it_retrieved_not_only_what_it_searched():
     assert '"digest_complete"' in src
 
 
+def test_both_rag_paths_also_carry_the_extraction_and_the_thematic_groups():
+    """The answer is not written over the excerpts alone. The structured extraction
+    (who reports sex, age, occupation, PPE...) and the thematic groups go into the
+    prompt too, and the panel says so. The streamed endpoint, the one the tab calls,
+    was missing the groups: a question about a group was declined for lack of context
+    while the non-streamed path answered it."""
+    src = _rag_sources()
+    for name in ("/ask/stream/filtered", "/user-scenarios/{id}/rag"):
+        assert "extraction_digest" in src[name], f"{name} does not read the extraction"
+        assert "clusters_to_prompt" in src[name], f"{name} does not read the thematic groups"
+        assert "GROUPES THEMATIQUES" in src[name], f"{name} never names the groups block"
+
+
+def test_the_stream_says_what_it_read_of_each_paper_and_how_many_passages(seeded, monkeypatch):
+    """Under an answer, "1,011 relevant papers" says nothing about what was READ. The
+    meta event carries the three reading states, exclusive and adding up to the papers
+    searched (a full text already holds the title and the abstract), plus the passages
+    those papers offer and the passages this answer took."""
+    if not _has_pgvector(seeded):
+        pytest.skip("pgvector is not available on this database")
+
+    import json
+
+    with seeded.cursor() as cur:
+        cur.execute("ALTER TABLE document_chunk ADD COLUMN IF NOT EXISTS embedding vector(1536)")
+        # 9501 gains a full text (a second passage); 9505, included by hand, loses its
+        # abstract and is therefore known by its title alone.
+        cur.execute("INSERT INTO document_chunk (document_id, chunk_index, content, chunk_type) "
+                    "VALUES (9501, 1, 'dengue transmission, the whole paper', 'fulltext_section')")
+        cur.execute("UPDATE literature_document SET abstract = '' WHERE id = 9505")
+        cur.execute("UPDATE document_chunk SET embedding = %s WHERE document_id = ANY(%s)",
+                    ("[" + ",".join(["0.01"] * 1536) + "]", list(IDS)))
+
+    class _FakeOpenAI:
+        def __init__(self, *a, **kw):
+            self.embeddings = type("E", (), {
+                "create": lambda _s, **kw: type("R", (), {
+                    "data": [type("D", (), {"embedding": [0.01] * 1536})()]})()})()
+
+    import llm_usage
+
+    monkeypatch.setattr(llm_usage, "MeteredOpenAI", _FakeOpenAI)
+
+    from fastapi.testclient import TestClient
+
+    body = TestClient(main.app).post(
+        "/ask/stream/filtered",
+        json={"question": "dengue transmission", "scenario_id": SID}).text
+    meta = next((json.loads(line[6:]) for line in body.splitlines()
+                 if line.startswith("data: {") and "papers_used" in line), None)
+    assert meta is not None, f"no meta event in the stream: {body[:400]}"
+    assert meta["papers_used"] == 2
+    assert meta["papers_with_fulltext"] == 1          # 9501
+    assert meta["papers_abstract_only"] == 0          # nothing left in between
+    assert meta["papers_title_only"] == 1             # 9505, included without an abstract
+    assert (meta["papers_with_fulltext"] + meta["papers_abstract_only"]
+            + meta["papers_title_only"]) == meta["papers_used"], "the three states must add up"
+    assert meta["chunks_total"] == 3                  # two for 9501, one for 9505
+    assert meta["chunks_used"] == 2                   # one passage per paper
+    assert meta["chunks_used"] == meta["papers_retrieved"]
+
+
 # ── The gate, exercised end to end against a real database ───────────────────
 def _engine_ok() -> bool:
     try:

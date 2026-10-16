@@ -4505,14 +4505,31 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               <div className="mt-2 space-y-0.5 text-[10px] text-white/40">
                 <p>
                   {meta.papers_used} {t("scenarioDetail.rag.papersSearchedSuffix")} (≥ {meta.threshold})
-                  {meta.papers_retrieved ? ` · ${meta.papers_retrieved} ${t("scenarioDetail.rag.papersRetrievedSuffix")}` : ""}
-                  {" · "}{meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
                 </p>
+                {/* Ce que la machine a LU de ces articles. Les trois états sont exclusifs
+                    et leur somme est le nombre d'articles : un texte intégral porte déjà
+                    le titre et le résumé. */}
+                <p>
+                  {t("scenarioDetail.rag.readAs")
+                    .replace("{fulltext}", meta.papers_with_fulltext.toLocaleString())
+                    .replace("{abstract}", (meta.papers_abstract_only ?? 0).toLocaleString())
+                    .replace("{title}", (meta.papers_title_only ?? 0).toLocaleString())}
+                </p>
+                {meta.chunks_total ? (
+                  <p>
+                    {t("scenarioDetail.rag.passagesLine")
+                      .replace("{used}", (meta.chunks_used ?? meta.papers_retrieved ?? 0).toLocaleString())
+                      .replace("{total}", meta.chunks_total.toLocaleString())}
+                  </p>
+                ) : null}
                 <p className={meta.digest_complete ? "text-white/30" : "text-gold-400/70"}>
                   {meta.digest_complete
                     ? t("scenarioDetail.rag.digestCovers")
                     : t("scenarioDetail.rag.digestMissing")}
                 </p>
+                {meta.digest_complete ? (
+                  <p className="text-white/30">{t("scenarioDetail.rag.alsoReads")}</p>
+                ) : null}
               </div>
             )}
           </div>

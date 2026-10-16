@@ -2581,7 +2581,15 @@ export async function fetchKnowledgeGraph(
 export interface RagMeta {
   papers_used: number;
   papers_with_fulltext: number;
+  /** The two other reading states, exclusive of the first: a full text already carries
+   *  the title and the abstract. The three add up to `papers_used`. */
+  papers_abstract_only?: number;
+  papers_title_only?: number;
   papers_retrieved?: number;
+  /** The passages those relevant papers offer to the search (embedded chunks), and the
+   *  ones this answer took: one per paper, so `chunks_used` equals `papers_retrieved`. */
+  chunks_total?: number;
+  chunks_used?: number;
   digest_complete?: boolean;
   threshold: number;
 }

@@ -20,6 +20,7 @@ from .scenario_store import (
     DEFAULT_SIMILARITY_THRESHOLD,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
+    has_abstract_sql,
     relevant_gate_sql,
     screening_status_sql,
 )
@@ -660,24 +661,51 @@ async def ask_stream_filtered(payload: dict[str, Any]):
     # réponse IA - MÊMES définitions que la vue Preuves (sous-ensemble PERTINENT du
     # scénario : ≥ seuil OU inclus). Volontairement PAS dérivés de `sources`, qui
     # sont des chunks plafonnés à top_k et ne refléteraient pas le nb d'articles.
+    # Ce qu'un relecteur veut savoir sous une réponse : sur combien d'articles elle porte,
+    # ce que la machine a LU de chacun (texte intégral, résumé, titre seul), combien de
+    # passages ces articles représentent et combien la réponse en a pris. Les trois états
+    # de lecture sont exclusifs et leur somme est le nombre d'articles pertinents : un
+    # texte intégral contient déjà le titre et le résumé, il ne se compte pas deux fois.
     papers_used = 0
     papers_with_fulltext = 0
+    papers_abstract_only = 0
+    papers_title_only = 0
+    chunks_total = 0
     if scenario_id:
         try:
+            _gate = relevant_gate_sql('d', 'ars', ':thr')
+            _has_ft = ("EXISTS (SELECT 1 FROM document_chunk c WHERE c.document_id = d.id"
+                       " AND c.chunk_type = 'fulltext_section')")
+            _has_abs = has_abstract_sql("d")
             with engine.connect() as _cc:
                 _cnt = _cc.execute(text(f"""
                     SELECT
-                        COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}) AS relevant,
-                        COUNT(*) FILTER (WHERE {relevant_gate_sql('d', 'ars', ':thr')}
-                            AND EXISTS (SELECT 1 FROM document_chunk c
-                                WHERE c.document_id = d.id AND c.chunk_type = 'fulltext_section')) AS relevant_with_fulltext
+                        COUNT(*) FILTER (WHERE {_gate}) AS relevant,
+                        COUNT(*) FILTER (WHERE {_gate} AND {_has_ft}) AS relevant_with_fulltext,
+                        COUNT(*) FILTER (WHERE {_gate} AND NOT {_has_ft}
+                                         AND {_has_abs}) AS relevant_abstract_only,
+                        COUNT(*) FILTER (WHERE {_gate} AND NOT {_has_ft}
+                                         AND NOT {_has_abs}) AS relevant_title_only
                     FROM article_scenarios ars
                     JOIN literature_document d ON d.id = ars.document_id
                     WHERE ars.scenario_id = :sid
                 """), {"sid": scenario_id, "thr": threshold}).mappings().fetchone()
-            if _cnt:
-                papers_used = int(_cnt["relevant"] or 0)
-                papers_with_fulltext = int(_cnt["relevant_with_fulltext"] or 0)
+                if _cnt:
+                    papers_used = int(_cnt["relevant"] or 0)
+                    papers_with_fulltext = int(_cnt["relevant_with_fulltext"] or 0)
+                    papers_abstract_only = int(_cnt["relevant_abstract_only"] or 0)
+                    papers_title_only = int(_cnt["relevant_title_only"] or 0)
+                # Le vivier réel de la recherche vectorielle : les passages PORTEURS D'UN
+                # VECTEUR des articles pertinents. Un passage sans vecteur n'est jamais
+                # candidat, le dire autrement gonflerait le dénominateur.
+                chunks_total = int(_cc.execute(text(f"""
+                    SELECT COUNT(*)
+                    FROM document_chunk c
+                    JOIN literature_document d ON d.id = c.document_id
+                    JOIN article_scenarios ars ON ars.document_id = d.id
+                                              AND ars.scenario_id = :sid
+                    WHERE c.embedding IS NOT NULL AND {_gate}
+                """), {"sid": scenario_id, "thr": threshold}).scalar() or 0)
         except Exception as _e_cnt:
             logger.warning(f"ask_stream_filtered counts {scenario_id}: {_e_cnt}")
 
@@ -797,6 +825,13 @@ async def ask_stream_filtered(payload: dict[str, Any]):
         _extraction_block = extraction_to_prompt(extraction_digest(scenario_id, threshold))
         if _extraction_block:
             digest_block = f"{digest_block}\n\n{_extraction_block}" if digest_block else _extraction_block
+        # Les groupes thématiques, comme pour le RAG non diffusé : sans eux une question
+        # sur un groupe n'avait rien sur quoi s'appuyer et était déclinée, ce qui se lit
+        # comme un refus alors que c'est un contexte absent.
+        from .clustering import clusters_to_prompt
+        _clusters_block = clusters_to_prompt(scenario_id)
+        if _clusters_block:
+            digest_block = f"{digest_block}\n\n{_clusters_block}" if digest_block else _clusters_block
 
     system_prompt = """Tu es un assistant expert en sciences de la santé et en revue systématique de la littérature scientifique.
 Tu réponds de manière précise, factuelle et structurée.
@@ -807,6 +842,9 @@ quels devis) doit venir du bloc CORPUS COMPLET, jamais d'un comptage des extrait
 Le bloc EXTRACTION STRUCTUREE compte les articles qui rapportent sexe, age, profession, CAP,
 EPI, vaccination : cite toujours son denominateur (articles extraits sur articles pertinents)
 et ne generalise pas aux articles non extraits.
+Le bloc GROUPES THEMATIQUES donne le nom, la taille et le resume de chaque groupe : une
+question sur un groupe se repond avec lui, jamais par sa position dans la liste, et les
+articles d'un groupe ne sont pas dans le contexte.
 Ne pas utiliser de tiret cadratin (em dash).""" + _llm_lang_directive(lang)
 
     user_prompt = (
@@ -829,6 +867,11 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
         meta_event = ("event: meta\ndata: "
                       + _json2.dumps({"papers_used": papers_used,
                                       "papers_with_fulltext": papers_with_fulltext,
+                                      # Les deux autres états de lecture, exclusifs du
+                                      # premier : résumé seul, puis titre seul. Les trois
+                                      # font le nombre d'articles pertinents.
+                                      "papers_abstract_only": papers_abstract_only,
+                                      "papers_title_only": papers_title_only,
                                       # Le nombre d'articles RAPATRIÉS pour composer la
                                       # réponse, qui n'est pas le nombre d'articles
                                       # qu'elle cite. Ce compte s'appelait
@@ -836,6 +879,12 @@ Reponds de maniere structuree et cite les sources pertinentes du contexte."""
                                       # le document exporté le présentaient tous trois
                                       # comme « cités ».
                                       "papers_retrieved": len({s["document_id"] for s in sources}),
+                                      # Les passages : ceux que les articles pertinents
+                                      # offrent, et ceux que cette réponse a pris. La
+                                      # requête en prend UN par article, donc le second
+                                      # est aussi le nombre d'articles rapatriés.
+                                      "chunks_total": chunks_total,
+                                      "chunks_used": len(context_chunks),
                                       "digest_complete": bool(digest_block),
                                       "threshold": round(float(threshold), 2)})
                       + "\n\n")
