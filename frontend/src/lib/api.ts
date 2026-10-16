@@ -1821,6 +1821,10 @@ export interface ExtractionDigest {
   n_fulltext: number;
   n_abstract: number;
   n_unread: number;
+  /** Why a relevant paper is not extracted: nothing to read (a title alone), or waiting
+   *  its turn. The two split `n_unread`, so the tiles add up. */
+  n_title_only?: number;
+  n_waiting?: number;
   coverage: Record<string, number>;
   coverage_fulltext: Record<string, number>;
   by_sheet: { sheet: string; n_rows: number; n_articles: number; n_quote_found: number }[];

@@ -631,7 +631,8 @@ def startup_event() -> None:
                         "lang": _olang,
                         "steps": {k: {"status": "pending"} for k in (
                             "ingest", "fulltext", "embed", "rerank", "pico", "metadata",
-                            "clustering", "knowledge_graph", "evidence", "variables", "actions")},
+                            "extraction", "clustering", "knowledge_graph", "evidence",
+                            "variables", "actions")},
                     }
                 _t = _startup_threading.Thread(
                     target=_run_user_scenario_full_pipeline,

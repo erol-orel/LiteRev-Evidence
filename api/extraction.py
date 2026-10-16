@@ -48,7 +48,7 @@ from .extraction_review import load_reviews, overlay, overlay_annotated
 from .geography import geography, get_nuts_index, resolve_location
 from .digest import _rows
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql, screening_status_sql)
+                             has_abstract_sql, relevant_gate_sql, screening_status_sql)
 from .schema_boot import _exec_ddl_isolated
 from llm_usage import LLMTruncated, ProviderWatch, is_transient_llm_error
 from llm_usage import json_content as _json_content
@@ -898,6 +898,11 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
                        COUNT(*) FILTER (WHERE d.extraction_json->>'source' = 'abstract') AS n_abstract,
                        COUNT(*) FILTER (WHERE d.extraction_json->>'truncated' = 'true') AS n_truncated,
                        COUNT(*) FILTER (WHERE d.extraction_json->>'condensed' = 'true') AS n_condensed,
+                       COUNT(*) FILTER (WHERE jsonb_typeof(d.extraction_json) IS DISTINCT FROM 'object'
+                           AND NOT {has_abstract_sql('d')}
+                           AND NOT EXISTS (SELECT 1 FROM document_chunk c
+                               WHERE c.document_id = d.id
+                                 AND c.chunk_type = 'fulltext_section')) AS n_title_only,
                        {cov_sql}
                 FROM literature_document d
                 JOIN article_scenarios ars ON ars.document_id = d.id
@@ -913,6 +918,13 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             out["n_condensed"] = int(head["n_condensed"] or 0)
             out["max_chars"] = EXTRACTION_MAX_CHARS
             out["n_unread"] = out["n_relevant"] - out["n_extracted"]
+            # Pourquoi un article pertinent n'est pas extrait. Sans ces deux lignes les
+            # tuiles ne tombaient pas juste : « 1 011 pertinents, 539 extraits, 338 texte
+            # intégral, 201 résumé » se lisait comme quatre nombres qui devaient faire une
+            # somme. Ils en font deux : extraits = intégral + résumé, et pertinents =
+            # extraits + rien à lire (titre seul) + en attente.
+            out["n_title_only"] = min(int(head["n_title_only"] or 0), out["n_unread"])
+            out["n_waiting"] = out["n_unread"] - out["n_title_only"]
             out["coverage"] = {k: int(head[f"c_{k}"] or 0) for k in COVERAGE_KEYS}
             out["coverage_fulltext"] = {k: int(head[f"f_{k}"] or 0) for k in COVERAGE_KEYS}
             # Coverage CROSSED with place. The digest already said how many articles report
