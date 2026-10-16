@@ -2085,6 +2085,9 @@ export interface GeographyResponse {
   n_papers: number;
   n_resolved: number;
   n_unresolved: number;
+  /** En Europe au sens NUTS, pays nommable ou pas (« Europe », plusieurs pays à la fois). */
+  n_in_europe?: number;
+  n_in_europe_without_country?: number;
   n_several_countries: number;
   unresolved_by_reason: Record<GeoUnresolvedReason, number>;
   nuts_source: "builtin" | "loaded";

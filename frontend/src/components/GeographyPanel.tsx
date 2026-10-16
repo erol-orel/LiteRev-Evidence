@@ -61,6 +61,17 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
         <p className="text-[10px] text-white/40 mt-0.5 max-w-[680px] leading-4">
           {T("subtitle").replace("{n}", String(g.n_resolved)).replace("{total}", String(g.n_papers))}
         </p>
+        {/* La question qu'un relecteur pose en premier, et qu'un compte par pays ne sait pas
+            rendre : « Europe » ou « Germany and the Netherlands » sont européens sans nommer
+            un pays, donc ils ne tiennent dans aucune barre. Le compte européen le dit lui-même
+            plutôt que de laisser additionner les barres. */}
+        {g.n_in_europe != null && g.n_in_europe > 0 && (
+          <p className="text-[10px] text-brand-300/80 mt-1 max-w-[680px] leading-4">
+            {T("inEurope").replace("{n}", String(g.n_in_europe)).replace("{total}", String(g.n_papers))}
+            {g.n_in_europe_without_country ? " " + T("inEuropeNoCountry")
+              .replace("{n}", String(g.n_in_europe_without_country)) : ""}
+          </p>
+        )}
       </div>
 
       {top.length === 0 ? <p className="text-[11px] text-white/40">{T("none")}</p> : (
