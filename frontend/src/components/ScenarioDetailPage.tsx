@@ -6809,6 +6809,9 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                   {(queue.learning.above_threshold_suggested ?? 0) > 0 && (
                     <p className="text-white/50">
                       {t("scenarioDetail.doubleBlind.learningAboveSplit")
+                        .replace("{remaining}", (queue.learning.remaining_relevant ?? 0).toLocaleString())
+                        .replace("{left}", queue.learning.expected_relevant_left != null
+                          ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")
                         .replace("{keep}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
                         .replace("{drop}", (queue.learning.above_threshold_rejected ?? 0).toLocaleString())}
                     </p>
