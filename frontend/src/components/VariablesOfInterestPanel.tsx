@@ -109,7 +109,26 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
             </button>
             {isOpen && (
               <div>
-                {vars.map((v) => (
+                {vars.filter((v) => !v.unmapped).map((v) => (
+                  <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]} />
+                ))}
+                {/* La traîne des libellés de groupe que le codebook ne sait pas placer. Elle
+                    est à part, sous son propre compte VRAI : sur un vrai corpus elle est plus
+                    longue que la liste des questions de la revue, et mêlée à elles, elle ferait
+                    passer la carte des manques pour la liste de ce qui est présent. */}
+                {vars.some((v) => v.unmapped) && (
+                  <div className="border-t border-gold-400/20 bg-gold-400/[0.04] px-3 py-2">
+                    <p className="text-[10.5px] leading-4 text-gold-300/90">
+                      {T("unmappedHeader")
+                        .replace("{n}", reg.n_unmapped.toLocaleString())
+                        .replace("{papers}", reg.n_papers_unmapped.toLocaleString())}
+                      {reg.n_unmapped > reg.n_unmapped_shown && " " + T("unmappedShown")
+                        .replace("{shown}", reg.n_unmapped_shown.toLocaleString())}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-white/40">{T("unmappedHow")}</p>
+                  </div>
+                )}
+                {vars.filter((v) => v.unmapped).map((v) => (
                   <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]} />
                 ))}
               </div>

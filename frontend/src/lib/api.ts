@@ -5275,8 +5275,13 @@ export interface VoiRegister {
   families: string[];
   variables: VoiVariable[];
   n_standard: number;
+  /** Les groupes que le codebook DÉCLARE : les questions de la revue. */
   n_own: number;
+  /** Le total VRAI des groupes que le codebook ne sait pas placer, pas le nombre listé. */
   n_unmapped: number;
+  n_unmapped_shown: number;
+  /** Les articles qui portent au moins un de ces groupes : la mesure du travail restant. */
+  n_papers_unmapped: number;
   n_relevant: number;
   n_extracted: number;
   n_corpus: number;
