@@ -5233,3 +5233,64 @@ export function questionExportUrl(
 ): string {
   return `${API_BASE_URL}/user-scenarios/${scenarioId}/questions/${questionId}/export?format=${format}`;
 }
+
+// ─── Registre des variables d'intérêt ────────────────────────────────────────
+export type VoiCost = "free" | "already_run" | "one_pass";
+export type VoiType = "category" | "number" | "boolean" | "date" | "text";
+export type VoiDenominator = "relevant" | "extracted" | "corpus";
+
+export interface VoiValue {
+  value: string;
+  label: string;
+  n: number;
+}
+
+export interface VoiVariable {
+  key: string;
+  family: string;
+  source: string;
+  cost: VoiCost;
+  type: VoiType;
+  shown_in: string[];
+  denominator_of: VoiDenominator;
+  filterable: boolean;
+  crossable: boolean;
+  covers: string[] | null;
+  /** Le nom donné par le codebook. `null` pour une variable standard, dont le nom
+   *  est une chaîne d'interface et vient donc des locales. */
+  name: string | null;
+  n_with_value: number | null;
+  denominator: number;
+  values: VoiValue[];
+  n_values: number;
+  sheet?: string;
+  group?: string;
+  unmapped?: boolean;
+}
+
+export interface VoiRegister {
+  scenario_id: string;
+  lang: string;
+  threshold: number;
+  families: string[];
+  variables: VoiVariable[];
+  n_standard: number;
+  n_own: number;
+  n_unmapped: number;
+  n_relevant: number;
+  n_extracted: number;
+  n_corpus: number;
+  n_with_place_read: number;
+  /** Une famille dont la source n'a pas pu être lue, avec sa raison. */
+  incomplete: Record<string, string>;
+  /** Une source qui n'existe pas encore (clustering non calculé) : pas une panne. */
+  notes: Record<string, string>;
+  complete: boolean;
+}
+
+export async function fetchVariablesOfInterest(scenarioId: string, lang: string): Promise<VoiRegister> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}

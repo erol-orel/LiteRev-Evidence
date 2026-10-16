@@ -51,4 +51,8 @@ MODULES = (
     "extraction",
     "pooling",
     "extraction_report",
+    # Le registre des variables d'intérêt lit tous les précédents (codebook, extraction,
+    # géographie, devis, clusters, pooling) : il vient donc en dernier, et peut les
+    # importer au niveau du module.
+    "variables_of_interest",
 )
