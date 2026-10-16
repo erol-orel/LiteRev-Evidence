@@ -149,6 +149,87 @@ def _not_given_up_sql(link: str = "asn") -> str:
     return f"COALESCE({link}.score_attempts, 0) < {int(SCORE_MAX_ATTEMPTS)}"
 
 
+# ── Un score déjà calculé n'est pas recalculé pour rien ──────────────────────────────
+# Les deux scores sont des fonctions de la QUESTION et du TEXTE de l'article, et de rien
+# d'autre : le seuil ne fait que trancher ensuite. Or le pipeline complet relançait les
+# deux balayages ENTIERS à chaque passage, sur tout le corpus. Sur le scénario COVID
+# exposition, cela fait 81 766 articles renvoyés à Cohere, par lots, à chaque relance du
+# pipeline (et une relance a lieu à chaque redémarrage de l'API), pour réécrire des
+# scores identiques : des heures d'appels payants et un scénario qui a l'air de scorer
+# sans fin, des jours après la recherche.
+#
+# La règle, désormais : on ne recalcule TOUT que si la question a changé depuis le
+# dernier balayage complet ; sinon on ne comble que les manques. Un rescore demandé à la
+# main par un relecteur reste complet, lui : qui clique veut tout refaire.
+def _ensure_score_pass_table() -> None:
+    """La table qui retient quelle question a produit les scores. Créée à la demande,
+    jamais bloquante : sans elle, on retombe sur un balayage complet, l'ancien usage."""
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                CREATE TABLE IF NOT EXISTS scenario_score_pass (
+                    scenario_id VARCHAR(64) NOT NULL,
+                    kind        VARCHAR(16) NOT NULL,
+                    query_sha   VARCHAR(40) NOT NULL,
+                    updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (scenario_id, kind)
+                )
+            """))
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"_ensure_score_pass_table: {_e}")
+
+
+def score_query_sha(query: str) -> str:
+    """L'empreinte de la question telle que le score la lit. Pure."""
+    import hashlib
+    return hashlib.sha1((query or "").strip().encode("utf-8")).hexdigest()[:40]
+
+
+def needs_full_score_pass(scenario_id: str, query: str, kind: str) -> bool:
+    """Faut-il rebalayer TOUT le corpus pour ce score, ou seulement les manques ?
+
+    Vrai quand aucun balayage complet n'est enregistré pour cette question : un corpus
+    neuf, une question modifiée, ou une base qui ne retient pas encore la trace."""
+    _ensure_score_pass_table()
+    try:
+        with engine.connect() as _c:
+            got = _c.execute(text("""
+                SELECT query_sha FROM scenario_score_pass
+                 WHERE scenario_id = :sid AND kind = :kind
+            """), {"sid": scenario_id, "kind": kind}).scalar()
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"needs_full_score_pass {scenario_id}/{kind}: {_e}")
+        return True
+    return got != score_query_sha(query)
+
+
+def note_full_score_pass(scenario_id: str, query: str, kind: str) -> None:
+    """Retenir que le corpus a été balayé en entier pour cette question."""
+    _ensure_score_pass_table()
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("""
+                INSERT INTO scenario_score_pass (scenario_id, kind, query_sha, updated_at)
+                VALUES (:sid, :kind, :sha, NOW())
+                ON CONFLICT (scenario_id, kind)
+                DO UPDATE SET query_sha = EXCLUDED.query_sha, updated_at = NOW()
+            """), {"sid": scenario_id, "kind": kind, "sha": score_query_sha(query)})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"note_full_score_pass {scenario_id}/{kind}: {_e}")
+
+
+def forget_score_passes(scenario_id: str) -> None:
+    """Oublier les balayages d'un scénario : le prochain repartira de zéro. Appelé quand
+    un relecteur demande un rescore complet."""
+    _ensure_score_pass_table()
+    try:
+        with engine.begin() as _c:
+            _c.execute(text("DELETE FROM scenario_score_pass WHERE scenario_id = :sid"),
+                       {"sid": scenario_id})
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"forget_score_passes {scenario_id}: {_e}")
+
+
 def _note_score_attempts(scenario_id: str, doc_ids: list, reason: str) -> None:
     """Compter un essai manqué sur ces articles, avec sa raison. Jamais d'erreur : c'est
     de la comptabilité, elle ne doit pas faire échouer un passage de scoring."""
@@ -1131,10 +1212,15 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
             n = 0
             _cos: dict[str, Any] | None = None
             if not missing_only:
+                # Un rescore demandé à la main refait TOUT, et le dit : les balayages
+                # enregistrés sont oubliés, puis réenregistrés à la fin, pour que les
+                # passages automatiques qui suivront ne recalculent plus que les manques.
+                forget_score_passes(scenario_id)
                 _rerank_job_update(scenario_id, job_id, phase="cosine")
                 _backfill_title_abstract_chunks(scenario_id)  # docs sans chunk -> searchable
                 _cos = {}
                 n = _run_semantic_rerank_inline(scenario_id, query, report=_cos)
+                note_full_score_pass(scenario_id, query, "semantic")
             # Recalcul COMPLET : après le cosinus, relancer AUSSI le cross-encoder Cohere
             # sur le sous-ensemble pertinent - sinon « Recalculer scores » ne rafraîchissait
             # que le cosinus et les rerank_score restaient figés/partiels.
@@ -1151,6 +1237,8 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
                         rerank_batches_ok=p.get("batches_ok", 0),
                         rerank_batches_failed=p.get("batches_failed", 0),
                         rerank_last_error=p.get("last_error")))
+                if not missing_only and not _ce.get("stopped") and not _ce.get("skipped_no_key"):
+                    note_full_score_pass(scenario_id, query, "rerank")
                 logger.info(f"Rerank manuel {scenario_id}: {n} cosinus + {_ce['scored']} cross-encoder.")
             except Exception as _ece:
                 logger.warning(f"cross-encoder (recalcul manuel) {scenario_id}: {_ece}")
