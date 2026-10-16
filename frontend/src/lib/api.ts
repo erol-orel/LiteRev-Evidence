@@ -2725,6 +2725,48 @@ export interface DoubleBlindQueue {
 /** The articles THIS reviewer has not voted on yet. Until now there was no way to cast
  *  a double-blind vote at all: the panel's only buttons were the arbitration ones, and
  *  the conflicts list can only fill once both reviewers have voted. */
+/** Ce que CE relecteur a déjà décidé, du plus récent au plus ancien. */
+export interface MyDecision {
+  id: number; title: string; year?: number | null; journal?: string | null; doi?: string | null;
+  similarity_score?: number | null; rerank_score?: number | null; learned_score?: number | null;
+  my_status: string; my_reason?: string | null; kappa_final_status?: string | null;
+  decided_at?: string | null; changes?: number; above_threshold?: boolean;
+}
+
+export interface MyDecisions {
+  scenario_id: string; reviewer: number; reviewer_code: string;
+  included: number; excluded: number; total: number; decisions: MyDecision[];
+}
+
+export async function fetchMyDoubleBlindDecisions(
+  scenarioId: string,
+  reviewerCode: string,
+  limit = 200,
+): Promise<MyDecisions> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ reviewer_code: reviewerCode, limit: String(limit) });
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/decisions?${qs}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Revenir sur sa propre décision. `undecided` la retire et remet l'article dans la file. */
+export async function changeDoubleBlindDecision(
+  scenarioId: string,
+  payload: { article_id: number; status: "included" | "excluded" | "pending" | "undecided";
+             reason?: string | null; reviewer_code: string },
+): Promise<{ was: string | null; now: string | null; changes: number;
+             arbitration_cleared: boolean; agreement_recomputed: boolean }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/decision/change`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function fetchDoubleBlindQueue(
   scenarioId: string,
   reviewerCode: string,

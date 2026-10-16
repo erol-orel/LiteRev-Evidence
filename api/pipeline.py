@@ -3453,10 +3453,19 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         if event == "pubmed_found":
             update_step("ingest", "running", found=value)
 
+    # Le seuil AU DÉPART de ce passage : s'il a changé en route (quelqu'un a déplacé le
+    # curseur pendant que le pipeline tournait), les étapes déjà faites l'ont été sur un
+    # autre sous-ensemble, et il faut repasser. Sans cela, appliquer un seuil pendant un
+    # pipeline laissait un corpus analysé moitié sur l'ancien, moitié sur le nouveau.
+    try:
+        _thr_at_start = scenario_threshold_info(scenario_id)["threshold"]
+    except Exception:                                        # noqa: BLE001
+        _thr_at_start = None
     _user_scenario_pipeline_jobs[scenario_id] = {
         "overall_status": "running",
         "current_step": "ingest",
         "lang": lang or "fr",
+        "threshold_at_start": _thr_at_start,
         "steps": {k: {"status": "pending"} for k in STEP_ORDER},
     }
 
@@ -4050,6 +4059,21 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as _e_cc:
             logger.warning(f"Pipeline {scenario_id}: vérification des compteurs impossible: {_e_cc}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")
+
+        # Le seuil a-t-il bougé pendant ce passage ? Alors ce qui vient d'être calculé
+        # l'a été sur le sous-ensemble d'avant : on repasse UNE fois, sur le nouveau.
+        # Le garde-fou contre la boucle est le seuil lui-même : la relance repart du
+        # seuil courant, donc le passage suivant ne trouvera plus de différence.
+        try:
+            _thr_now = scenario_threshold_info(scenario_id)["threshold"]
+            if _thr_at_start is not None and _thr_now is not None \
+                    and abs(float(_thr_now) - float(_thr_at_start)) > 1e-9:
+                from .scenarios import _launch_full_pipeline  # lazy: ordre de chargement
+                logger.info(f"Pipeline {scenario_id}: seuil passé de {_thr_at_start} à {_thr_now} "
+                            f"pendant le passage, relance sur le nouveau sous-ensemble.")
+                _launch_full_pipeline(scenario_id, lang=lang)
+        except Exception as _e_relaunch:                     # noqa: BLE001 - jamais bloquant
+            logger.warning(f"Pipeline {scenario_id}: relance après changement de seuil: {_e_relaunch}")
 
     except Exception as e:
         logger.error(f"Pipeline user_scenario {scenario_id} fatal: {e}", exc_info=True)

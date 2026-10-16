@@ -266,3 +266,78 @@ def test_the_queue_leaves_out_what_the_review_did_not_retain(seeded):
     q = _client().get(f"/user-scenarios/{SID}/double-blind/queue?reviewer_code={R1}").json()
     assert [a["id"] for a in q["articles"]] == [700, 701]
     assert q["remaining"] == 2
+
+
+# ── 5. Relire ses décisions, et revenir dessus ───────────────────────────────
+# Un vote partait et disparaissait : la file ne montre que ce qui reste à juger, donc
+# rien ne disait ce qu'on avait déjà décidé, ni ne permettait d'y revenir. Un screening
+# se relit, et une décision se corrige. Le chemin est explicite, parce que le vote
+# ordinaire s'écrit une fois (cf. le test de l'arbitrage ci-dessus).
+
+def _history(c, code: str):
+    r = c.get(f"/user-scenarios/{SID}/double-blind/decisions", params={"reviewer_code": code})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _change(c, doc_id: int, status: str, code: str, reason: str | None = None):
+    return c.post(f"/user-scenarios/{SID}/double-blind/decision/change", headers=KEY,
+                  json={"article_id": doc_id, "status": status,
+                        "reason": reason, "reviewer_code": code})
+
+
+def test_a_reviewer_can_read_back_what_they_decided(seeded):
+    c = _client()
+    _vote(c, 700, "included", R1)
+    _vote(c, 701, "excluded", R1)
+    h = _history(c, R1)
+    assert (h["total"], h["included"], h["excluded"]) == (2, 1, 1)
+    got = {d["id"]: d for d in h["decisions"]}
+    assert got[700]["my_status"] == "included" and got[701]["my_status"] == "excluded"
+    assert got[700]["decided_at"], "sans horodatage, un historique n'a pas d'ordre"
+    # The other reviewer's history is their own, and starts empty.
+    assert _history(c, R2)["total"] == 0
+
+
+def test_an_exclusion_carries_its_reason(seeded):
+    c = _client()
+    r = c.post(f"/user-scenarios/{SID}/double-blind/decision", headers=KEY,
+               json={"article_id": 700, "status": "excluded",
+                     "reason": "wrong population", "reviewer_code": R1})
+    assert r.status_code == 200, r.text
+    assert _history(c, R1)["decisions"][0]["my_reason"] == "wrong population"
+
+
+def test_a_decision_can_be_changed_and_says_what_it_undoes(seeded):
+    c = _client()
+    _vote(c, 700, "included", R1)
+    _vote(c, 700, "included", R2)          # agreement, so the pair is resolved
+    r = _change(c, 700, "excluded", R1, reason="wrong outcome")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["was"], body["now"]) == ("included", "excluded")
+    assert body["changes"] == 1 and body["agreement_recomputed"] is True
+    with seeded.cursor() as cur:
+        cur.execute("SELECT reviewer_1_status, reviewer_1_reason, kappa_resolved,"
+                    " kappa_final_status FROM article_scenarios"
+                    " WHERE scenario_id = %s AND document_id = 700", (SID,))
+        status, reason, resolved, final = cur.fetchone()
+    assert (status, reason) == ("excluded", "wrong outcome")
+    assert resolved is False and final is None, (
+        "l'accord et l'arbitrage portaient sur l'ancien vote : ils ne tiennent plus")
+    assert _history(c, R1)["decisions"][0]["changes"] == 1
+
+
+def test_undoing_a_decision_puts_the_article_back_in_the_queue(seeded):
+    c = _client()
+    _vote(c, 700, "excluded", R1)
+    assert _history(c, R1)["total"] == 1
+    assert _change(c, 700, "undecided", R1).status_code == 200
+    assert _history(c, R1)["total"] == 0, "la décision est retirée"
+    q = c.get(f"/user-scenarios/{SID}/double-blind/queue",
+              params={"reviewer_code": R1, "limit": 50}).json()
+    assert 700 in [a["id"] for a in q["articles"]], "l'article revient à juger"
+
+
+def test_changing_a_decision_nobody_made_is_refused(seeded):
+    assert _change(_client(), 701, "excluded", R1).status_code == 409

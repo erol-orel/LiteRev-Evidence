@@ -116,6 +116,8 @@ import {
   registerDoubleBlindReviewer,
   resolveDoubleBlindConflict,
   submitDoubleBlindDecision,
+  changeDoubleBlindDecision,
+  fetchMyDoubleBlindDecisions,
   subscribeAlerts,
   triggerLivingReview,
   startEnrichmentBatch,
@@ -155,6 +157,7 @@ import {
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
+  type MyDecisions,
   editModelSpec,
   type EditSpecPayload,
   type ModelRun,
@@ -6517,12 +6520,24 @@ const REVIEWER_ROLE_KEY = 'literev_reviewer_role';
  *  dans api/double_blind.py. */
 const AUDIT_SAMPLE_SIZE = 100;
 
+/** Les motifs d'exclusion d'un screening, ceux qu'un PRISMA attend. Le motif voyage en
+    texte, comme celui qu'un import Rayyan apporte, donc rien n'oblige à cette liste :
+    elle évite d'écrire le même motif de dix façons. */
+const EXCLUSION_REASONS = ["population", "exposure", "outcome", "design",
+                           "setting", "language", "duplicate", "notRetrievable"] as const;
+
 function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [kappa, setKappa] = React.useState<KappaStats | null>(null);
   const [conflicts, setConflicts] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [submitting, setSubmitting] = React.useState<number|null>(null);
+  // Le motif demandé pour CET article, et le motif libre en cours de frappe.
+  const [reasonFor, setReasonFor] = React.useState<number|null>(null);
+  const [otherReason, setOtherReason] = React.useState("");
+  // L'historique de CE relecteur : ce qu'il a décidé, et de quoi revenir dessus.
+  const [myDecisions, setMyDecisions] = React.useState<MyDecisions | null>(null);
+  const [showDecisions, setShowDecisions] = React.useState(false);
 
   // Reviewer identity system
   const [reviewerCode, setReviewerCode] = React.useState<string>(
@@ -6584,18 +6599,39 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
       // Le lot à juger : sans lui, le panneau n'offrait aucun moyen de voter, donc
       // aucun conflit ne pouvait apparaître et aucun kappa ne pouvait être calculé.
       reviewerCode ? fetchDoubleBlindQueue(scenarioId, reviewerCode).catch(() => null) : null,
-    ]).then(([k, c, q]) => { setKappa(k); setConflicts(c); setQueue(q); })
+      reviewerCode ? fetchMyDoubleBlindDecisions(scenarioId, reviewerCode).catch(() => null) : null,
+    ]).then(([k, c, q, d]) => { setKappa(k); setConflicts(c); setQueue(q); setMyDecisions(d); })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [scenarioId, reviewerCode]);
 
   React.useEffect(() => { reload(); }, [reload]);
 
-  const decide = async (articleId: number, status: "included"|"excluded") => {
+  const decide = async (articleId: number, status: "included"|"excluded"|"pending", reason?: string | null) => {
     if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
     setSubmitting(articleId);
     try {
-      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, status, reviewer_code: reviewerCode });
+      await submitDoubleBlindDecision(scenarioId, {
+        article_id: articleId, status, reason: reason ?? undefined, reviewer_code: reviewerCode });
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  // Revenir sur sa propre décision. Le serveur dit ce que cela annule (un arbitrage rendu
+  // sur l'ancienne paire de votes), et on le répète à l'écran plutôt que de le taire.
+  const changeDecision = async (
+    articleId: number, status: "included"|"excluded"|"pending"|"undecided",
+  ) => {
+    if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
+    setSubmitting(articleId);
+    try {
+      const r = await changeDoubleBlindDecision(scenarioId, {
+        article_id: articleId, status, reviewer_code: reviewerCode });
+      if (r.arbitration_cleared) alert(t("scenarioDetail.doubleBlind.arbitrationCleared"));
       reload();
     } catch (e: any) {
       alert(e.message);
@@ -6794,58 +6830,31 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               <p className="font-semibold text-brand-300/90">{t("scenarioDetail.doubleBlind.learningTitle")}</p>
               {queue.learning.trained ? (
                 <>
+                  {/* Ce qu'un relecteur fait de ce panneau : savoir quoi lire d'abord,
+                      et de quel côté du seuil cela vient. Le reste (l'espérance du
+                      nombre d'inclusions, la somme des probabilités) disait vrai et ne
+                      servait à rien : deux nombres du même modèle, lus côte à côte, se
+                      contredisaient à l'oeil. */}
                   <p>
-                    {t("scenarioDetail.doubleBlind.learningTrained")
-                      .replace("{included}", String(queue.learning.n_included))
-                      .replace("{excluded}", String(queue.learning.n_excluded))
-                      .replace("{remaining}", (queue.learning.remaining_relevant ?? 0).toLocaleString())
-                      .replace("{left}", queue.learning.expected_relevant_left != null
-                        ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")}
+                    {t("scenarioDetail.doubleBlind.learningToReadFirst")
+                      .replace("{n}", ((queue.learning.above_threshold_suggested ?? 0)
+                        + (queue.learning.below_threshold_suggested ?? 0)).toLocaleString())
+                      .replace("{above}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
+                      .replace("{below}", (queue.learning.below_threshold_suggested ?? 0).toLocaleString())}
                   </p>
-                  {/* Des deux côtés du seuil, comptés de la même manière. L'écran ne
-                      disait que ce qui dort SOUS le seuil, alors que le travail d'un
-                      relecteur se fait au-dessus : savoir que le modèle écarterait la
-                      moitié de la file change l'ordre dans lequel on la prend. */}
-                  {(queue.learning.above_threshold_suggested ?? 0) > 0 && (
-                    <p className="text-white/50">
-                      {t("scenarioDetail.doubleBlind.learningAboveSplit")
-                        .replace("{remaining}", (queue.learning.remaining_relevant ?? 0).toLocaleString())
-                        .replace("{left}", queue.learning.expected_relevant_left != null
-                          ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")
-                        .replace("{keep}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
-                        .replace("{drop}", (queue.learning.above_threshold_rejected ?? 0).toLocaleString())}
-                    </p>
-                  )}
-                  {queue.learning.cv_auc != null && (
-                    <p className="text-white/40">
-                      {t("scenarioDetail.doubleBlind.learningAuc").replace("{auc}", queue.learning.cv_auc.toFixed(2))}
-                    </p>
-                  )}
-                  {(queue.learning.below_threshold_suggested ?? 0) > 0 && (
-                    <div className="space-y-1">
-                      <p className="text-gold-300/90">
-                        {t("scenarioDetail.doubleBlind.learningSuggested")
-                          .replace("{n}", String(queue.learning.below_threshold_suggested))
-                          .replace("{inQueue}", String(queue.learning.suggested_in_queue
-                            ?? queue.remaining_suggested ?? 0))}
-                      </p>
-                      <ul className="list-disc pl-4 text-white/50">
-                        {(queue.learning.suggested ?? []).slice(0, 5).map(s => (
-                          <li key={s.id}>
-                            {s.title}{s.year ? ` (${s.year})` : ""} · {t("scenarioDetail.doubleBlind.learningBadge")
-                              .replace("{score}", (s.learned_score ?? 0).toFixed(2))}
-                          </li>
-                        ))}
-                      </ul>
-                      {/* Cinq titres pour une centaine de suggestions : le reste se lisait
-                          nulle part. Le fichier les porte toutes, dans l'ordre du modèle. */}
-                      <a href={learnedSuggestionsExportUrl(scenarioId)}
-                         className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
-                        {t("scenarioDetail.doubleBlind.learningDownloadAll")
-                          .replace("{n}", String(queue.learning.below_threshold_suggested ?? 0))}
-                      </a>
-                    </div>
-                  )}
+                  <p className="text-white/40">
+                    {t("scenarioDetail.doubleBlind.learningTrainedShort")
+                      .replace("{included}", String(queue.learning.n_included))
+                      .replace("{excluded}", String(queue.learning.n_excluded))}
+                    {queue.learning.cv_auc != null
+                      ? " " + t("scenarioDetail.doubleBlind.learningAuc")
+                          .replace("{auc}", queue.learning.cv_auc.toFixed(2))
+                      : ""}
+                  </p>
+                  <a href={learnedSuggestionsExportUrl(scenarioId)}
+                     className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
+                    {t("scenarioDetail.doubleBlind.learningDownloadAll")}
+                  </a>
                 </>
               ) : (
                 <p>
@@ -6876,30 +6885,121 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                   <div className="flex items-center gap-3 text-[9px] text-white/30 font-mono">
                     {art.year ? <span>{art.year}</span> : null}
                     {art.journal ? <span className="truncate">{art.journal}</span> : null}
+                    {/* LES TROIS scores, pas un seul : le rerank seul s'affichait quand il
+                        existait, et la similarité qui décide du seuil disparaissait. */}
+                    {art.similarity_score != null
+                      ? <span>sim {art.similarity_score.toFixed(3)}</span> : null}
                     {art.rerank_score != null
-                      ? <span>rerank {art.rerank_score.toFixed(3)}</span>
-                      : art.similarity_score != null
-                        ? <span>sim {art.similarity_score.toFixed(3)}</span>
-                        : null}
+                      ? <span>rerank {art.rerank_score.toFixed(3)}</span> : null}
                     {art.learned_score != null
                       ? <span className="text-brand-300/80">{t("scenarioDetail.doubleBlind.learningBadge").replace("{score}", art.learned_score.toFixed(2))}</span>
                       : null}
                     {art.audit_sample
                       ? <span className="rounded bg-gold-500/15 border border-gold-500/30 px-1.5 text-gold-300">{t("scenarioDetail.doubleBlind.auditBadge")}</span>
                       : null}
-                    {/* Un article venu de SOUS le seuil se dit : le relecteur juge la
-                        suggestion du modèle, pas un article que la recherche a retenu. */}
+                    {/* De quel côté du seuil vient cet article, TOUJOURS dit. Seul celui
+                        venu de dessous portait une pastille, donc l'absence de pastille
+                        pouvait se lire comme « au-dessus » ou comme « on ne sait pas ». */}
                     {art.below_threshold
                       ? <span className="rounded bg-brand-500/15 border border-brand-500/30 px-1.5 text-brand-200">{t("scenarioDetail.doubleBlind.suggestedBadge")}</span>
-                      : null}
+                      : <span className="rounded bg-white/5 border border-white/10 px-1.5 text-white/45">{t("scenarioDetail.doubleBlind.aboveBadge")}</span>}
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
                       className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
                     >{t("scenarioDetail.doubleBlind.voteInclude")}</button>
-                    <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                    {/* Exclure DEMANDE POURQUOI : un PRISMA doit dire combien d'articles
+                        ont été écartés et pour quel motif, et un vote sans motif ne peut
+                        pas être relu. Le motif part avec la décision (reviewer_N_reason). */}
+                    <button onClick={() => setReasonFor(v => v === art.id ? null : art.id)}
+                      disabled={submitting === art.id}
                       className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
                     >{t("scenarioDetail.doubleBlind.voteExclude")}</button>
+                    {/* Le « peut-être » d'un screening : l'article sort de la file sans
+                        être tranché, et se retrouve dans l'historique, modifiable. */}
+                    <button onClick={() => decide(art.id, 'pending')} disabled={submitting === art.id}
+                      title={t("scenarioDetail.doubleBlind.voteMaybeHint")}
+                      className="rounded-lg bg-white/5 border border-white/10 text-white/50 text-[10px] px-3 py-1.5 hover:bg-white/10 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteMaybe")}</button>
+                  </div>
+                  {reasonFor === art.id && (
+                    <div className="rounded-lg border border-rose-500/20 bg-rose-500/5 p-2 space-y-1.5">
+                      <p className="text-[10px] text-rose-200/80">{t("scenarioDetail.doubleBlind.reasonAsk")}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {EXCLUSION_REASONS.map(key => (
+                          <button key={key}
+                            onClick={() => { void decide(art.id, 'excluded', t(`scenarioDetail.doubleBlind.reason.${key}`)); setReasonFor(null); }}
+                            className="rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200 hover:bg-rose-500/20">
+                            {t(`scenarioDetail.doubleBlind.reason.${key}`)}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex gap-1">
+                        <input value={otherReason} onChange={e => setOtherReason(e.target.value)}
+                          placeholder={t("scenarioDetail.doubleBlind.reasonOtherPlaceholder")}
+                          className="flex-1 rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/80" />
+                        <button onClick={() => { void decide(art.id, 'excluded', otherReason.trim() || null); setOtherReason(""); setReasonFor(null); }}
+                          className="rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200 hover:bg-rose-500/20">
+                          {t("scenarioDetail.doubleBlind.reasonConfirm")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Mon historique de décisions ─────────────────────────────────────────
+          Un vote partait et disparaissait : la file ne montre que ce qui reste, donc
+          rien ne disait ce qu'on avait déjà décidé, ni ne permettait d'y revenir. Un
+          screening se relit, et une décision se corrige. */}
+      {myDecisions && myDecisions.total > 0 && (
+        <div className="space-y-2">
+          <button onClick={() => setShowDecisions(v => !v)}
+            className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/50 hover:text-white/80">
+            {showDecisions ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            {t("scenarioDetail.doubleBlind.myDecisions")
+              .replace("{n}", myDecisions.total.toLocaleString())
+              .replace("{included}", myDecisions.included.toLocaleString())
+              .replace("{excluded}", myDecisions.excluded.toLocaleString())}
+          </button>
+          {showDecisions && (
+            <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+              {myDecisions.decisions.map(d => (
+                <div key={d.id} className="rounded-xl border border-white/5 bg-white/2 p-2.5 space-y-1.5">
+                  <p className="text-[11px] text-white/75 leading-4">{d.title}</p>
+                  <div className="flex items-center gap-2 flex-wrap text-[9px] font-mono text-white/35">
+                    <span className={d.my_status === "included" ? "text-brand-300"
+                                     : d.my_status === "excluded" ? "text-rose-300" : "text-white/50"}>
+                      {t(`scenarioDetail.doubleBlind.status.${d.my_status}`)}
+                    </span>
+                    {d.my_reason ? <span className="text-white/45 font-sans">{d.my_reason}</span> : null}
+                    {d.decided_at ? <span>{new Date(d.decided_at).toLocaleString()}</span> : null}
+                    {d.changes ? <span className="text-gold-300/80 font-sans">
+                      {t("scenarioDetail.doubleBlind.changedTimes").replace("{n}", String(d.changes))}
+                    </span> : null}
+                    {d.kappa_final_status
+                      ? <span className="text-gold-300/70 font-sans">{t("scenarioDetail.doubleBlind.arbitrated")}</span>
+                      : null}
+                    <span className={d.above_threshold ? "text-white/35" : "text-brand-200"}>
+                      {t(d.above_threshold ? "scenarioDetail.doubleBlind.aboveBadge"
+                                           : "scenarioDetail.doubleBlind.suggestedBadge")}
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {(["included", "excluded", "pending", "undecided"] as const).map(st => (
+                      <button key={st} disabled={submitting === d.id || st === d.my_status}
+                        onClick={() => changeDecision(d.id, st)}
+                        className={`rounded-md border px-2 py-0.5 text-[10px] transition disabled:opacity-40 ${
+                          st === "included" ? "border-brand-500/25 bg-brand-500/10 text-brand-300 hover:bg-brand-500/20"
+                          : st === "excluded" ? "border-rose-500/25 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                          : "border-white/10 bg-white/5 text-white/50 hover:bg-white/10"}`}>
+                        {t(`scenarioDetail.doubleBlind.changeTo.${st}`)}
+                      </button>
+                    ))}
                   </div>
                 </div>
               ))}

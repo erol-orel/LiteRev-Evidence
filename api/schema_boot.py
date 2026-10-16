@@ -874,7 +874,14 @@ def _ensure_double_blind_columns():
                 ADD COLUMN IF NOT EXISTS reviewer_2_status  VARCHAR(20),
                 ADD COLUMN IF NOT EXISTS reviewer_2_reason  TEXT,
                 ADD COLUMN IF NOT EXISTS kappa_resolved     BOOLEAN DEFAULT FALSE,
-                ADD COLUMN IF NOT EXISTS kappa_final_status VARCHAR(20)
+                ADD COLUMN IF NOT EXISTS kappa_final_status VARCHAR(20),
+                -- Quand chaque relecteur a voté, et combien de fois il est revenu
+                -- dessus : un screening se relit, et une décision se corrige. Sans
+                -- l'horodatage, l'historique d'un relecteur n'a pas d'ordre.
+                ADD COLUMN IF NOT EXISTS reviewer_1_decided_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS reviewer_2_decided_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS reviewer_1_changes INTEGER DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS reviewer_2_changes INTEGER DEFAULT 0
             """))
     logger.info("Colonnes double-aveugle (global + par scénario) vérifiées/créées.")
 
