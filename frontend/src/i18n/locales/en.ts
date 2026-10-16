@@ -1672,6 +1672,8 @@ copyQuery: "Copy",
         needsKey: "Loading the NUTS list needs the admin key.",
         loaded: "Loaded {n} regions in {c} countries.",
         unresolved: "{n} articles do not resolve to a single country",
+        inEurope: "{n} of the {total} articles are in Europe, in the NUTS sense: the EU, the EEA, the United Kingdom, Switzerland and the candidate countries.",
+        inEuropeNoCountry: "{n} of them name no single country (\"Europe\", or several countries at once), so the bars below do not carry them.",
         reason: {
           no_place: "no place stated",
           several_countries: "several countries",

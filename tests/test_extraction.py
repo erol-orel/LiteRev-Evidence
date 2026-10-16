@@ -710,6 +710,26 @@ def test_the_place_crossing_reads_the_location_the_extraction_found(extracted, s
     assert d["coverage"]["sex_gender"] == 2
 
 
+def test_an_article_placed_in_europe_without_a_country_counts_as_european(extracted, seeded):
+    """« Europe », « Germany and the Netherlands » : européen, sans pays à donner.
+
+    C'est le libellé le plus fréquent des corpus HPAI après les pays eux-mêmes. Compté
+    dans « sans pays », il faisait du compte européen un plancher muet : une trentaine
+    d'articles par revue manquaient, et le croisement envoyé au partenaire avec."""
+    with seeded.cursor() as cur:
+        for doc_id, place in ((9701, "Europe"), (9702, "Germany and the Netherlands"), (9703, "Japan and USA")):
+            cur.execute("UPDATE literature_document SET country = NULL, extraction_json = "
+                        "jsonb_set(extraction_json, '{ref}', %s::jsonb) WHERE id = %s",
+                        (json.dumps({"location": place}), doc_id))
+    place = extraction.extraction_digest(SID)["by_place"]
+    assert place["n_europe"] == 2, "« Europe » et deux pays européens sont européens"
+    assert place["n_europe_without_country"] == 2, "aucun des deux ne nomme un pays unique"
+    assert place["n_elsewhere"] == 1, "« Japan and USA » ne nomme aucun pays européen"
+    assert place["n_no_country"] == 0
+    # Et le croisement suit : les deux articles européens rapportent le sexe.
+    assert place["coverage_europe"]["sex_gender"] == 2
+
+
 def test_a_study_whose_place_is_not_stated_is_counted_apart(extracted, seeded):
     """« Not reported » n'est pas un pays, et ne doit pas tomber dans « ailleurs »."""
     with seeded.cursor() as cur:

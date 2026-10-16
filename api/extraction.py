@@ -939,17 +939,26 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
                 WHERE ars.scenario_id = :sid AND {gate}
                   AND jsonb_typeof(d.extraction_json) = 'object'
             """, scenario_id, thr)
-            n_europe = n_elsewhere = n_no_country = 0
+            # « En Europe » n'est pas « a un pays européen » : le libellé le plus fréquent des
+            # corpus HPAI après les pays eux-mêmes est « Europe », et « Germany and the
+            # Netherlands » ou « Europe, Cambodia, China » n'ont pas de pays unique non plus.
+            # Le résolveur répond donc à la question européenne à part (`in_europe`), et c'est
+            # elle qu'on compte : sans cela, une trentaine d'articles par revue tombaient dans
+            # « sans pays » et le compte européen était un plancher qui ne se disait pas.
+            n_europe = n_elsewhere = n_no_country = n_europe_no_country = 0
             cov_europe = dict.fromkeys(COVERAGE_KEYS, 0)
             for r in place_rows:
-                iso = (resolve_location(r["location"], r["country"], index) or {}).get("country")
-                if not iso:
+                got = resolve_location(r["location"], r["country"], index) or {}
+                in_eu = got.get("in_europe")
+                if in_eu is None:
                     n_no_country += 1
                     continue
-                if iso not in NUTS_ISO:
+                if in_eu is False:
                     n_elsewhere += 1
                     continue
                 n_europe += 1
+                if not got.get("country"):
+                    n_europe_no_country += 1
                 cov = r["coverage"] if isinstance(r["coverage"], dict) else {}
                 for k in COVERAGE_KEYS:
                     if cov.get(k) is True or str(cov.get(k)).lower() == "true":
@@ -957,6 +966,9 @@ def extraction_digest(scenario_id: str, threshold: float | None = None) -> dict[
             out["by_place"] = {
                 "europe_iso": sorted(NUTS_ISO),
                 "n_europe": n_europe,
+                # Combien des articles européens le sont sans pays nommable (« Europe »,
+                # plusieurs pays) : le lecteur voit pourquoi la carte en montre moins.
+                "n_europe_without_country": n_europe_no_country,
                 "n_elsewhere": n_elsewhere,
                 "n_no_country": n_no_country,
                 "coverage_europe": cov_europe,
@@ -1055,10 +1067,13 @@ def extraction_to_prompt(d: dict | None, max_chars: int = 6000) -> str:
     if place.get("n_europe") or place.get("n_elsewhere"):
         euro_cov = [f"{_COVERAGE_LABELS_FR[k]} {place['coverage_europe'][k]}"
                     for k in COVERAGE_KEYS if (place.get("coverage_europe") or {}).get(k)]
+        _eu_nc = int(place.get("n_europe_without_country") or 0)
         sections.append(("Europe", (
-            f"PAR LIEU, sur les {n} articles extraits : {place['n_europe']} sont situes dans un pays NUTS "
-            f"(UE, EEE, Royaume-Uni, Suisse et pays candidats), {place['n_elsewhere']} ailleurs, "
-            f"{place.get('n_no_country', 0)} sans pays resolu. Parmi les articles NUTS, rapportent des "
+            f"PAR LIEU, sur les {n} articles extraits : {place['n_europe']} sont situes en Europe, au sens "
+            f"des pays NUTS (UE, EEE, Royaume-Uni, Suisse et pays candidats)"
+            + (f", dont {_eu_nc} sans pays nommable (\"Europe\", ou plusieurs pays a la fois)" if _eu_nc else "")
+            + f", {place['n_elsewhere']} ailleurs, "
+            f"{place.get('n_no_country', 0)} dont le lieu ne dit pas. Parmi les articles europeens, rapportent des "
             f"donnees sur : " + (", ".join(euro_cov) if euro_cov else "aucun des elements suivis")
             + ". Ces chiffres croisent la couverture et le lieu : ils repondent a \"combien d'articles "
               "europeens rapportent par sexe\", et ne doivent jamais etre presentes comme \"dans l'UE\" "

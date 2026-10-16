@@ -267,6 +267,38 @@ def test_every_unresolved_place_says_why():
     assert G.UNRESOLVED_REASONS == ("no_place", "several_countries", "multi_country_area", "not_recognised")
 
 
+def test_a_place_answers_the_european_question_even_with_no_country_to_give():
+    """"Is this study European?" is not "does this place name one European country?".
+
+    On the HPAI corpora, "Europe" is the most frequent place label after the countries
+    themselves (17 articles on one review), and "Germany and the Netherlands" or "Europe,
+    Cambodia, China" name no single country either. All of them fell into "no country", so
+    the European count was a floor that did not say it was one."""
+    # An area wholly inside the NUTS space: European, with no country to give.
+    for place in ("Europe", "European Union", "EU", "the EEA", "Scandinavia", "Benelux",
+                  "British Isles", "Iberian Peninsula", "northwestern Europe"):
+        r = _r(place)
+        assert (r["country"], r["in_europe"]) == (None, True), place
+    # Several countries: European as soon as one of them is, not European when none is.
+    assert _r("Germany and the Netherlands")["in_europe"] is True
+    assert _r("Europe, Cambodia, China")["in_europe"] is True
+    assert _r("Japan and USA")["in_europe"] is False
+    assert _r("Bavaria and Lombardy")["in_europe"] is True        # two NUTS regions, two countries
+    # One country, resolved: the country settles it, in or out.
+    assert _r("Lombardy, Italy")["in_europe"] is True and _r("Guangdong, China")["in_europe"] is False
+    assert _r("Switzerland")["in_europe"] is True and _r("Turkiye")["in_europe"] is True
+    # And what the place does not say stays unsaid: never read as "not Europe".
+    for place in ("", "Not reported", "somewhere rural", "global", "Asia", "Mediterranean",
+                  "Eurasia", "Black Sea", "Caucasus", "Northern Hemisphere"):
+        assert _r(place)["in_europe"] is None, place
+
+
+def test_a_place_that_names_several_countries_lists_them():
+    r = _r("Germany and the Netherlands")
+    assert r["several_countries"] is True and r["countries"] == ["DE", "NL"]
+    assert _r("Italy")["countries"] == []                         # nothing to list
+
+
 def test_a_bird_a_breed_or_a_lab_animal_is_not_a_place():
     for place, iso in (("a guinea fowl farm, Nigeria", "NG"), ("Canada geese, Ohio", "US"), ("Jersey cows, Texas", "US"),
                        ("Rhode Island Red hens, Kenya", "KE"), ("Maine-et-Loire, France", "FR"), ("Sierra Nevada, Spain", "ES"),

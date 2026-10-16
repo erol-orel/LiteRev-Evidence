@@ -414,13 +414,16 @@ _TURKEY_THE_COUNTRY = re.compile(r"(?:[,;(]|\band|(?i:\b(?:eastern|western|north
                                  r"\s*Turkey\s*(?:[,;.)]|$)")
 
 
-def _countries_named(folded: str, hint: str | None) -> tuple[set[str], bool]:
-    """The countries a place names, and whether it names an area spanning several countries."""
+def _countries_named(folded: str, hint: str | None) -> tuple[set[str], frozenset[str]]:
+    """The countries a place names, and the areas spanning several countries it names.
+
+    The areas are returned by name, not as a flag: "Europe" and "Asia" both leave the
+    country unresolved, but only one of them answers "is this study European?"."""
     words = folded.split()
     hits = _scan(words)
     context = {h.iso for h in hits if h.kind in ("country", "subdivision")}
     homonyms = [h for h in hits if h.kind == "homonym"]
-    area = any(h.kind == "area" for h in hits)
+    area = frozenset(h.name for h in hits if h.kind == "area")
     taken: list[_Hit] = []
     for h in hits:
         if h.kind == "homonym":
@@ -595,6 +598,17 @@ def _common_prefix(codes: list[str]) -> str:
 #: Why a place resolves to no country: nothing stated, several countries named, a continent or a
 #: region spanning several, or a place this table does not know (the ones worth fixing).
 UNRESOLVED_REASONS = ("no_place", "several_countries", "multi_country_area", "not_recognised")
+#: The areas of `_AREAS` that lie WHOLLY inside the NUTS space: a study that names one of them
+#: and no country is European, even though no country can be given to it. "Europe" was the most
+#: frequent label of the HPAI corpora after the countries themselves (17 articles on one review),
+#: and it fell into "no country", so the European count read as a floor without saying so.
+#: An area that straddles the edge of Europe (Mediterranean, Black Sea, Caucasus, Eurasia) is NOT
+#: here: it answers "cannot say", which is the honest answer, not "not Europe".
+_EUROPEAN_AREAS = frozenset(fold(n) for n in (
+    "Europe", "European Union", "EU", "EEA", "European Economic Area",
+    "Scandinavia", "Fennoscandia", "Baltic states", "Benelux", "British Isles",
+    "Iberian Peninsula", "Wadden Sea", "North Sea",
+))
 #: What a location says when it states none: counted with the empty ones.
 _NO_PLACE = frozenset({"n a", "na", "none", "null", "unknown", "unspecified", "not applicable", "not available", "not given",
                        "not mentioned", "not reported", "not specified", "not stated"})
@@ -606,20 +620,43 @@ def resolve_location(place: Any, article_country: Any = None, index: NutsIndex |
     Returns `country` (ISO alpha-2, or None), `nuts0` .. `nuts3` (None where unknown), `level`
     (the deepest known, 0 to 3), `method` (`region`, `country`, `article_country` or `unresolved`),
     `several_countries` when the place names more than one, and `reason`, one of
-    UNRESOLVED_REASONS when the place resolves to no country, else None."""
+    UNRESOLVED_REASONS when the place resolves to no country, else None.
+
+    `in_europe` answers the question a country cannot always answer: True, False, or None when
+    the place does not say. "Germany and the Netherlands" names no single country and is
+    European; "Europe" names none and is European; "Mediterranean" and an unknown label say
+    nothing. `countries` lists what the place named when it named several."""
+    out = _resolve_place(place, article_country, index)
+    # Europe, decided once and whatever path named the place: a country settles it, and
+    # without a country an area or a list of countries may still have settled it above.
+    if out["country"]:
+        out["in_europe"] = out["country"] in _NUTS_ISO
+    return out
+
+
+def _resolve_place(place: Any, article_country: Any = None, index: NutsIndex | None = None) -> dict[str, Any]:
+    """The place to a country and a NUTS code, before `resolve_location` reads Europe off it."""
     index = index or get_nuts_index()
     folded = fold(place)
     folded = "" if folded in _NO_PLACE else folded                 # "Not reported" states no place
     hint = str(article_country or "").strip().upper()[:2]
     hint = _COUNTED_IN_ISO.get(hint, hint)                         # Reunion (RE) is counted in France
     hint = hint if hint in COUNTRY_NAME else None
-    named, area = _countries_named(folded, hint) if folded else (set(), False)
+    named, area = _countries_named(folded, hint) if folded else (set(), frozenset())
     if isinstance(place, str) and _TURKEY_THE_COUNTRY.search(place):
         named = named | {"TR"}
     out: dict[str, Any] = {"country": None, "nuts0": None, "nuts1": None, "nuts2": None, "nuts3": None, "level": None,
-                           "method": "unresolved", "several_countries": False, "reason": None}
+                           "method": "unresolved", "several_countries": False, "reason": None,
+                           # Europe, when the country stays unknown: an area wholly inside the
+                           # NUTS space says yes on its own.
+                           "in_europe": True if (area & _EUROPEAN_AREAS) else None, "countries": []}
     if len(named) > 1:
-        out.update({"several_countries": True, "reason": "several_countries"})
+        out.update({"several_countries": True, "reason": "several_countries",
+                    "countries": sorted(named),
+                    # Several countries: European as soon as one of them is. "Germany and the
+                    # Netherlands" is a European study whatever single country we cannot give it,
+                    # and "Cambodia and China" is not one, which is an answer too.
+                    "in_europe": bool((named & _NUTS_ISO) or (area & _EUROPEAN_AREAS))})
         return out
     # "Europe" or "global" is not the article's country: a study across several stays unresolved.
     country = next(iter(named), None) or (None if area else hint)
@@ -635,7 +672,9 @@ def resolve_location(place: Any, article_country: Any = None, index: NutsIndex |
                 out[f"nuts{lvl}"] = code[: 2 + lvl] if len(code) >= 2 + lvl else None
             return out
         if not country and len(code) < 2:                          # regions of two countries, none named
-            out.update({"several_countries": True, "reason": "several_countries"})
+            # Both are NUTS regions, so both countries are European: no country to give, and
+            # the European question answered all the same.
+            out.update({"several_countries": True, "reason": "several_countries", "in_europe": True})
             return out
         if not country:                                            # two regions of one country
             iso = iso_of_nuts0(code)
@@ -727,11 +766,17 @@ def geography(scenario_id: str) -> dict[str, Any]:
     countries: dict[str, dict[str, Any]] = {}
     unresolved: dict[str, dict[str, Any]] = {}
     by_reason = dict.fromkeys(UNRESOLVED_REASONS, 0)
-    several = n_unres = 0
+    several = n_unres = n_eu = n_eu_nc = 0
     for r in rows:
         res = resolve_location(r["location"], r["country"], index)
         if res["several_countries"]:
             several += 1
+        # Europe, counted as the digest counts it: a place can be European without naming one
+        # country ("Europe", "Germany and the Netherlands"), and the map cannot show those.
+        if res.get("in_europe") is True:
+            n_eu += 1
+            if not res["country"]:
+                n_eu_nc += 1
         iso = res["country"]
         if not iso:
             n_unres += 1
@@ -753,6 +798,7 @@ def geography(scenario_id: str) -> dict[str, Any]:
             g["name"] = _region_name(index, g["code"])
         out_c.append({**c, "regions": regs})
     return {"scenario_id": scenario_id, "n_papers": len(rows), "n_resolved": len(rows) - n_unres, "n_unresolved": n_unres,
+            "n_in_europe": n_eu, "n_in_europe_without_country": n_eu_nc,
             "n_several_countries": several, "unresolved_by_reason": by_reason, "nuts_source": index.source, "countries": out_c,
             "unresolved": sorted(unresolved.values(), key=lambda u: (-u["n"], u["location"]))[:25]}
 

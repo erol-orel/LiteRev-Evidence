@@ -1672,6 +1672,8 @@ copyQuery: "Copier",
         needsKey: "Charger la liste NUTS demande la clé admin.",
         loaded: "{n} régions chargées dans {c} pays.",
         unresolved: "{n} articles ne se résolvent pas en un seul pays",
+        inEurope: "{n} des {total} articles sont en Europe, au sens NUTS : l'UE, l'EEE, le Royaume-Uni, la Suisse et les pays candidats.",
+        inEuropeNoCountry: "{n} d'entre eux ne nomment aucun pays unique (« Europe », ou plusieurs pays à la fois) : les barres ci-dessous ne les portent donc pas.",
         reason: {
           no_place: "aucun lieu indiqué",
           several_countries: "plusieurs pays",
