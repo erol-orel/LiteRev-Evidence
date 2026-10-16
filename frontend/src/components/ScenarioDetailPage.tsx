@@ -116,6 +116,8 @@ import {
   registerDoubleBlindReviewer,
   resolveDoubleBlindConflict,
   submitDoubleBlindDecision,
+  changeDoubleBlindDecision,
+  fetchMyDoubleBlindDecisions,
   subscribeAlerts,
   triggerLivingReview,
   startEnrichmentBatch,
@@ -149,12 +151,14 @@ import {
   type ClusterPoint,
   type PicoData,
   type PicoBulkResponse,
+  type PicoScope,
   type EvidenceBriefData,
   type LlmEvidenceBrief,
   type ScenarioVariables,
   type KnowledgeGraphData,
   type KGNode,
   type KappaStats,
+  type MyDecisions,
   editModelSpec,
   type EditSpecPayload,
   type ModelRun,
@@ -2741,8 +2745,11 @@ function ImportDecisionsPanel({ scenarioId, onClose, onApplied }:
   );
 }
 
-function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged }:
+function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorpusChanged, refreshNonce }:
   { scenarioId: string; detail: ScenarioDetail; threshold?: number; counts?: CorpusCounts;
+    /** Change quand des scores ont été recalculés : la liste se relit sur place, sans
+        remonter la section (ce qui perdait la recherche, la page et l'article déplié). */
+    refreshNonce?: number;
     onUseAsThreshold?: (kind: "similarity" | "rerank", value: number) => void;
     onCorpusChanged?: () => void }) {
   const { t } = useI18n();
@@ -2815,6 +2822,20 @@ function CorpusSection({ scenarioId, threshold, counts, onUseAsThreshold, onCorp
     }, 4000);
     return () => clearTimeout(id);
   }, [data, scenarioId, threshold, search]);
+
+  // Un recalcul de scores vient de finir : relire exactement les pages affichées, et le
+  // statut d'embedding avec elles (la carte des scores en vit). Pas de remontage : ce qui
+  // est à l'écran reste à l'écran.
+  const firstNonce = useRef(true);
+  useEffect(() => {
+    if (firstNonce.current) { firstNonce.current = false; return; }
+    const shown = Math.max(CORPUS_PAGE_SIZE, data?.articles.length ?? 0);
+    fetchScenarioCorpus(scenarioId, {
+      limit: shown, ...(threshold != null ? { threshold } : {}), ...search,
+    }).then(setData).catch(() => {});
+    fetchUserScenarioEmbeddingStatus(scenarioId).then(setEmbeddingStatus).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshNonce]);
 
   const loadMore = () => {
     if (!data || loadingMore) return;
@@ -4485,14 +4506,31 @@ function RagSection({ scenarioId, detail }: { scenarioId: string; detail: Scenar
               <div className="mt-2 space-y-0.5 text-[10px] text-white/40">
                 <p>
                   {meta.papers_used} {t("scenarioDetail.rag.papersSearchedSuffix")} (≥ {meta.threshold})
-                  {meta.papers_retrieved ? ` · ${meta.papers_retrieved} ${t("scenarioDetail.rag.papersRetrievedSuffix")}` : ""}
-                  {" · "}{meta.papers_with_fulltext} {t("scenarioDetail.rag.withFulltextSuffix")}
                 </p>
+                {/* Ce que la machine a LU de ces articles. Les trois états sont exclusifs
+                    et leur somme est le nombre d'articles : un texte intégral porte déjà
+                    le titre et le résumé. */}
+                <p>
+                  {t("scenarioDetail.rag.readAs")
+                    .replace("{fulltext}", meta.papers_with_fulltext.toLocaleString())
+                    .replace("{abstract}", (meta.papers_abstract_only ?? 0).toLocaleString())
+                    .replace("{title}", (meta.papers_title_only ?? 0).toLocaleString())}
+                </p>
+                {meta.chunks_total ? (
+                  <p>
+                    {t("scenarioDetail.rag.passagesLine")
+                      .replace("{used}", (meta.chunks_used ?? meta.papers_retrieved ?? 0).toLocaleString())
+                      .replace("{total}", meta.chunks_total.toLocaleString())}
+                  </p>
+                ) : null}
                 <p className={meta.digest_complete ? "text-white/30" : "text-gold-400/70"}>
                   {meta.digest_complete
                     ? t("scenarioDetail.rag.digestCovers")
                     : t("scenarioDetail.rag.digestMissing")}
                 </p>
+                {meta.digest_complete ? (
+                  <p className="text-white/30">{t("scenarioDetail.rag.alsoReads")}</p>
+                ) : null}
               </div>
             )}
           </div>
@@ -5323,6 +5361,20 @@ function PrismaSection({ scenarioId }: { scenarioId: string }) {
               <PrismaBigNum value={num(sem.below_threshold)} sub={t("scenarioDetail.prisma.belowThresholdDeprioritised")} />
             </div>
           </div>
+          {/* Le TOTAL de l'étape, et son addition. Les deux grands nombres sont le corpus
+              SCORÉ partagé par le seuil ; les notices sans résumé ne passent pas par lui et
+              figuraient sur une ligne à part, sans jamais être additionnées : l'étape 2 ne
+              retombait donc pas sur les « notices passées au screening » de l'étape 1, et
+              le total n'était écrit nulle part. */}
+          <p className="text-[10px] text-violet-200/70 leading-relaxed">
+            {t(num(sem.no_abstract) > 0 ? "scenarioDetail.prisma.stage2TotalNoAbs"
+                                        : "scenarioDetail.prisma.stage2Total")
+              .replace("{total}", (num(sem.above_threshold) + num(sem.below_threshold)
+                                   + num(sem.no_abstract)).toLocaleString())
+              .replace("{above}", num(sem.above_threshold).toLocaleString())
+              .replace("{below}", num(sem.below_threshold).toLocaleString())
+              .replace("{noabs}", num(sem.no_abstract).toLocaleString())}
+          </p>
           <div className="space-y-1">
             {/* Les notices sans résumé ne passent pas par le seuil : ni au-dessus ni
                 au-dessous, elles attendent un relecteur qui les juge sur leur titre. */}
@@ -5454,6 +5506,9 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
   const [filter, setFilter] = React.useState<'all'|'with_pico'|'without_pico'>('all');
   const [search, setSearch] = React.useState('');
   const [sortBy, setSortBy] = React.useState<'year'|'confidence'|'design'>('year');
+  // Ce que la table couvre : le sous-ensemble pertinent, ou tout le corpus. Le second
+  // est un choix explicite, parce qu'il coûte des dizaines de mégaoctets.
+  const [picoScope, setPicoScope] = React.useState<PicoScope>('relevant');
   // Les lignes montrées, par tranches de 100, remises à 100 quand la vue change (même
   // mécanique que la table d'extraction). La table s'arrêtait aux cent premières sans
   // autre recours que le CSV.
@@ -5470,13 +5525,15 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 
   React.useEffect(() => {
     setLoading(true);
-    // Le corpus ENTIER, page par page : l'onglet annonce « tous les articles » et
-    // l'export CSV n'écrit que ce qui est chargé ; il n'en chargeait que 200.
-    fetchAllScenarioPico(scenarioId)
+    // Les articles PERTINENTS, page par page. Le corpus entier était le défaut, et sur
+    // 52 765 articles cela faisait 66 Mo de JSON que le navigateur n'a jamais fini de
+    // lire : l'onglet restait sur « Chargement des données PICO ». Le PICO ne s'extrait
+    // que sur les pertinents, donc le reste ne portait qu'un `has_pico: false`.
+    fetchAllScenarioPico(scenarioId, 40, picoScope)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scenarioId]);
+  }, [scenarioId, picoScope]);
 
   const exportCsv = () => {
     if (!data) return;
@@ -5534,6 +5591,23 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
           </div>
         ))}
       </div>
+      {/* Ce que la table couvre, et comment en changer. Sans cette ligne, « 1 011
+          articles » se lisait comme la taille du corpus. */}
+      <p className="text-[11px] text-white/50">
+        {(data.scope === "all"
+          ? t("scenarioDetail.pico.scopeAll")
+          : t("scenarioDetail.pico.scopeRelevant"))
+          .replace("{n}", data.total.toLocaleString())
+          .replace("{corpus}", (data.corpus_total ?? data.total).toLocaleString())}
+        {" "}
+        <button onClick={() => setPicoScope(data.scope === "all" ? "relevant" : "all")}
+          className="underline underline-offset-2 text-brand-300/90 hover:text-brand-300">
+          {data.scope === "all"
+            ? t("scenarioDetail.pico.scopeToRelevant")
+            : t("scenarioDetail.pico.scopeToAll")
+                .replace("{corpus}", (data.corpus_total ?? data.total).toLocaleString())}
+        </button>
+      </p>
       {/* Coverage bar */}
       <div className="rounded-xl border border-white/5 bg-white/2 p-3">
         <div className="flex justify-between text-[10px] text-white/40 mb-1.5">
@@ -6486,12 +6560,24 @@ const REVIEWER_ROLE_KEY = 'literev_reviewer_role';
  *  dans api/double_blind.py. */
 const AUDIT_SAMPLE_SIZE = 100;
 
+/** Les motifs d'exclusion d'un screening, ceux qu'un PRISMA attend. Le motif voyage en
+    texte, comme celui qu'un import Rayyan apporte, donc rien n'oblige à cette liste :
+    elle évite d'écrire le même motif de dix façons. */
+const EXCLUSION_REASONS = ["population", "exposure", "outcome", "design",
+                           "setting", "language", "duplicate", "notRetrievable"] as const;
+
 function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
   const { t } = useI18n();
   const [kappa, setKappa] = React.useState<KappaStats | null>(null);
   const [conflicts, setConflicts] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [submitting, setSubmitting] = React.useState<number|null>(null);
+  // Le motif demandé pour CET article, et le motif libre en cours de frappe.
+  const [reasonFor, setReasonFor] = React.useState<number|null>(null);
+  const [otherReason, setOtherReason] = React.useState("");
+  // L'historique de CE relecteur : ce qu'il a décidé, et de quoi revenir dessus.
+  const [myDecisions, setMyDecisions] = React.useState<MyDecisions | null>(null);
+  const [showDecisions, setShowDecisions] = React.useState(false);
 
   // Reviewer identity system
   const [reviewerCode, setReviewerCode] = React.useState<string>(
@@ -6553,18 +6639,39 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
       // Le lot à juger : sans lui, le panneau n'offrait aucun moyen de voter, donc
       // aucun conflit ne pouvait apparaître et aucun kappa ne pouvait être calculé.
       reviewerCode ? fetchDoubleBlindQueue(scenarioId, reviewerCode).catch(() => null) : null,
-    ]).then(([k, c, q]) => { setKappa(k); setConflicts(c); setQueue(q); })
+      reviewerCode ? fetchMyDoubleBlindDecisions(scenarioId, reviewerCode).catch(() => null) : null,
+    ]).then(([k, c, q, d]) => { setKappa(k); setConflicts(c); setQueue(q); setMyDecisions(d); })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [scenarioId, reviewerCode]);
 
   React.useEffect(() => { reload(); }, [reload]);
 
-  const decide = async (articleId: number, status: "included"|"excluded") => {
+  const decide = async (articleId: number, status: "included"|"excluded"|"pending", reason?: string | null) => {
     if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
     setSubmitting(articleId);
     try {
-      await submitDoubleBlindDecision(scenarioId, { article_id: articleId, status, reviewer_code: reviewerCode });
+      await submitDoubleBlindDecision(scenarioId, {
+        article_id: articleId, status, reason: reason ?? undefined, reviewer_code: reviewerCode });
+      reload();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  // Revenir sur sa propre décision. Le serveur dit ce que cela annule (un arbitrage rendu
+  // sur l'ancienne paire de votes), et on le répète à l'écran plutôt que de le taire.
+  const changeDecision = async (
+    articleId: number, status: "included"|"excluded"|"pending"|"undecided",
+  ) => {
+    if (!reviewerCode) { alert(t("scenarioDetail.doubleBlind.enterCodeFirst")); return; }
+    setSubmitting(articleId);
+    try {
+      const r = await changeDoubleBlindDecision(scenarioId, {
+        article_id: articleId, status, reviewer_code: reviewerCode });
+      if (r.arbitration_cleared) alert(t("scenarioDetail.doubleBlind.arbitrationCleared"));
       reload();
     } catch (e: any) {
       alert(e.message);
@@ -6763,55 +6870,31 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
               <p className="font-semibold text-brand-300/90">{t("scenarioDetail.doubleBlind.learningTitle")}</p>
               {queue.learning.trained ? (
                 <>
+                  {/* Ce qu'un relecteur fait de ce panneau : savoir quoi lire d'abord,
+                      et de quel côté du seuil cela vient. Le reste (l'espérance du
+                      nombre d'inclusions, la somme des probabilités) disait vrai et ne
+                      servait à rien : deux nombres du même modèle, lus côte à côte, se
+                      contredisaient à l'oeil. */}
                   <p>
-                    {t("scenarioDetail.doubleBlind.learningTrained")
-                      .replace("{included}", String(queue.learning.n_included))
-                      .replace("{excluded}", String(queue.learning.n_excluded))
-                      .replace("{remaining}", (queue.learning.remaining_relevant ?? 0).toLocaleString())
-                      .replace("{left}", queue.learning.expected_relevant_left != null
-                        ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")}
+                    {t("scenarioDetail.doubleBlind.learningToReadFirst")
+                      .replace("{n}", ((queue.learning.above_threshold_suggested ?? 0)
+                        + (queue.learning.below_threshold_suggested ?? 0)).toLocaleString())
+                      .replace("{above}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
+                      .replace("{below}", (queue.learning.below_threshold_suggested ?? 0).toLocaleString())}
                   </p>
-                  {/* Des deux côtés du seuil, comptés de la même manière. L'écran ne
-                      disait que ce qui dort SOUS le seuil, alors que le travail d'un
-                      relecteur se fait au-dessus : savoir que le modèle écarterait la
-                      moitié de la file change l'ordre dans lequel on la prend. */}
-                  {(queue.learning.above_threshold_suggested ?? 0) > 0 && (
-                    <p className="text-white/50">
-                      {t("scenarioDetail.doubleBlind.learningAboveSplit")
-                        .replace("{keep}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
-                        .replace("{drop}", (queue.learning.above_threshold_rejected ?? 0).toLocaleString())}
-                    </p>
-                  )}
-                  {queue.learning.cv_auc != null && (
-                    <p className="text-white/40">
-                      {t("scenarioDetail.doubleBlind.learningAuc").replace("{auc}", queue.learning.cv_auc.toFixed(2))}
-                    </p>
-                  )}
-                  {(queue.learning.below_threshold_suggested ?? 0) > 0 && (
-                    <div className="space-y-1">
-                      <p className="text-gold-300/90">
-                        {t("scenarioDetail.doubleBlind.learningSuggested")
-                          .replace("{n}", String(queue.learning.below_threshold_suggested))
-                          .replace("{inQueue}", String(queue.learning.suggested_in_queue
-                            ?? queue.remaining_suggested ?? 0))}
-                      </p>
-                      <ul className="list-disc pl-4 text-white/50">
-                        {(queue.learning.suggested ?? []).slice(0, 5).map(s => (
-                          <li key={s.id}>
-                            {s.title}{s.year ? ` (${s.year})` : ""} · {t("scenarioDetail.doubleBlind.learningBadge")
-                              .replace("{score}", (s.learned_score ?? 0).toFixed(2))}
-                          </li>
-                        ))}
-                      </ul>
-                      {/* Cinq titres pour une centaine de suggestions : le reste se lisait
-                          nulle part. Le fichier les porte toutes, dans l'ordre du modèle. */}
-                      <a href={learnedSuggestionsExportUrl(scenarioId)}
-                         className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
-                        {t("scenarioDetail.doubleBlind.learningDownloadAll")
-                          .replace("{n}", String(queue.learning.below_threshold_suggested ?? 0))}
-                      </a>
-                    </div>
-                  )}
+                  <p className="text-white/40">
+                    {t("scenarioDetail.doubleBlind.learningTrainedShort")
+                      .replace("{included}", String(queue.learning.n_included))
+                      .replace("{excluded}", String(queue.learning.n_excluded))}
+                    {queue.learning.cv_auc != null
+                      ? " " + t("scenarioDetail.doubleBlind.learningAuc")
+                          .replace("{auc}", queue.learning.cv_auc.toFixed(2))
+                      : ""}
+                  </p>
+                  <a href={learnedSuggestionsExportUrl(scenarioId)}
+                     className="inline-flex items-center gap-1 text-gold-300/90 underline hover:text-gold-200">
+                    {t("scenarioDetail.doubleBlind.learningDownloadAll")}
+                  </a>
                 </>
               ) : (
                 <p>
@@ -6842,30 +6925,121 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                   <div className="flex items-center gap-3 text-[9px] text-white/30 font-mono">
                     {art.year ? <span>{art.year}</span> : null}
                     {art.journal ? <span className="truncate">{art.journal}</span> : null}
+                    {/* LES TROIS scores, pas un seul : le rerank seul s'affichait quand il
+                        existait, et la similarité qui décide du seuil disparaissait. */}
+                    {art.similarity_score != null
+                      ? <span>sim {art.similarity_score.toFixed(3)}</span> : null}
                     {art.rerank_score != null
-                      ? <span>rerank {art.rerank_score.toFixed(3)}</span>
-                      : art.similarity_score != null
-                        ? <span>sim {art.similarity_score.toFixed(3)}</span>
-                        : null}
+                      ? <span>rerank {art.rerank_score.toFixed(3)}</span> : null}
                     {art.learned_score != null
                       ? <span className="text-brand-300/80">{t("scenarioDetail.doubleBlind.learningBadge").replace("{score}", art.learned_score.toFixed(2))}</span>
                       : null}
                     {art.audit_sample
                       ? <span className="rounded bg-gold-500/15 border border-gold-500/30 px-1.5 text-gold-300">{t("scenarioDetail.doubleBlind.auditBadge")}</span>
                       : null}
-                    {/* Un article venu de SOUS le seuil se dit : le relecteur juge la
-                        suggestion du modèle, pas un article que la recherche a retenu. */}
+                    {/* De quel côté du seuil vient cet article, TOUJOURS dit. Seul celui
+                        venu de dessous portait une pastille, donc l'absence de pastille
+                        pouvait se lire comme « au-dessus » ou comme « on ne sait pas ». */}
                     {art.below_threshold
                       ? <span className="rounded bg-brand-500/15 border border-brand-500/30 px-1.5 text-brand-200">{t("scenarioDetail.doubleBlind.suggestedBadge")}</span>
-                      : null}
+                      : <span className="rounded bg-white/5 border border-white/10 px-1.5 text-white/45">{t("scenarioDetail.doubleBlind.aboveBadge")}</span>}
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => decide(art.id, 'included')} disabled={submitting === art.id}
                       className="flex-1 rounded-lg bg-brand-500/20 border border-brand-500/30 text-brand-300 text-[10px] py-1.5 hover:bg-brand-500/30 transition disabled:opacity-50"
                     >{t("scenarioDetail.doubleBlind.voteInclude")}</button>
-                    <button onClick={() => decide(art.id, 'excluded')} disabled={submitting === art.id}
+                    {/* Exclure DEMANDE POURQUOI : un PRISMA doit dire combien d'articles
+                        ont été écartés et pour quel motif, et un vote sans motif ne peut
+                        pas être relu. Le motif part avec la décision (reviewer_N_reason). */}
+                    <button onClick={() => setReasonFor(v => v === art.id ? null : art.id)}
+                      disabled={submitting === art.id}
                       className="flex-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[10px] py-1.5 hover:bg-rose-500/20 transition disabled:opacity-50"
                     >{t("scenarioDetail.doubleBlind.voteExclude")}</button>
+                    {/* Le « peut-être » d'un screening : l'article sort de la file sans
+                        être tranché, et se retrouve dans l'historique, modifiable. */}
+                    <button onClick={() => decide(art.id, 'pending')} disabled={submitting === art.id}
+                      title={t("scenarioDetail.doubleBlind.voteMaybeHint")}
+                      className="rounded-lg bg-white/5 border border-white/10 text-white/50 text-[10px] px-3 py-1.5 hover:bg-white/10 transition disabled:opacity-50"
+                    >{t("scenarioDetail.doubleBlind.voteMaybe")}</button>
+                  </div>
+                  {reasonFor === art.id && (
+                    <div className="rounded-lg border border-rose-500/20 bg-rose-500/5 p-2 space-y-1.5">
+                      <p className="text-[10px] text-rose-200/80">{t("scenarioDetail.doubleBlind.reasonAsk")}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {EXCLUSION_REASONS.map(key => (
+                          <button key={key}
+                            onClick={() => { void decide(art.id, 'excluded', t(`scenarioDetail.doubleBlind.reason.${key}`)); setReasonFor(null); }}
+                            className="rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200 hover:bg-rose-500/20">
+                            {t(`scenarioDetail.doubleBlind.reason.${key}`)}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex gap-1">
+                        <input value={otherReason} onChange={e => setOtherReason(e.target.value)}
+                          placeholder={t("scenarioDetail.doubleBlind.reasonOtherPlaceholder")}
+                          className="flex-1 rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/80" />
+                        <button onClick={() => { void decide(art.id, 'excluded', otherReason.trim() || null); setOtherReason(""); setReasonFor(null); }}
+                          className="rounded-md border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[10px] text-rose-200 hover:bg-rose-500/20">
+                          {t("scenarioDetail.doubleBlind.reasonConfirm")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Mon historique de décisions ─────────────────────────────────────────
+          Un vote partait et disparaissait : la file ne montre que ce qui reste, donc
+          rien ne disait ce qu'on avait déjà décidé, ni ne permettait d'y revenir. Un
+          screening se relit, et une décision se corrige. */}
+      {myDecisions && myDecisions.total > 0 && (
+        <div className="space-y-2">
+          <button onClick={() => setShowDecisions(v => !v)}
+            className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-white/50 hover:text-white/80">
+            {showDecisions ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            {t("scenarioDetail.doubleBlind.myDecisions")
+              .replace("{n}", myDecisions.total.toLocaleString())
+              .replace("{included}", myDecisions.included.toLocaleString())
+              .replace("{excluded}", myDecisions.excluded.toLocaleString())}
+          </button>
+          {showDecisions && (
+            <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+              {myDecisions.decisions.map(d => (
+                <div key={d.id} className="rounded-xl border border-white/5 bg-white/2 p-2.5 space-y-1.5">
+                  <p className="text-[11px] text-white/75 leading-4">{d.title}</p>
+                  <div className="flex items-center gap-2 flex-wrap text-[9px] font-mono text-white/35">
+                    <span className={d.my_status === "included" ? "text-brand-300"
+                                     : d.my_status === "excluded" ? "text-rose-300" : "text-white/50"}>
+                      {t(`scenarioDetail.doubleBlind.status.${d.my_status}`)}
+                    </span>
+                    {d.my_reason ? <span className="text-white/45 font-sans">{d.my_reason}</span> : null}
+                    {d.decided_at ? <span>{new Date(d.decided_at).toLocaleString()}</span> : null}
+                    {d.changes ? <span className="text-gold-300/80 font-sans">
+                      {t("scenarioDetail.doubleBlind.changedTimes").replace("{n}", String(d.changes))}
+                    </span> : null}
+                    {d.kappa_final_status
+                      ? <span className="text-gold-300/70 font-sans">{t("scenarioDetail.doubleBlind.arbitrated")}</span>
+                      : null}
+                    <span className={d.above_threshold ? "text-white/35" : "text-brand-200"}>
+                      {t(d.above_threshold ? "scenarioDetail.doubleBlind.aboveBadge"
+                                           : "scenarioDetail.doubleBlind.suggestedBadge")}
+                    </span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {(["included", "excluded", "pending", "undecided"] as const).map(st => (
+                      <button key={st} disabled={submitting === d.id || st === d.my_status}
+                        onClick={() => changeDecision(d.id, st)}
+                        className={`rounded-md border px-2 py-0.5 text-[10px] transition disabled:opacity-40 ${
+                          st === "included" ? "border-brand-500/25 bg-brand-500/10 text-brand-300 hover:bg-brand-500/20"
+                          : st === "excluded" ? "border-rose-500/25 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                          : "border-white/10 bg-white/5 text-white/50 hover:bg-white/10"}`}>
+                        {t(`scenarioDetail.doubleBlind.changeTo.${st}`)}
+                      </button>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -7381,7 +7555,12 @@ function fmtThreshold(v: number): string {
 // ─── Seuil de similarite ajustable ─────────────────────────────────────────
 
 function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
-  scenarioId: string; onSaved?: () => void; onThresholdChange?: (v: number) => void;
+  scenarioId: string;
+  /** `threshold` : le seuil enregistré a changé, les compteurs suivent, la liste non (elle
+      affiche déjà ce seuil, au curseur). `scores` : des scores ont été recalculés, donc la
+      liste elle-même doit être relue. */
+  onSaved?: (reason: "threshold" | "scores") => void;
+  onThresholdChange?: (v: number) => void;
   /** Un seuil demandé depuis ailleurs (le score d'un article). `nonce` change à chaque
       demande, y compris quand la valeur est la même : sans lui, recliquer le même
       article ne ferait rien. */
@@ -7476,7 +7655,7 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
               .replace("{candidates}", (s.rerank_candidates ?? 0).toLocaleString())
               .replace("{reason}", s.rerank_stopped || s.error || "?"));
       }
-      onSaved?.();   // final refresh so the computed scores/badges show
+      onSaved?.("scores");   // final refresh so the computed scores/badges show
     });
   };
 
@@ -7533,7 +7712,11 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       setTimeout(() => setSaved(false), 2000);
       setCurveKey(k => k + 1);          // sinon la courbe garde l'ancien « seuil actuel »
       setSaveError(null);
-      onSaved?.();
+      // Appliquer un seuil ne change AUCUN article : la liste affiche déjà ce seuil (le
+      // curseur la pilote). Seuls les compteurs enregistrés changent. Remonter toute la
+      // section rechargeait la liste, et perdait au passage la recherche en cours, la
+      // page atteinte et l'article déplié.
+      onSaved?.("threshold");
     } catch (e: any) {
       // L'erreur était AVALÉE : un 401 sans clé, un 422 sur une valeur hors de [0, 1]
       // ou une coupure réseau laissaient l'interface sur un seuil que le serveur n'a
@@ -7556,12 +7739,19 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
       }
       // Refresh the corpus so it picks up rerank_running and auto-refreshes the
       // relevance (Cohere) badges live, instead of only on a manual page reload.
-      onSaved?.();
+      onSaved?.("scores");
       startPolling();
     } catch (e: any) {
       setRerankStatus(t("scenarioDetail.seuil.errorPrefix") + e.message);
     }
   };
+
+  // Y a-t-il quelque chose à appliquer ? Non quand les deux seuils affichés sont déjà
+  // enregistrés ET que le seuil de similarité est un choix assumé.
+  const canApply = savedThresholds === null
+    || threshold !== savedThresholds.similarity
+    || rerankThreshold !== savedThresholds.rerank
+    || !thresholdChosen;
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/2 px-4 py-3 flex flex-wrap items-center gap-4">
@@ -7622,10 +7812,21 @@ function SeuilSection({ scenarioId, onSaved, onThresholdChange, incoming }: {
         </span>
       </div>
       <div className="flex items-center gap-2">
-        <button onClick={handleSave} disabled={saving}
-          className="flex items-center gap-1 rounded-lg bg-brand-500/15 hover:bg-brand-500/25 border border-brand-500/20 text-brand-300 px-2.5 py-1 text-[11px] font-medium transition disabled:opacity-50">
+        {/* Rien à appliquer quand les deux seuils affichés sont ceux qui sont déjà en
+            vigueur : le bouton devient gris et inerte, et dit que c'est le seuil appliqué.
+            Il restait vif, invitait un second clic qui renvoyait les mêmes valeurs et
+            rechargeait la liste pour rien. Exception : un seuil de départ que personne n'a
+            choisi s'applique tel quel, et ce clic-là est une décision (`thresholdChosen`). */}
+        <button onClick={handleSave} disabled={saving || !canApply}
+          title={canApply ? undefined : t("scenarioDetail.seuil.inForceHint")}
+          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+            canApply
+              ? "bg-brand-500/15 hover:bg-brand-500/25 border-brand-500/20 text-brand-300"
+              : "bg-white/5 border-white/10 text-white/35 cursor-default"
+          } disabled:opacity-100`}>
           {saving ? (<Loader2 size={10} className="animate-spin" />) : (<CheckCircle2 size={10} />)}
-          {saved ? t("scenarioDetail.seuil.saved") : t("scenarioDetail.seuil.save")}
+          {saved ? t("scenarioDetail.seuil.saved")
+                 : canApply ? t("scenarioDetail.seuil.save") : t("scenarioDetail.seuil.inForce")}
         </button>
         <button onClick={() => handleRerank(false)}
           title={t("scenarioDetail.seuil.rescoreAllHint")}
@@ -8090,11 +8291,17 @@ function ReviewTab({ scenarioId, detail, counts, onRefreshCounts }: { scenarioId
         <div className="space-y-4">
           <SeuilSection
             scenarioId={scenarioId}
-            onSaved={() => { setCorpusRefreshKey(k => k + 1); onRefreshCounts?.(); }}
+            onSaved={(reason) => {
+              onRefreshCounts?.();
+              // Des scores ont bougé : la liste se relit. Un seuil appliqué ne bouge aucun
+              // score, et la liste l'affiche déjà : la relire coûtait une requête et
+              // remettait la section à zéro (recherche, page, article déplié).
+              if (reason === "scores") setCorpusRefreshKey(k => k + 1);
+            }}
             onThresholdChange={setLiveThreshold}
             incoming={askedThreshold} />
           <CorpusSection
-            key={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
+            refreshNonce={corpusRefreshKey} scenarioId={scenarioId} detail={detail}
             threshold={liveThreshold} counts={counts}
             onCorpusChanged={() => onRefreshCounts?.()}
             onUseAsThreshold={(kind, value) =>

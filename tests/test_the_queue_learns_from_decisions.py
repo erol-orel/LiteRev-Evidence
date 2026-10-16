@@ -273,10 +273,11 @@ def test_the_audit_sample_is_never_dressed_up_as_a_suggestion(seeded):
         c.patch(f"/scenarios/{SID}/settings", json={"double_blind_below_sample": 0}, headers=KEY)
 
 
-def test_every_suggestion_can_be_read_not_only_counted(seeded):
-    """The card shows five suggestions and the count said ninety-seven, so on a real
-    review the rest could be counted and never read. `limit` asks for more, and the export
-    takes them all, in the model's own order with both scores beside each other."""
+def test_the_export_is_the_whole_queue_not_one_side_of_the_threshold(seeded):
+    """The file carried the below-threshold suggestions alone, which is the smaller half
+    of the question: a reviewer works through the articles ABOVE the threshold too, and
+    the model has an opinion on each. One ranking, every article left to screen, with the
+    side of the threshold written on each row."""
     pytest.importorskip("sklearn")
     main.retrain(SID)
     c = _client()
@@ -286,9 +287,14 @@ def test_every_suggestion_can_be_read_not_only_counted(seeded):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/csv")
     body = r.content.decode("utf-8-sig")
-    assert "rank,id,title,year,learned_score,similarity_score,url" in body
+    assert ("rank,id,title,year,journal,doi,learned_score,similarity_score,rerank_score,"
+            "above_threshold,url") in body
+    rows = [ln for ln in body.splitlines() if ln and not ln.startswith("#")][1:]
+    # Both sides of the threshold are in it, and nothing already decided.
+    assert any(",yes," in ln for ln in rows) and any(",no," in ln for ln in rows)
+    assert len(rows) == state["remaining_relevant"] + state["below_threshold_suggested"] \
+        or len(rows) >= state["remaining_relevant"], "every article left to screen that the model scored"
     assert str(state["suggested"][0]["id"]) in body
-    assert body.count("\n") >= 3 + len(state["suggested"]) - 1, "a line per suggestion, plus the header"
     # The limit is bounded: a caller asking for a million does not get a million rows.
     assert len(c.get(f"/user-scenarios/{SID}/learned-ranking",
                      params={"limit": 10 ** 9}).json()["suggested"]) <= main.SUGGESTED_LIMIT_MAX

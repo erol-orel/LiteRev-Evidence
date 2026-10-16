@@ -109,6 +109,28 @@ from .knowledge_graph import _precompute_user_kg
 from llm_usage import model_for as _model
 
 
+#: Combien de temps le pipeline ATTEND son étape d'extraction avant de passer à la suite.
+#: Elle ne s'arrête pas pour autant : passé ce budget elle continue en arrière-plan, et
+#: l'étape le dit (`still_running`). Sans borne, un corpus de plusieurs milliers
+#: d'articles pertinents retiendrait le pipeline des heures ; sans attente du tout, le
+#: brief et les variables liraient une extraction qui n'a pas encore écrit une ligne.
+#: `PIPELINE_EXTRACTION_WAIT_S=0` pour ne pas attendre.
+EXTRACTION_WAIT_S = 3600
+
+
+def _extraction_wait_budget_s() -> float:
+    """Le budget d'attente, en secondes, lu dans l'environnement. Une valeur illisible
+    ou negative garde le defaut. Pur, hors la lecture de l'environnement."""
+    raw = (os.getenv("PIPELINE_EXTRACTION_WAIT_S") or "").strip()
+    if not raw:
+        return float(EXTRACTION_WAIT_S)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(EXTRACTION_WAIT_S)
+    return value if value >= 0 else float(EXTRACTION_WAIT_S)
+
+
 
 def _enrich_gate() -> str:
     """Le périmètre des étapes d'enrichissement du pipeline, en SQL.
@@ -3423,8 +3445,8 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
     # de rerank réussir sans qu'un seul score de rerank existe, et le cross-encoder, lui,
     # ne tournait que sur le chemin /populate. Deux étapes, nommées pour ce qu'elles font.
     STEP_ORDER = ["ingest", "embed", "semantic_scoring", "cross_encoder", "fulltext",
-                  "pico", "metadata", "clustering", "knowledge_graph", "evidence",
-                  "variables", "actions"]
+                  "pico", "metadata", "extraction", "clustering", "knowledge_graph",
+                  "evidence", "variables", "actions"]
 
     def update_step(step: str, status: str, **kwargs):
         job = _user_scenario_pipeline_jobs.get(scenario_id, {})
@@ -3453,10 +3475,19 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         if event == "pubmed_found":
             update_step("ingest", "running", found=value)
 
+    # Le seuil AU DÉPART de ce passage : s'il a changé en route (quelqu'un a déplacé le
+    # curseur pendant que le pipeline tournait), les étapes déjà faites l'ont été sur un
+    # autre sous-ensemble, et il faut repasser. Sans cela, appliquer un seuil pendant un
+    # pipeline laissait un corpus analysé moitié sur l'ancien, moitié sur le nouveau.
+    try:
+        _thr_at_start = scenario_threshold_info(scenario_id)["threshold"]
+    except Exception:                                        # noqa: BLE001
+        _thr_at_start = None
     _user_scenario_pipeline_jobs[scenario_id] = {
         "overall_status": "running",
         "current_step": "ingest",
         "lang": lang or "fr",
+        "threshold_at_start": _thr_at_start,
         "steps": {k: {"status": "pending"} for k in STEP_ORDER},
     }
 
@@ -3877,7 +3908,69 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as e:
             update_step("metadata", "error", error=str(e))
 
-        # ── Étape 8 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
+        # ── Étape 8 : Extraction structurée ───────────────────────────────────
+        # Les observations (sexe, age, profession, EPI, cas et populations, avec leur
+        # citation) ne s'extrayaient QUE sur un bouton. Un relecteur qui posait un seuil
+        # voyait donc, indéfiniment, « extraire les 472 articles restants », et tout ce
+        # qui lit l'extraction (le brief, la géographie, les estimations groupées, les
+        # réponses de l'assistant) portait sur une extraction partielle sans le dire.
+        # C'est maintenant une étape comme les autres : TOUS les articles pertinents qui
+        # n'en ont pas encore, jamais un échantillon, et le pipeline l'ATTEND pour que
+        # les étapes suivantes lisent ce qu'elle vient d'écrire.
+        update_step("extraction", "running")
+        try:
+            from .extraction import extraction_status, start_extraction
+            _ex0 = extraction_status(scenario_id)
+            if _enrich_waits:
+                update_step("extraction", "skipped", reason=_WAIT_REASON)
+            elif not os.getenv("OPENAI_API_KEY"):
+                update_step("extraction", "skipped", reason="Clé OpenAI non configurée")
+            elif not _ex0.get("n_pending"):
+                update_step("extraction", "done", relevant=_ex0.get("n_relevant", 0),
+                            extracted=_ex0.get("n_extracted", 0), pending=0,
+                            observations=_ex0.get("n_observations", 0))
+            else:
+                # Le nom du scénario sert d'indice de maladie dans le prompt, comme
+                # pour le bouton : sans lui l'étape extrairait autrement que lui.
+                try:
+                    _ex_hint = (_get_user_scenario_or_404(scenario_id) or {}).get("name")
+                except Exception:                            # noqa: BLE001
+                    _ex_hint = None
+                _ex_out = start_extraction(scenario_id, _ex_hint, 0)
+                if _ex_out.get("status") in ("no_llm", "paused"):
+                    update_step("extraction", "skipped",
+                                reason=_ex_out.get("reason") or _ex_out.get("status"))
+                else:
+                    # Attente bornée : une extraction qui dure (plusieurs milliers
+                    # d'articles) ne doit pas retenir le pipeline pour toujours. Passé le
+                    # budget, elle CONTINUE en arrière-plan et l'étape le dit, au lieu de
+                    # se déclarer finie.
+                    _ex_budget = _extraction_wait_budget_s()
+                    _ex_t0 = _time.time()
+                    _ex = _ex0
+                    while True:
+                        _time.sleep(3)
+                        _ex = extraction_status(scenario_id)
+                        if not _ex.get("running"):
+                            break
+                        _job = _ex.get("job") or {}
+                        _tot, _dn = int(_job.get("total") or 0), int(_job.get("done") or 0)
+                        update_step("extraction", "running", done=_dn, total=_tot,
+                                    failed=int(_job.get("failed") or 0),
+                                    pct=round(_dn / _tot * 100, 1) if _tot else 0)
+                        if _time.time() - _ex_t0 > _ex_budget:
+                            break
+                    update_step("extraction",
+                                "running" if _ex.get("running") else "done",
+                                relevant=_ex.get("n_relevant", 0),
+                                extracted=_ex.get("n_extracted", 0),
+                                pending=_ex.get("n_pending", 0),
+                                observations=_ex.get("n_observations", 0),
+                                still_running=bool(_ex.get("running")))
+        except Exception as e:
+            update_step("extraction", "error", error=str(e))
+
+        # ── Étape 9 : Clustering (UMAP+HDBSCAN avec fallback KMeans) ────────────
         update_step("clustering", "running")
         try:
             # Clustering du pipeline sur le SOUS-ENSEMBLE PERTINENT (≥ seuil sémantique
@@ -3950,6 +4043,14 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Evidence Brief (narratif LLM, mis en cache) - prêt sans clic ───────
         try:
             update_step("evidence", "running")
+            # Le portrait du corpus d'abord, et MIS EN CACHE : c'est lui que l'onglet
+            # Preuves attend pendant dix à quatorze secondes à chaque ouverture. Calculé
+            # ici, il est déjà là quand quelqu'un ouvre l'onglet.
+            try:
+                from .evidence import _build_evidence_brief, store_evidence_brief
+                store_evidence_brief(scenario_id, _build_evidence_brief(scenario_id))
+            except Exception as _e_bs:                       # noqa: BLE001
+                logger.warning(f"Evidence brief cache {scenario_id}: {_e_bs}")
             _generate_evidence_brief_llm(scenario_id, lang=lang or "fr")
             update_step("evidence", "done")
         except Exception as _e_ev:
@@ -4050,6 +4151,21 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         except Exception as _e_cc:
             logger.warning(f"Pipeline {scenario_id}: vérification des compteurs impossible: {_e_cc}")
         logger.info(f"Pipeline complet {scenario_id}: terminé.")
+
+        # Le seuil a-t-il bougé pendant ce passage ? Alors ce qui vient d'être calculé
+        # l'a été sur le sous-ensemble d'avant : on repasse UNE fois, sur le nouveau.
+        # Le garde-fou contre la boucle est le seuil lui-même : la relance repart du
+        # seuil courant, donc le passage suivant ne trouvera plus de différence.
+        try:
+            _thr_now = scenario_threshold_info(scenario_id)["threshold"]
+            if _thr_at_start is not None and _thr_now is not None \
+                    and abs(float(_thr_now) - float(_thr_at_start)) > 1e-9:
+                from .scenarios import _launch_full_pipeline  # lazy: ordre de chargement
+                logger.info(f"Pipeline {scenario_id}: seuil passé de {_thr_at_start} à {_thr_now} "
+                            f"pendant le passage, relance sur le nouveau sous-ensemble.")
+                _launch_full_pipeline(scenario_id, lang=lang)
+        except Exception as _e_relaunch:                     # noqa: BLE001 - jamais bloquant
+            logger.warning(f"Pipeline {scenario_id}: relance après changement de seuil: {_e_relaunch}")
 
     except Exception as e:
         logger.error(f"Pipeline user_scenario {scenario_id} fatal: {e}", exc_info=True)

@@ -11,7 +11,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from .core import app, engine, require_api_key
+from .core import app, engine, logger, require_api_key
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
                              relevant_gate_sql, reset_corpus_derived_caches,
                              screening_status_sql)
@@ -89,6 +89,32 @@ def _normalise_reviewer_code(code: str | None) -> str:
     if not c.startswith("R-"):
         c = f"R-{c}"
     return c[:32]
+
+
+def _ensure_decision_columns() -> None:
+    """Les colonnes d'horodatage et de compte de changements existent-elles ?
+
+    Elles sont posées au démarrage (api/schema_boot.py), mais pas sur une base montée
+    après coup ni sur une table que des tests reconstruisent. Le catalogue est interrogé
+    à chaque fois plutôt que mémorisé : une réponse gardée en mémoire survivait à la
+    reconstruction de la table, et la requête suivante tombait sur une colonne absente.
+    Jamais bloquant : sans elles, le vote s'écrit quand même."""
+    try:
+        with engine.begin() as _c:
+            have = {r[0] for r in _c.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'article_scenarios' "
+                "AND column_name IN ('reviewer_1_decided_at', 'reviewer_2_decided_at',"
+                " 'reviewer_1_changes', 'reviewer_2_changes')"))}
+            for n in (1, 2):
+                if f"reviewer_{n}_decided_at" not in have:
+                    _c.execute(text(f"ALTER TABLE article_scenarios "
+                                    f"ADD COLUMN IF NOT EXISTS reviewer_{n}_decided_at TIMESTAMP"))
+                if f"reviewer_{n}_changes" not in have:
+                    _c.execute(text(f"ALTER TABLE article_scenarios "
+                                    f"ADD COLUMN IF NOT EXISTS reviewer_{n}_changes INTEGER DEFAULT 0"))
+    except Exception as _e:                                  # noqa: BLE001 - jamais bloquant
+        logger.warning(f"_ensure_decision_columns: {_e}")
 
 
 def _reviewer_index_for_code(conn, scenario_id: str, code: str) -> int:
@@ -250,6 +276,7 @@ def submit_double_blind_decision(
     """
     if payload.status not in ("included", "excluded", "pending"):
         raise HTTPException(status_code=422, detail="status invalide")
+    _ensure_decision_columns()
     code = _normalise_reviewer_code(payload.reviewer_code)
     thr = _get_scenario_threshold(scenario_id)
 
@@ -297,7 +324,8 @@ def submit_double_blind_decision(
         ars_row = conn.execute(text(f"""
             UPDATE article_scenarios
             SET {col_status} = :status,
-                {col_reason} = :reason
+                {col_reason} = :reason,
+                {col_status.replace('_status', '_decided_at')} = NOW()
             WHERE scenario_id = :sid AND document_id = :article_id
               AND {col_status} IS NULL
             RETURNING reviewer_1_status, reviewer_2_status
@@ -644,6 +672,126 @@ def register_user_scenario_reviewer(
     return {
         "scenario_id": scenario_id, "reviewer": index, "reviewer_code": code,
         "registered": {int(r["reviewer_index"]): r["reviewer_code"] for r in others},
+    }
+
+
+@app.post("/user-scenarios/{scenario_id}/double-blind/decision/change")
+def change_user_scenario_double_blind_decision(
+    scenario_id: str,
+    payload: DoubleBlindDecisionIn,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Revenir sur SA propre décision, et dire ce que cela annule.
+
+    Le vote ordinaire s'écrit UNE FOIS (`WHERE ... IS NULL`), et c'est volontaire : sans
+    cette garde, un arbitrage réécrivait le vote d'un relecteur et le kappa comptait une
+    concordance que personne n'avait exprimée. Mais un relecteur doit pouvoir se
+    corriger, sinon la première erreur est définitive. Le changement passe donc par ici,
+    explicitement, et il remet en cause ce qui avait été déduit de l'ancien vote :
+    l'accord entre les deux relecteurs est recalculé au prochain passage, et un arbitrage
+    rendu sur l'ancienne paire est annulé, puisqu'il portait sur des votes qui n'existent
+    plus. Le compteur de changements reste sur la ligne : un historique de screening doit
+    dire qu'une décision a bougé."""
+    _get_user_scenario_or_404(scenario_id)
+    _ensure_decision_columns()
+    if payload.status not in ("included", "excluded", "pending", "undecided"):
+        raise HTTPException(status_code=422,
+                            detail="status must be included, excluded, pending or undecided")
+    code = _normalise_reviewer_code(payload.reviewer_code or "")
+    with engine.begin() as conn:
+        reviewer = _reviewer_index_for_code(conn, scenario_id, code)
+        col = f"reviewer_{reviewer}"
+        before = conn.execute(text(f"""
+            SELECT {col}_status AS my_status, kappa_final_status, kappa_resolved
+            FROM article_scenarios
+            WHERE scenario_id = :sid AND document_id = :article_id
+        """), {"sid": scenario_id, "article_id": payload.article_id}).mappings().first()
+        if before is None:
+            raise HTTPException(status_code=404, detail="Article non trouvé dans ce scénario")
+        if before["my_status"] is None:
+            raise HTTPException(status_code=409,
+                                detail="Aucune décision de ce relecteur sur cet article : votez d'abord.")
+        # `undecided` efface le vote : l'article revient dans la file de ce relecteur.
+        # `pending` est un vote à part entière (le « peut-être » d'un screening), qui sort
+        # l'article de la file sans le trancher.
+        new_status = None if payload.status == "undecided" else payload.status
+        row = conn.execute(text(f"""
+            UPDATE article_scenarios
+            SET {col}_status = :status,
+                {col}_reason = :reason,
+                {col}_decided_at = NOW(),
+                {col}_changes = COALESCE({col}_changes, 0) + 1,
+                kappa_resolved = FALSE,
+                kappa_final_status = NULL
+            WHERE scenario_id = :sid AND document_id = :article_id
+            RETURNING reviewer_1_status, reviewer_2_status, {col}_changes AS changes
+        """), {"status": new_status, "reason": payload.reason,
+               "sid": scenario_id, "article_id": payload.article_id}).mappings().first()
+        # Dans la MÊME transaction : ce que le sous-ensemble pertinent avait produit sur
+        # l'ancienne décision est périmé (une inclusion à la main entre et sort du corpus
+        # pertinent, donc les cartes et le clustering avec).
+        reset_corpus_derived_caches(conn, scenario_id)
+    return {
+        "scenario_id": scenario_id, "article_id": payload.article_id, "reviewer": reviewer,
+        "was": before["my_status"], "now": row["reviewer_1_status"] if reviewer == 1 else row["reviewer_2_status"],
+        "changes": int(row["changes"] or 0),
+        # Ce que ce changement a annulé, dit plutôt que fait en silence.
+        "arbitration_cleared": bool(before["kappa_final_status"]),
+        "agreement_recomputed": bool(before["kappa_resolved"]),
+    }
+
+
+@app.get("/user-scenarios/{scenario_id}/double-blind/decisions")
+def get_user_scenario_my_decisions(
+    scenario_id: str,
+    reviewer_code: str,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Ce que CE relecteur a décidé, du plus récent au plus ancien, pour le relire et le
+    changer.
+
+    Un vote partait et disparaissait : la file ne montre que ce qui reste à juger, et
+    rien ne disait ce qu'on avait déjà décidé, ni ne permettait de revenir dessus. Un
+    screening se relit, et une décision se corrige : c'est une exigence de la méthode,
+    pas un confort. Le changement passe par l'endpoint de décision habituel, qui réécrit
+    la colonne de ce relecteur."""
+    _get_user_scenario_or_404(scenario_id)
+    _ensure_decision_columns()
+    code = _normalise_reviewer_code(reviewer_code)
+    thr = _get_scenario_threshold(scenario_id)
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    with engine.begin() as conn:
+        reviewer = _reviewer_index_for_code(conn, scenario_id, code)
+        col, col_reason = f"reviewer_{reviewer}_status", f"reviewer_{reviewer}_reason"
+        col_prefix = f"reviewer_{reviewer}"
+        rows = conn.execute(text(f"""
+            SELECT ars.document_id AS id, d.title, d.year, d.journal, d.doi,
+                   ars.similarity_score, ars.rerank_score, ars.learned_score,
+                   ars.{col} AS my_status, ars.{col_reason} AS my_reason,
+                   ars.kappa_final_status,
+                   ars.{col_prefix}_decided_at AS decided_at,
+                   COALESCE(ars.{col_prefix}_changes, 0) AS changes,
+                   ({gate}) AS above_threshold
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND ars.{col} IS NOT NULL
+            ORDER BY ars.{col_prefix}_decided_at DESC NULLS LAST, ars.document_id DESC
+            LIMIT :lim OFFSET :off
+        """), {"sid": scenario_id, "thr": thr,
+               "lim": max(1, min(int(limit), 500)), "off": max(0, int(offset))}).mappings().all()
+        counts = conn.execute(text(f"""
+            SELECT COUNT(*) FILTER (WHERE ars.{col} = 'included')  AS included,
+                   COUNT(*) FILTER (WHERE ars.{col} = 'excluded')  AS excluded,
+                   COUNT(*) FILTER (WHERE ars.{col} IS NOT NULL)   AS total
+            FROM article_scenarios ars WHERE ars.scenario_id = :sid
+        """), {"sid": scenario_id}).mappings().first() or {}
+    return {
+        "scenario_id": scenario_id, "reviewer": reviewer, "reviewer_code": code,
+        "included": int(counts.get("included") or 0),
+        "excluded": int(counts.get("excluded") or 0),
+        "total": int(counts.get("total") or 0),
+        "decisions": [dict(r) for r in rows],
     }
 
 

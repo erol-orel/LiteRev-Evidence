@@ -1691,8 +1691,32 @@ def get_scenario_settings(scenario_id: str) -> dict[str, Any]:
     return out
 
 
+def _corpus_already_ingested(scenario_id: str) -> bool:
+    """Ce scénario a-t-il DÉJÀ ses articles ? Vrai quand la recherche s'est terminée et
+    que le corpus n'est pas vide.
+
+    C'est la condition pour qu'un seuil déclenche une reconstruction : sur un scénario
+    jamais peuplé, le pipeline commencerait par l'ÉTAPE D'INGESTION, c'est-à-dire par
+    interroger les sources. Appliquer un seuil ne lance pas une recherche, jamais.
+    Ne lève pas : en cas de doute, on ne lance rien."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT us.populate_status AS st,
+                       EXISTS (SELECT 1 FROM article_scenarios a
+                               WHERE a.scenario_id = us.id) AS has_links
+                FROM user_scenarios us WHERE us.id = :sid
+            """), {"sid": scenario_id}).mappings().fetchone()
+        return bool(row and row["has_links"] and (row["st"] or "") == "done")
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_corpus_already_ingested {scenario_id}: {_e}")
+        return False
+
+
 @app.patch("/scenarios/{scenario_id}/settings")
-def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
+def update_scenario_settings(scenario_id: str, payload: dict[str, Any],
+                             lang: str | None = None,
+                             _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Met à jour les paramètres du scénario (seuil, variables validées, etc.).
 
     Régler `similarity_threshold` est un CHOIX, daté (`similarity_threshold_set_at`) : le
@@ -1770,6 +1794,39 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
                 WHERE scenario_id = :sid
             """), {"sid": scenario_id})
 
+    # ── Un seuil appliqué REFAIT tout ce qui en dépend, tout de suite ────────────────
+    # Le seuil définit le sous-ensemble pertinent, et le sous-ensemble pertinent est
+    # l'entrée du texte intégral, du PICO, des métadonnées, du clustering, du graphe de
+    # connaissances, du brief, des variables, du modèle et des actions. Jusqu'ici,
+    # l'appliquer ne faisait qu'INVALIDER ces artefacts (juste au-dessus) : l'écran
+    # repartait vide et attendait que l'utilisateur presse un bouton par onglet. Pire,
+    # le pipeline SAUTE ces étapes tant qu'aucun seuil n'est choisi (`waiting_threshold`),
+    # et rien ne les reprenait ensuite : un scénario pouvait rester sans brief pour
+    # toujours alors que tout était prêt à le produire.
+    #
+    # La fédération n'est PAS relancée : l'étape d'ingestion d'un corpus déjà peuplé se
+    # saute d'elle-même, et les deux scores ne comblent que leurs manques (cf.
+    # needs_full_score_pass). Un seuil appliqué coûte donc le texte intégral, le PICO et
+    # les générations LLM, c'est-à-dire exactement le travail qu'il rend possible.
+    #
+    # ET SEULEMENT SUR UN CORPUS DÉJÀ RAMENÉ. Un seuil posé sur un scénario qui n'a
+    # jamais été peuplé n'a rien à reconstruire : lancer le pipeline lui ferait faire
+    # une RECHERCHE, c'est-à-dire exactement ce que « appliquer un seuil » ne doit
+    # jamais déclencher. Le test de la règle est donc l'ingestion, pas le nom du
+    # scénario.
+    rebuild = None
+    if ("similarity_threshold" in updates or "rerank_threshold" in updates) \
+            and str(scenario_id).startswith("usr-"):
+        try:
+            if _corpus_already_ingested(scenario_id):
+                from .scenarios import _launch_full_pipeline  # lazy: ordre de chargement
+                rebuild = _launch_full_pipeline(scenario_id, lang=lang)
+            else:
+                rebuild = "no_corpus"
+        except Exception as _e:                              # noqa: BLE001 - jamais bloquant
+            logger.warning(f"rebuild after threshold {scenario_id}: {_e}")
+            rebuild = "error"
+
     # Retourner l'objet settings complet mis à jour
     with engine.connect() as conn:
         updated_row = conn.execute(text("""
@@ -1785,6 +1842,9 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             "status": "updated",
             "scenario_id": scenario_id,
             "updated": list(updates.keys()),
+            # Ce que ce changement a relancé derrière : l'écran peut le dire au lieu de
+            # laisser croire qu'il ne s'est rien passé.
+            "rebuild": rebuild,
             "similarity_threshold": info["threshold"],
             "threshold_chosen": info["chosen"],
             "similarity_threshold_set_at": info["set_at"],
@@ -1795,7 +1855,8 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any], _: None 
             "variables_validated": bool(updated_row["variables_validated"]),
             "updated_at": updated_row["updated_at"].isoformat() if updated_row["updated_at"] else None,
         }
-    return {"status": "updated", "scenario_id": scenario_id, "updated": list(updates.keys())}
+    return {"status": "updated", "scenario_id": scenario_id, "updated": list(updates.keys()),
+            "rebuild": rebuild}
 
 
 # ─── Courbe du seuil : choisir par le NOMBRE d'articles, pas au jugé ─────────

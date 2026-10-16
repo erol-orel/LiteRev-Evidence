@@ -499,6 +499,26 @@ def test_the_digest_counts_every_relevant_extracted_article_and_only_those(extra
     assert "Not a pooled estimate" in d["crude_counts_note"]
 
 
+def test_the_digest_says_why_a_relevant_article_is_not_extracted(extracted, seeded):
+    """The tiles read as five numbers that ought to make one sum. They make two, and the
+    digest now carries both halves: extracted = full text + abstract, and relevant =
+    extracted + nothing to read (a title alone) + waiting its turn."""
+    d = extraction.extraction_digest(SID)
+    assert d["n_fulltext"] + d["n_abstract"] == d["n_extracted"]
+    assert d["n_title_only"] + d["n_waiting"] == d["n_unread"]
+    # Everything seeded carries an abstract, so the only unread article is simply waiting.
+    assert (d["n_title_only"], d["n_waiting"]) == (0, 1)
+
+    # 9703 is relevant because a reviewer included it, not because of a score: strip its
+    # abstract and its extraction and it becomes an article with nothing to read.
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE literature_document SET abstract = '', extraction_json = NULL WHERE id = 9703")
+    d2 = extraction.extraction_digest(SID)
+    assert d2["n_relevant"] == 4 and d2["n_extracted"] == 2
+    assert (d2["n_title_only"], d2["n_waiting"]) == (1, 2 - 1)
+    assert d2["n_title_only"] + d2["n_waiting"] == d2["n_unread"]
+
+
 def test_the_digest_follows_the_threshold_it_is_given(extracted):
     low = extraction.extraction_digest(SID, threshold=0.0)
     assert low["n_relevant"] == 5                       # 9704 (below 0.45) now counts; 9705 never does

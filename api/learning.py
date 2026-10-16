@@ -367,34 +367,70 @@ def get_learned_ranking(scenario_id: str, limit: int | None = None) -> dict[str,
     return learning_summary(scenario_id, suggested_limit=limit)
 
 
+def learned_ranking_rows(scenario_id: str, conn: Any = None) -> list[dict[str, Any]]:
+    """Every article left to screen, in the model's order, both sides of the threshold.
+
+    The export used to carry the below-threshold suggestions alone, which is the smaller
+    half of the question: a reviewer works through the articles above the threshold too,
+    and the model has an opinion on each of them. One ranking, with the side of the
+    threshold written on every row, so the file answers "what should I read next" without
+    the reader having to join two lists."""
+    own = conn is None
+    conn = conn or engine.connect()
+    try:
+        thr = _get_scenario_threshold(scenario_id)
+        undecided = (f"({screening_status_sql('d', 'ars')} IS DISTINCT FROM 'included'"
+                     f" AND {screening_status_sql('d', 'ars')} IS DISTINCT FROM 'excluded'"
+                     " AND ars.reviewer_1_status IS NULL AND ars.reviewer_2_status IS NULL"
+                     " AND ars.kappa_final_status IS NULL)")
+        gate = relevant_gate_sql("d", "ars", ":thr")
+        return [dict(r) for r in conn.execute(text(f"""
+            SELECT ars.document_id AS id, d.title, d.year, d.journal, d.doi,
+                   ars.learned_score, ars.similarity_score, ars.rerank_score,
+                   ({gate}) AS above_threshold
+            FROM article_scenarios ars
+            JOIN literature_document d ON d.id = ars.document_id
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+              AND {undecided} AND ars.learned_score IS NOT NULL
+            ORDER BY ars.learned_score DESC, ars.document_id
+        """), {"sid": scenario_id, "thr": thr}).mappings().all()]
+    finally:
+        if own:
+            conn.close()
+
+
 @app.get("/user-scenarios/{scenario_id}/learned-ranking/export")
 def export_learned_suggestions(scenario_id: str) -> Response:
-    """Every below-threshold article the model would include, as a CSV.
+    """Everything left to screen, in the model's order, as a CSV.
 
-    The card names five of them and the count said ninety-seven: a reviewer who wants to
-    work through the rest had nowhere to read them. Ordered as the model ranks them, with
-    the two scores beside each other so a reviewer sees what the similarity order missed.
+    Ordered as the model ranks them, with the two scores beside each other so a reviewer
+    sees what the similarity order missed, and the side of the threshold on every row.
     Opened in Excel, hence the BOM, as the other exports of this project."""
     import csv
     import io
     row = _get_user_scenario_or_404(scenario_id)
-    state = learning_summary(scenario_id, suggested_limit=SUGGESTED_LIMIT_MAX)
+    state = learning_summary(scenario_id, suggested_limit=1)
+    rows = learned_ranking_rows(scenario_id)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([f"# Scenario: {row['name']} ({scenario_id})"])
-    w.writerow([f"# Articles below the relevance threshold that the model would include,"
-                f" trained on {state.get('n_included', 0)} included and"
-                f" {state.get('n_excluded', 0)} decisions to exclude."
-                f" Cross-validated AUC {state.get('cv_auc')}."])
-    w.writerow(["rank", "id", "title", "year", "learned_score", "similarity_score", "url"])
-    for i, s in enumerate(state.get("suggested") or [], start=1):
-        w.writerow([i, s.get("id"), s.get("title"), s.get("year"),
+    w.writerow([f"# The {len(rows)} articles left to screen, in the order of a model trained on"
+                f" {state.get('n_included', 0)} included and {state.get('n_excluded', 0)}"
+                f" excluded decisions. Cross-validated AUC {state.get('cv_auc')}."
+                f" learned_score is the probability that this review would include the article;"
+                f" above_threshold says which side of the relevance threshold it sits on."])
+    w.writerow(["rank", "id", "title", "year", "journal", "doi", "learned_score",
+                "similarity_score", "rerank_score", "above_threshold", "url"])
+    for i, s in enumerate(rows, start=1):
+        w.writerow([i, s.get("id"), s.get("title"), s.get("year"), s.get("journal"), s.get("doi"),
                     f"{float(s['learned_score']):.4f}" if s.get("learned_score") is not None else "",
                     f"{float(s['similarity_score']):.4f}" if s.get("similarity_score") is not None else "",
+                    f"{float(s['rerank_score']):.4f}" if s.get("rerank_score") is not None else "",
+                    "yes" if s.get("above_threshold") else "no",
                     f"https://literev-scenario.com/scenarios/{scenario_id}?article={s.get('id')}"])
     return Response(content=buf.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition":
-                             f'attachment; filename="learned_suggestions_{scenario_id}.csv"'})
+                             f'attachment; filename="learned_ranking_{scenario_id}.csv"'})
 
 
 @app.post("/user-scenarios/{scenario_id}/learned-ranking/retrain")

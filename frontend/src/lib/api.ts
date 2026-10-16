@@ -1744,10 +1744,18 @@ export interface PicoBulkArticle {
   screening_status: string | null;
 }
 
+/** The two scopes the PICO list accepts. "relevant" is the default on both sides. */
+export type PicoScope = "relevant" | "all";
+
 export interface PicoBulkResponse {
   scenario_id: string;
   total: number;
   with_pico: number;
+  /** What the rows cover: the relevant subset (the default, and the only articles a PICO
+   *  is ever extracted for) or the whole scenario. */
+  scope?: PicoScope;
+  /** The whole scenario, always, so the tab can say "the 1,011 relevant of 52,765". */
+  corpus_total?: number;
   offset: number;
   limit: number;
   /** Rows in this page, and whether more remain (the endpoint pages, it never truncates silently). */
@@ -1758,17 +1766,22 @@ export interface PicoBulkResponse {
   articles: PicoBulkArticle[];
 }
 
-/** Every article of the scenario with its PICO, by following the pages to the end.
- *  The PICO tab claims to show "all articles": it must therefore hold all of them. */
+/** Every article OF THE SCOPE with its PICO, by following the pages to the end.
+ *
+ *  The scope is what keeps this finite. Asked for the whole corpus it walked forty pages
+ *  of five thousand articles: 66 MB of JSON on the ISS strategy, over 100 MB on the COVID
+ *  exposure review, and a tab that never stopped loading. The PICO only exists for the
+ *  relevant articles, so that is the default, and the rest is one explicit choice away. */
 export async function fetchAllScenarioPico(
   scenarioId: string,
   maxPages = 40,
+  scope: PicoScope = "relevant",
 ): Promise<PicoBulkResponse> {
-  const first = await fetchScenarioPicoBulk(scenarioId, 5000, 0);
+  const first = await fetchScenarioPicoBulk(scenarioId, 5000, 0, scope);
   const all = [...first.articles];
   let next = first.truncated ? first.next_offset ?? null : null;
   for (let page = 1; next !== null && page < maxPages; page++) {
-    const chunk = await fetchScenarioPicoBulk(scenarioId, 5000, next);
+    const chunk = await fetchScenarioPicoBulk(scenarioId, 5000, next, scope);
     all.push(...chunk.articles);
     next = chunk.truncated ? chunk.next_offset ?? null : null;
   }
@@ -1779,10 +1792,11 @@ export async function fetchAllScenarioPico(
 export async function fetchScenarioPicoBulk(
   scenarioId: string,
   limit = 100000,
-  offset = 0
+  offset = 0,
+  scope: PicoScope = "relevant",
 ): Promise<PicoBulkResponse> {
   const base = scenarioBase(scenarioId);
-  const r = await safeFetch(`${base}/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}`);
+  const r = await safeFetch(`${base}/${scenarioId}/pico-bulk?limit=${limit}&offset=${offset}&scope=${scope}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
@@ -1821,6 +1835,10 @@ export interface ExtractionDigest {
   n_fulltext: number;
   n_abstract: number;
   n_unread: number;
+  /** Why a relevant paper is not extracted: nothing to read (a title alone), or waiting
+   *  its turn. The two split `n_unread`, so the tiles add up. */
+  n_title_only?: number;
+  n_waiting?: number;
   coverage: Record<string, number>;
   coverage_fulltext: Record<string, number>;
   by_sheet: { sheet: string; n_rows: number; n_articles: number; n_quote_found: number }[];
@@ -2337,6 +2355,10 @@ export function codebookExportUrl(scenarioId: string): string {
 export interface EvidenceBriefData {
   scenario_id: string;
   generated_at: string;
+  /** Served from the cache the pipeline fills, rather than recomputed on opening the
+   *  tab (six aggregates over the whole corpus: ten to fourteen seconds). */
+  cached?: boolean;
+  cached_at?: string | null;
   corpus_stats: {
     total: number;
     duplicates: number;
@@ -2581,7 +2603,15 @@ export async function fetchKnowledgeGraph(
 export interface RagMeta {
   papers_used: number;
   papers_with_fulltext: number;
+  /** The two other reading states, exclusive of the first: a full text already carries
+   *  the title and the abstract. The three add up to `papers_used`. */
+  papers_abstract_only?: number;
+  papers_title_only?: number;
   papers_retrieved?: number;
+  /** The passages those relevant papers offer to the search (embedded chunks), and the
+   *  ones this answer took: one per paper, so `chunks_used` equals `papers_retrieved`. */
+  chunks_total?: number;
+  chunks_used?: number;
   digest_complete?: boolean;
   threshold: number;
 }
@@ -2725,6 +2755,48 @@ export interface DoubleBlindQueue {
 /** The articles THIS reviewer has not voted on yet. Until now there was no way to cast
  *  a double-blind vote at all: the panel's only buttons were the arbitration ones, and
  *  the conflicts list can only fill once both reviewers have voted. */
+/** Ce que CE relecteur a déjà décidé, du plus récent au plus ancien. */
+export interface MyDecision {
+  id: number; title: string; year?: number | null; journal?: string | null; doi?: string | null;
+  similarity_score?: number | null; rerank_score?: number | null; learned_score?: number | null;
+  my_status: string; my_reason?: string | null; kappa_final_status?: string | null;
+  decided_at?: string | null; changes?: number; above_threshold?: boolean;
+}
+
+export interface MyDecisions {
+  scenario_id: string; reviewer: number; reviewer_code: string;
+  included: number; excluded: number; total: number; decisions: MyDecision[];
+}
+
+export async function fetchMyDoubleBlindDecisions(
+  scenarioId: string,
+  reviewerCode: string,
+  limit = 200,
+): Promise<MyDecisions> {
+  const base = scenarioBase(scenarioId);
+  const qs = new URLSearchParams({ reviewer_code: reviewerCode, limit: String(limit) });
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/decisions?${qs}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Revenir sur sa propre décision. `undecided` la retire et remet l'article dans la file. */
+export async function changeDoubleBlindDecision(
+  scenarioId: string,
+  payload: { article_id: number; status: "included" | "excluded" | "pending" | "undecided";
+             reason?: string | null; reviewer_code: string },
+): Promise<{ was: string | null; now: string | null; changes: number;
+             arbitration_cleared: boolean; agreement_recomputed: boolean }> {
+  const base = scenarioBase(scenarioId);
+  const r = await safeFetch(`${base}/${scenarioId}/double-blind/decision/change`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
 export async function fetchDoubleBlindQueue(
   scenarioId: string,
   reviewerCode: string,
@@ -4357,6 +4429,10 @@ export interface SubsetSelection {
   /** Vocabulary labels from `api/study_design`, as the charts display them. */
   designs?: string[];
   levels?: string[];
+  /** ISO2 codes of the countries to keep, as the Geography tab resolves them from each
+   *  paper's own text, plus the pseudo-code "EUROPE" for every NUTS country at once
+   *  (it also keeps the European papers that name no single country). */
+  countries?: string[];
   combine?: "any" | "all";
   unassigned?: "keep" | "exclude";
   reason?: string;

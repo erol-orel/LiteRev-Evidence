@@ -717,7 +717,8 @@ CORPUS_DERIVED_CACHE_RESET = """
     concept_graph_json = NULL, concept_graph_generated_at = NULL,
     recommended_actions_json = NULL, recommended_actions_lang = NULL,
     actions_generated_at = NULL,
-    seir_projection_json = NULL, seir_projection_generated_at = NULL
+    seir_projection_json = NULL, seir_projection_generated_at = NULL,
+    evidence_brief_json = NULL, evidence_brief_at = NULL
 """
 
 

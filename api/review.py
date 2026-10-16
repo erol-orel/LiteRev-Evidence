@@ -571,38 +571,61 @@ def get_user_scenario_prisma(
     }
 
 
+#: Les deux portées de la liste PICO. `relevant` est le défaut, et c'est le seul qui ait
+#: du sens par défaut : le PICO ne s'extrait QUE sur les articles pertinents, donc servir
+#: tout le scénario, c'est envoyer cinquante mille lignes vides pour en montrer mille.
+PICO_SCOPES = ("relevant", "all")
+
+
 @app.get("/user-scenarios/{scenario_id}/pico-bulk")
-def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0) -> dict[str, Any]:
-    """Articles d'un scénario utilisateur avec leur PICO extrait, PAGINÉS.
+def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: int = 0,
+                                scope: str = "relevant") -> dict[str, Any]:
+    """Articles d'un scénario avec leur PICO extrait, PAGINÉS, et par défaut PERTINENTS.
 
     Une page vaut au plus `PICO_BULK_MAX_PAGE` articles (borne mémoire : un
     ?limit=100000000 matérialiserait toute la jointure en RAM/JSON). La réponse dit
-    combien d'articles existent (`total`), combien sont renvoyés et s'il en reste
-    (`truncated`, `next_offset`) : elle annonçait « tous les articles » en n'en servant
-    que les 5 000 premiers, sans autre signal que le `limit` renvoyé."""
+    combien d'articles existent dans la portée (`total`), combien en porte le corpus
+    entier (`corpus_total`), combien sont renvoyés et s'il en reste (`truncated`,
+    `next_offset`).
+
+    La PORTÉE est la correction du défaut qui faisait tourner l'onglet PICO sans fin.
+    L'onglet suivait les pages jusqu'à quarante, sur TOUT le scénario : 52 765 articles
+    pour la stratégie ISS (66 Mo de JSON), 86 716 pour l'exposition COVID (plus de
+    100 Mo). Chaque page revenait en deux ou trois secondes, donc rien ne paraissait
+    cassé ; c'est le navigateur qui ne finissait jamais. Et c'était inutile : le PICO ne
+    s'extrait que sur les articles pertinents, si bien que 51 700 de ces lignes ne
+    portaient qu'un `has_pico: false`. `scope=all` reste à un paramètre de distance."""
     _get_user_scenario_or_404(scenario_id)
+    scope = (scope or "relevant").strip().lower()
+    if scope not in PICO_SCOPES:
+        raise HTTPException(status_code=422,
+                            detail=f"scope doit valoir {' ou '.join(PICO_SCOPES)}, pas « {scope} ».")
     _requested = max(1, int(limit))
     limit = min(_requested, PICO_BULK_MAX_PAGE)
     offset = max(0, int(offset))
+    thr = _get_scenario_threshold(scenario_id)
+    _in_scope = ("AND " + relevant_gate_sql(doc="d", link="ars", thr=":thr")) if scope == "relevant" else ""
+    _params = {"sid": scenario_id, "thr": thr}
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
-            SELECT d.id, d.title, d.abstract, d.year, d.source, d.authors, d.doi, d.journal,
+            SELECT d.id, d.title, d.year, d.source, d.authors, d.doi, d.journal,
                    d.study_design, d.pico_json, d.pico_extracted_at, {screening_status_sql('d', 'ars')} AS screening_status
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
-            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
+            WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE {_in_scope}
             ORDER BY
                 CASE WHEN d.pico_json IS NOT NULL THEN 0 ELSE 1 END,
                 d.year DESC NULLS LAST, d.id DESC
             LIMIT :limit OFFSET :offset
-        """), {"sid": scenario_id, "limit": limit, "offset": offset}).mappings().fetchall()
-        total_row = conn.execute(text("""
-            SELECT COUNT(*) AS total,
-                   COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL) AS with_pico
+        """), {**_params, "limit": limit, "offset": offset}).mappings().fetchall()
+        total_row = conn.execute(text(f"""
+            SELECT COUNT(*) FILTER (WHERE TRUE {_in_scope}) AS total,
+                   COUNT(*) FILTER (WHERE d.pico_json IS NOT NULL {_in_scope}) AS with_pico,
+                   COUNT(*) AS corpus_total
             FROM article_scenarios ars
             JOIN literature_document d ON d.id = ars.document_id
             WHERE ars.scenario_id = :sid AND d.is_duplicate IS NOT TRUE
-        """), {"sid": scenario_id}).mappings().fetchone()
+        """), _params).mappings().fetchone()
     articles = []
     for r in rows:
         pico = r["pico_json"] if r["pico_json"] else None
@@ -629,7 +652,11 @@ def get_user_scenario_pico_bulk(scenario_id: str, limit: int = 100000, offset: i
     _returned = len(articles)
     return {
         "scenario_id": scenario_id,
+        "scope": scope,
         "total": _total,
+        # Le corpus entier, toujours : l'onglet annonce « les 1 011 pertinents sur les
+        # 52 765 du corpus » au lieu de laisser croire que le corpus en compte 1 011.
+        "corpus_total": int(total_row["corpus_total"]) if total_row else 0,
         "with_pico": int(total_row["with_pico"]) if total_row else 0,
         "offset": offset,
         "limit": limit,

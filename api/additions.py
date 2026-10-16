@@ -784,3 +784,133 @@ def list_scenario_additions(scenario_id: str, limit: int = 500) -> dict[str, Any
                               {"s": scenario_id}).scalar() or 0)
     return {"scenario_id": scenario_id, "total": total,
             "articles": [{**dict(r), "added_at": r["added_at"].isoformat() if r["added_at"] else None} for r in rows]}
+
+
+# ── Les notices sans résumé : aller le chercher plutôt que les juger sur le titre ──────
+# Une recherche fédérée ramène des notices que leur base rend sans résumé : 402 des 8 164
+# articles d'une revue HPAI, 4 182 sur une autre. Elles ne peuvent pas être scorées (le
+# score lit le titre et le résumé), donc elles attendent un relecteur qui les juge sur
+# leur seul titre. Or le résumé existe souvent ailleurs : 222 de ces 402 portent un DOI,
+# et Crossref ou OpenAlex le connaissent. Les chercher transforme du bruit en preuve.
+#: Un job par scénario, en mémoire, comme les autres travaux de fond.
+_abstract_jobs: dict[str, dict[str, Any]] = {}
+#: Pause entre deux appels, pour rester poli avec des API publiques et gratuites.
+ABSTRACT_FETCH_PAUSE_S = 0.2
+
+
+def _openalex_abstract_by_doi(doi: str) -> str | None:
+    """Le résumé qu'OpenAlex garde pour ce DOI, reconstruit depuis son index inversé."""
+    import requests
+    from urllib.parse import quote
+    from .sources import openalex_params
+    try:
+        r = requests.get(f"https://api.openalex.org/works/doi:{quote(doi, safe='')}",
+                         params=openalex_params({"select": "abstract_inverted_index"}),
+                         headers={"User-Agent": USER_AGENT}, timeout=20)
+        if r.status_code != 200:
+            return None
+        inv = (r.json() or {}).get("abstract_inverted_index")
+    except Exception as e:                                   # noqa: BLE001 - jamais fatal
+        from .core import redact_keys
+        logger.info(f"openalex abstract {doi}: {redact_keys(str(e))}")
+        return None
+    if not inv:
+        return None
+    words: dict[int, str] = {}
+    for w, positions in inv.items():
+        for pos in positions:
+            words[int(pos)] = w
+    return _clean(" ".join(words[i] for i in sorted(words))) or None
+
+
+def _articles_missing_an_abstract(scenario_id: str) -> list[dict[str, Any]]:
+    """Les articles de ce scénario sans résumé exploitable ET avec un DOI : les seuls
+    qu'on puisse aller compléter."""
+    from .scenario_store import has_abstract_sql
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(f"""
+            SELECT d.id, d.doi
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND (d.is_duplicate IS NULL OR d.is_duplicate = FALSE)
+              AND NOT {has_abstract_sql('d')}
+              AND d.doi IS NOT NULL AND length(trim(d.doi)) > 5
+            ORDER BY d.id
+        """), {"sid": scenario_id}).mappings().all()]
+
+
+def fetch_missing_abstracts(scenario_id: str, limit: int = 0) -> dict[str, Any]:
+    """Compléter les résumés manquants depuis Crossref, puis OpenAlex. Renvoie le compte.
+
+    Écrit UNIQUEMENT le résumé : rien d'autre de la notice n'est touché, et un article
+    qui en reçoit un redevient scorable (son chunk est reconstruit, le scoring
+    automatique le reprendra)."""
+    import time as _t
+    rows = _articles_missing_an_abstract(scenario_id)
+    if limit and limit > 0:
+        rows = rows[:limit]
+    job = _abstract_jobs.setdefault(scenario_id, {})
+    job.update({"running": True, "candidates": len(rows), "done": 0, "filled": 0,
+                "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None})
+    filled = 0
+    for r in rows:
+        doi = (r.get("doi") or "").strip()
+        abstract = None
+        try:
+            got = crossref_by_doi(doi)
+            abstract = (got or {}).get("abstract") or None
+            if not abstract:
+                abstract = _openalex_abstract_by_doi(doi)
+        except Exception as e:                               # noqa: BLE001 - jamais fatal
+            logger.info(f"abstract {doi}: {e}")
+        if abstract and len(abstract) > 30:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        UPDATE literature_document SET abstract = :a
+                        WHERE id = :id AND (abstract IS NULL OR length(trim(abstract)) <= 30)
+                    """), {"a": abstract, "id": int(r["id"])})
+                filled += 1
+            except Exception as e:                           # noqa: BLE001
+                logger.warning(f"abstract write {r['id']}: {e}")
+        job["done"] = job.get("done", 0) + 1
+        job["filled"] = filled
+        _t.sleep(ABSTRACT_FETCH_PAUSE_S)
+    # Un résumé arrivé rend l'article scorable : son chunk est reconstruit, puis le
+    # scoring automatique s'en occupe (il ne note que ce qui n'a pas de note).
+    if filled:
+        try:
+            from .relevance import _backfill_title_abstract_chunks, _maybe_autorerank
+            _backfill_title_abstract_chunks(scenario_id)
+            _maybe_autorerank(scenario_id)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"after abstracts {scenario_id}: {e}")
+    job.update({"running": False, "finished_at": datetime.now(timezone.utc).isoformat()})
+    return {"candidates": len(rows), "filled": filled, "scenario_id": scenario_id}
+
+
+@app.get("/user-scenarios/{scenario_id}/abstracts/missing")
+def get_missing_abstracts(scenario_id: str) -> dict[str, Any]:
+    """Combien de notices sans résumé pourraient en recevoir un, et où en est la recherche."""
+    rows = _articles_missing_an_abstract(scenario_id)
+    job = dict(_abstract_jobs.get(scenario_id) or {})
+    return {"scenario_id": scenario_id, "with_doi": len(rows), **job}
+
+
+@app.post("/user-scenarios/{scenario_id}/abstracts/fetch")
+def start_fetch_missing_abstracts(
+    scenario_id: str,
+    limit: int = 0,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Aller chercher les résumés manquants, en arrière-plan."""
+    import threading
+    job = _abstract_jobs.get(scenario_id)
+    if job and job.get("running"):
+        return {"status": "already_running", **job}
+    rows = _articles_missing_an_abstract(scenario_id)
+    if not rows:
+        return {"status": "nothing_to_do", "candidates": 0}
+    threading.Thread(target=fetch_missing_abstracts, args=(scenario_id, limit),
+                     daemon=True, name=f"abstracts-{scenario_id}").start()
+    return {"status": "started", "candidates": len(rows)}

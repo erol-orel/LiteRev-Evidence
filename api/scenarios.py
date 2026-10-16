@@ -1493,7 +1493,8 @@ def _launch_full_pipeline(scenario_id: str, max_results: int = LIVE_MAX_PER_SOUR
             "current_step": "ingest",
             "steps": {k: {"status": "pending"} for k in (
                 "ingest", "fulltext", "embed", "rerank", "pico", "metadata",
-                "clustering", "knowledge_graph", "evidence", "variables", "actions")},
+                "extraction", "clustering", "knowledge_graph", "evidence", "variables",
+                "actions")},
             "lang": _norm_lang(lang) or "fr",
         }
     # Persister l'état « démarre » et la langue : un redémarrage du serveur relance le
@@ -1552,7 +1553,7 @@ def start_user_scenario_pipeline(
         # que l'étape « actions » tourne, donc la barre de progression annonçait un
         # scénario terminé pendant que les actions recommandées se généraient encore.
         "steps": ["ingest", "embed", "semantic_scoring", "cross_encoder", "fulltext", "pico", "metadata",
-                  "clustering", "knowledge_graph", "evidence", "variables", "actions"],
+                  "extraction", "clustering", "knowledge_graph", "evidence", "variables", "actions"],
     }
 
 

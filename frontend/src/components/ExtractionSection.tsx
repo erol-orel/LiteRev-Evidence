@@ -1,6 +1,6 @@
 import React from "react";
 import {
-  AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Download, Info, Loader2,
+  AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Download, Loader2,
   RotateCcw, Sparkles, Table2,
 } from "lucide-react";
 import { currentLang, useI18n } from "../i18n/LanguageProvider";
@@ -218,6 +218,20 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         ))}
       </div>
 
+      {/* La seule phrase qui fait tomber les tuiles juste. Elles se lisaient comme cinq
+          nombres devant faire une somme ; ils en font deux, et les voici. */}
+      <p className="text-[11px] text-white/50">
+        {T("tilesAddUp")
+          .replace("{relevant}", status.n_relevant.toLocaleString())
+          .replace("{extracted}", extracted.toLocaleString())
+          .replace("{fulltext}", status.n_from_fulltext.toLocaleString())
+          .replace("{abstract}", status.n_from_abstract.toLocaleString())
+          .replace("{unread}", Math.max(0, status.n_relevant - extracted).toLocaleString())}
+        {(digest.n_title_only ?? 0) > 0 && (
+          " " + T("tilesTitleOnly").replace("{n}", String(digest.n_title_only))
+        )}
+      </p>
+
       {/* Progress, run, downloads */}
       <div className="rounded-xl border border-white/5 bg-white/2 p-3 space-y-3">
         <div>
@@ -301,12 +315,6 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
         )}
       </div>
 
-      {status.n_from_abstract > 0 && (
-        <div className="flex items-start gap-2 rounded-xl border border-gold-400/20 bg-gold-400/5 px-3 py-2 text-[11px] text-gold-400/90">
-          <Info size={13} className="mt-0.5 shrink-0" />
-          <span>{T("abstractWarning").replace("{n}", String(status.n_from_abstract))}</span>
-        </div>
-      )}
 
       {extracted === 0 ? (
         <div className="rounded-2xl border border-white/5 bg-white/2 px-4 py-8 text-center text-xs text-white/45">
@@ -362,7 +370,9 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
 
           <CodebookPanel scenarioId={scenarioId} onChanged={() => { void reload(); }} />
 
-          <GeographyPanel scenarioId={scenarioId} />
+          {/* Narrowing by country changes the corpus, so the panels above it are stale
+              the moment it is applied: the same reload the codebook uses. */}
+          <GeographyPanel scenarioId={scenarioId} onNarrowed={() => { void reload(); }} />
 
           {/* Rows by sheet */}
           {digest.by_sheet.length > 0 && (
