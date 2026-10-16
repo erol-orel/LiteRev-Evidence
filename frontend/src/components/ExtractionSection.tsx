@@ -370,7 +370,9 @@ export function ExtractionSection({ scenarioId }: { scenarioId: string }) {
 
           <CodebookPanel scenarioId={scenarioId} onChanged={() => { void reload(); }} />
 
-          <GeographyPanel scenarioId={scenarioId} />
+          {/* Narrowing by country changes the corpus, so the panels above it are stale
+              the moment it is applied: the same reload the codebook uses. */}
+          <GeographyPanel scenarioId={scenarioId} onNarrowed={() => { void reload(); }} />
 
           {/* Rows by sheet */}
           {digest.by_sheet.length > 0 && (

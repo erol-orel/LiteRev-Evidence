@@ -1,8 +1,11 @@
 import React from "react";
-import { AlertTriangle, Upload } from "lucide-react";
+import { AlertTriangle, Loader2, Upload } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
-import { fetchGeography, fetchNutsStatus, hasApiKey, importNutsCsv } from "../lib/api";
-import type { GeographyResponse, GeoUnresolvedReason } from "../lib/api";
+import {
+  applyScenarioSubset, fetchGeography, fetchNutsStatus, hasApiKey, importNutsCsv,
+  previewScenarioSubset,
+} from "../lib/api";
+import type { GeographyResponse, GeoUnresolvedReason, SubsetPlan } from "../lib/api";
 import { share } from "../lib/extraction";
 
 const TOP = 15;
@@ -11,8 +14,17 @@ const NO_PLACE_KEY = "(no place stated)";
 
 /** Where the studies took place: a country per bar, its regions beneath, and the places that could
  *  not be resolved. Counted over ALL the extracted relevant articles. The NUTS list in use is said,
- *  and an administrator can load Eurostat's official file to resolve the rest of Europe. */
-export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
+ *  and an administrator can load Eurostat's official file to resolve the rest of Europe.
+ *
+ *  A country can also be TICKED. Reading the bars, the next question is always "and now give me
+ *  only those", so the panel narrows the corpus to the countries chosen, through the same
+ *  mechanism as the clusters: a preview first, then an exclusion carrying its reason into PRISMA,
+ *  undoable from the Corpus tab. Everything downstream then speaks of that sub-corpus. */
+export function GeographyPanel({ scenarioId, onNarrowed }: {
+  scenarioId: string;
+  /** Called once a narrowing is applied: the corpus just changed under every panel. */
+  onNarrowed?: () => void;
+}) {
   const { t } = useI18n();
   const T = (k: string) => t(`scenarioDetail.extraction.geo.${k}`);
   const [g, setG] = React.useState<GeographyResponse | null>(null);
@@ -23,6 +35,13 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
   const [showAll, setShowAll] = React.useState(false);   // every country, every region
   const fileRef = React.useRef<HTMLInputElement>(null);
   const keyed = hasApiKey();
+  // The countries ticked, the preview they produce, and what the apply said.
+  const [picked, setPicked] = React.useState<string[]>([]);
+  const [plan, setPlan] = React.useState<SubsetPlan | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [narrowNote, setNarrowNote] = React.useState<string | null>(null);
+  const toggle = (iso: string) =>
+    setPicked((p) => (p.includes(iso) ? p.filter((x) => x !== iso) : [...p, iso]));
 
   const load = React.useCallback(
     () => Promise.all([fetchGeography(scenarioId), fetchNutsStatus()]),
@@ -35,6 +54,34 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
       .catch((e: Error) => { if (alive) setError(e.message); });
     return () => { alive = false; };
   }, [load]);
+
+  // The preview follows the ticks, and never writes anything.
+  React.useEffect(() => {
+    if (!picked.length) { setPlan(null); return; }
+    let alive = true;
+    setNarrowNote(null);
+    previewScenarioSubset(scenarioId, { countries: picked })
+      .then((p) => { if (alive) setPlan(p); })
+      .catch((e: Error) => { if (alive) { setPlan(null); setNarrowNote(e.message); } });
+    return () => { alive = false; };
+  }, [scenarioId, picked]);
+
+  const applyNarrowing = async () => {
+    if (!picked.length) return;
+    setBusy(true); setNarrowNote(null);
+    try {
+      const out = await applyScenarioSubset(scenarioId, { countries: picked });
+      setNarrowNote(T("narrowApplied").replace("{n}", String(out.applied ?? out.exclude ?? 0)));
+      setPicked([]); setPlan(null);
+      const [geo, st] = await load();
+      setG(geo); setRegions(st.n_regions);
+      onNarrowed?.();
+    } catch (e) {
+      setNarrowNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const upload = async (file: File | undefined) => {
     if (!file) return;
@@ -70,6 +117,11 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
             {T("inEurope").replace("{n}", String(g.n_in_europe)).replace("{total}", String(g.n_papers))}
             {g.n_in_europe_without_country ? " " + T("inEuropeNoCountry")
               .replace("{n}", String(g.n_in_europe_without_country)) : ""}
+            {/* The one selection nobody wants to assemble by hand, country by country. */}
+            <button onClick={() => setPicked(["EUROPE"])}
+              className="ml-2 underline underline-offset-2 text-brand-300/90 hover:text-brand-300">
+              {T("narrowEurope")}
+            </button>
           </p>
         )}
       </div>
@@ -79,7 +131,15 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
           {top.map((c) => (
             <div key={c.iso2}>
               <div className="flex items-center gap-3 text-[11px]">
-                <span className="w-36 shrink-0 truncate text-white/80" title={c.name}>{c.name}</span>
+                {/* Ticking a country is the start of a narrowing, so the whole label is the
+                    control: a 11px checkbox alone is a target nobody hits. */}
+                <label className="flex w-36 shrink-0 items-center gap-1.5 cursor-pointer" title={c.name}>
+                  <input type="checkbox" checked={picked.includes(c.iso2)}
+                    onChange={() => toggle(c.iso2)}
+                    aria-label={T("narrowPick").replace("{country}", c.name)}
+                    className="h-3 w-3 shrink-0 accent-[rgb(var(--brand-500))]" />
+                  <span className={`truncate ${picked.includes(c.iso2) ? "text-brand-300" : "text-white/80"}`}>{c.name}</span>
+                </label>
                 <div className="h-3 flex-1 overflow-hidden rounded-sm bg-white/5">
                   <div className="h-full rounded-sm bg-brand-500" style={{ width: `${share(c.n_papers, max)}%` }} />
                 </div>
@@ -99,6 +159,36 @@ export function GeographyPanel({ scenarioId }: { scenarioId: string }) {
               )}
             </div>
           ))}
+          {/* The narrowing bar: what the ticks would do, then the one button that does it.
+              It only appears once something is ticked, so the panel stays a panel. */}
+          {picked.length > 0 && (
+            <div className="mt-1 rounded-xl border border-brand-500/25 bg-brand-500/5 px-3 py-2 space-y-1.5">
+              <p className="text-[11px] text-brand-200">
+                {T("narrowPicked").replace("{n}", String(picked.length))}
+              </p>
+              {plan && (
+                <p className="text-[10px] text-white/55">
+                  {T("narrowPlan")
+                    .replace("{keep}", plan.keep.toLocaleString())
+                    .replace("{relevant}", plan.relevant.toLocaleString())
+                    .replace("{exclude}", plan.exclude.toLocaleString())}
+                  {plan.undecided > 0 && " " + T("narrowUnjudged").replace("{n}", plan.undecided.toLocaleString())}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {keyed ? (
+                  <button onClick={() => void applyNarrowing()} disabled={busy || !plan || plan.keep === 0}
+                    className="flex items-center gap-1.5 rounded-lg border border-brand-500/40 bg-brand-500/15 px-2.5 py-1 text-[11px] font-medium text-brand-300 hover:bg-brand-500/25 transition disabled:opacity-50">
+                    {busy && <Loader2 size={11} className="animate-spin" />}{T("narrowApply")}
+                  </button>
+                ) : <span className="text-[10px] text-white/40">{T("narrowNeedsKey")}</span>}
+                <button onClick={() => { setPicked([]); setPlan(null); }}
+                  className="text-[10px] text-white/45 underline hover:text-white">{T("narrowClear")}</button>
+              </div>
+              <p className="text-[10px] text-white/35 leading-4">{T("narrowHint")}</p>
+            </div>
+          )}
+          {narrowNote && <p className="text-[10px] text-gold-300/80">{narrowNote}</p>}
           {(g.countries.length > TOP || g.countries.some((c) => c.regions.length > 10)) && (
             <p className="text-[10px] text-white/35">
               {!showAll && g.countries.length > TOP && <>{T("more").replace("{n}", String(g.countries.length - TOP))} </>}

@@ -60,6 +60,8 @@ def plan_subset(
     designs_wanted: set[str] | None = None,
     level_of: dict[int, str] | None = None,
     levels_wanted: set[str] | None = None,
+    country_of: dict[int, str] | None = None,
+    countries_wanted: set[str] | None = None,
     combine: str = "all",
     unassigned: str = "keep",
     # Les articles qu'un relecteur a INCLUS À LA MAIN. Ils ne sont jamais exclus par
@@ -136,9 +138,25 @@ def plan_subset(
             return "in" if level in wanted_levels else "out"
 
         verdicts.append(("levels", _level))
+    if country_of is not None:
+        wanted_countries = countries_wanted or set()
+
+        def _country(i: int) -> str:
+            # Le lieu de l'ÉTUDE, résolu à la lecture comme dans l'onglet Géographie. Un
+            # article dont aucun lieu ne se résout ne vote pas : la carte ne dit pas qu'il
+            # est ailleurs, elle ne dit rien de lui. Un article européen sans pays unique
+            # (« Europe », deux pays à la fois) porte la clé EUROPE : il EST jugeable,
+            # mais seulement par une sélection qui demande l'Europe.
+            key = country_of.get(i)
+            if key is None:
+                return "unknown"
+            return "in" if key in wanted_countries else "out"
+
+        verdicts.append(("countries", _country))
 
     if not verdicts:
-        raise ValueError("aucune dimension de sélection : donnez des clusters, des concepts, des devis d'étude ou des niveaux de preuve")
+        raise ValueError("aucune dimension de sélection : donnez des clusters, des concepts, "
+                         "des devis d'étude, des niveaux de preuve ou des pays")
 
     keep: list[int] = []
     drop: list[int] = []
@@ -196,7 +214,8 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
                        concepts: list[str] | None, combine: str, unassigned: str,
                        threshold: float | None = None,
                        designs: list[str] | None = None,
-                       levels: list[str] | None = None) -> str:
+                       levels: list[str] | None = None,
+                       countries: list[str] | None = None) -> str:
     """La phrase stockée dans `screening_reason`, donc celle que lira la PRISMA et qui
     devra tenir dans une section Méthodes. Elle nomme ce qui a été GARDÉ, pas un
     identifiant de calcul : les numéros de cluster changent au recalcul suivant.
@@ -218,6 +237,10 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
         parts.append("devis " + ", ".join(designs))
     if levels:
         parts.append("niveaux de preuve " + ", ".join(levels))
+    # Les pays sont nommés, eux aussi : « hors de pays Italie, France » se lit dans une
+    # section Méthodes, « hors de IT, FR » non.
+    if countries:
+        parts.append("pays " + ", ".join(countries))
     joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
     # Le seuil EN TÊTE : le motif est coupé à 480 caractères, et une longue sélection
@@ -385,6 +408,63 @@ def _design_membership(scenario_id: str, threshold: float) -> tuple[dict[int, st
     return design_of, level_of, meta
 
 
+#: La clé que porte un article EUROPÉEN DONT LE PAYS N'EST PAS UNIQUE (« Europe »,
+#: « Germany and the Netherlands »). La carte ne peut pas le poser sur un pays, mais la
+#: question « garder l'Europe » le concerne, et le laisser « non jugé » le ferait entrer
+#: dans un sous-corpus italien. Ce n'est pas un code ISO : aucun pays ne s'appelle ainsi.
+EUROPE_KEY = "EUROPE"
+
+
+def _country_membership(scenario_id: str, threshold: float) -> tuple[dict[int, str], dict]:
+    """(article -> pays, méta). Le pays de l'ÉTUDE, pas celui des auteurs.
+
+    Lu exactement comme l'onglet Géographie et comme le digest : le texte de lieu que
+    l'extraction a relevé (« Lombardy, Italy »), passé au résolveur et à l'index NUTS.
+    `literature_document.country` est presque toujours vide, le croiser en SQL donnerait
+    zéro partout.
+
+    Un article sans extraction, ou dont le lieu ne se résout pas, n'est PAS dans la carte
+    renvoyée : il reste `unknown` pour la sélection, donc gardé. C'est la même règle que
+    pour le clustering plafonné : une absence de réponse n'est pas un avis."""
+    from .geography import COUNTRY_NAME, NUTS_ISO, get_nuts_index, resolve_location
+
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    index = get_nuts_index()
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT d.id, d.country AS country,
+                   d.extraction_json->'ref'->>'location' AS location
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {gate}
+              AND jsonb_typeof(d.extraction_json) = 'object'
+        """), {"sid": scenario_id, "thr": threshold}).mappings().all()
+
+    of: dict[int, str] = {}
+    counts: dict[str, int] = {}
+    n_extracted = len(rows)
+    for r in rows:
+        got = resolve_location(r["location"], r["country"], index) or {}
+        iso = got.get("country")
+        key = iso or (EUROPE_KEY if got.get("in_europe") is True else None)
+        if not key:
+            continue
+        of[int(r["id"])] = key
+        counts[key] = counts.get(key, 0) + 1
+    meta = {
+        "n_extracted": n_extracted,
+        "n_placed": len(of),
+        # Ceux que la sélection ne saura pas juger : pas d'extraction, ou pas de lieu.
+        "n_unplaced": n_extracted - len(of),
+        "europe_key": EUROPE_KEY,
+        "europe_iso": sorted(NUTS_ISO),
+        "countries": [{"value": k, "name": (COUNTRY_NAME.get(k, k) if k != EUROPE_KEY
+                                            else "Europe (no single country)"), "n": v}
+                      for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+    }
+    return of, meta
+
+
 def _concept_membership(scenario_id: str, concepts: list[str], mode: str,
                         concept_filter: dict[str, Any] | None = None) -> tuple[set[int], set[int], dict]:
     """(articles correspondants, articles JUGEABLES, méta).
@@ -437,15 +517,18 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     concept_filter = payload.get("concept_filter")
     designs = payload.get("designs")
     levels = payload.get("levels")
+    countries = payload.get("countries")
     combine = str(payload.get("combine") or "all")
     unassigned = str(payload.get("unassigned") or "keep")
     concept_mode = str(payload.get("concept_mode") or "any")
     if concept_mode not in ("any", "all"):
         raise HTTPException(status_code=422, detail="concept_mode doit valoir 'any' ou 'all'")
-    if not clusters and not concepts and not concept_filter and not designs and not levels:
+    if not clusters and not concepts and not concept_filter and not designs and not levels \
+            and not countries:
         raise HTTPException(status_code=422,
-                            detail="Donnez au moins `clusters`, `concepts`, `concept_filter`, `designs` "
-                                   "ou `levels` : sans dimension de sélection il n'y a rien à découper.")
+                            detail="Donnez au moins `clusters`, `concepts`, `concept_filter`, `designs`, "
+                                   "`levels` ou `countries` : sans dimension de sélection il n'y a "
+                                   "rien à découper.")
 
     threshold = _get_scenario_threshold(scenario_id)
     relevant = _relevant_ids(scenario_id, threshold)
@@ -501,11 +584,45 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                                            f"(disponibles : {sorted(known_levels)}).")
             level_of = level_map
 
+    country_of = None
+    wanted_countries: set[str] | None = None
+    country_labels: list[str] = []
+    if countries:
+        if isinstance(countries, str):
+            countries = [p for p in countries.split(",") if p.strip()]
+        asked = {str(x).strip().upper() for x in countries if str(x).strip()}
+        if not asked:
+            raise HTTPException(status_code=422, detail="`countries` ne nomme aucun pays.")
+        country_of, cnmeta = _country_membership(scenario_id, threshold)
+        from .geography import COUNTRY_NAME, NUTS_ISO
+
+        present = {c["value"] for c in cnmeta["countries"]}
+        # EUROPE n'est pas un pays : elle s'étend à tous les pays NUTS présents dans ce
+        # corpus, PLUS les articles européens sans pays unique. Demander « l'Europe »
+        # garde donc exactement ce que l'onglet Géographie compte comme européen.
+        wanted_countries = set()
+        labels: list[str] = []
+        for code in sorted(asked):
+            if code == EUROPE_KEY:
+                wanted_countries |= ({EUROPE_KEY} | (present & set(NUTS_ISO)))
+                labels.append("Europe (NUTS)")
+                continue
+            if code not in present:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Aucun article placé en « {code} » dans ce corpus "
+                           f"(disponibles : {', '.join(sorted(present)) or 'aucun'}).")
+            wanted_countries.add(code)
+            labels.append(COUNTRY_NAME.get(code, code))
+        country_labels = labels
+        meta["countries"] = cnmeta
+
     try:
         plan = plan_subset(relevant, cluster_of=cluster_of, clusters_wanted=wanted_clusters,
                            concept_match=concept_match, concept_known=concept_known,
                            design_of=design_of, designs_wanted=wanted_designs,
                            level_of=level_of, levels_wanted=wanted_levels,
+                           country_of=country_of, countries_wanted=wanted_countries,
                            combine=combine, unassigned=unassigned,
                            included_ids=_manually_included_ids(scenario_id))
     except ValueError as e:
@@ -516,7 +633,8 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                                         cluster_names, concept_labels or None, combine, unassigned,
                                         threshold=threshold,
                                         designs=sorted(wanted_designs) if wanted_designs else None,
-                                        levels=sorted(wanted_levels) if wanted_levels else None)
+                                        levels=sorted(wanted_levels) if wanted_levels else None,
+                                        countries=country_labels or None)
     return plan
 
 

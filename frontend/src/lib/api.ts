@@ -4411,6 +4411,10 @@ export interface SubsetSelection {
   /** Vocabulary labels from `api/study_design`, as the charts display them. */
   designs?: string[];
   levels?: string[];
+  /** ISO2 codes of the countries to keep, as the Geography tab resolves them from each
+   *  paper's own text, plus the pseudo-code "EUROPE" for every NUTS country at once
+   *  (it also keeps the European papers that name no single country). */
+  countries?: string[];
   combine?: "any" | "all";
   unassigned?: "keep" | "exclude";
   reason?: string;

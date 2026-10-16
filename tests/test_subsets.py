@@ -699,3 +699,115 @@ def test_the_reason_names_the_designs_in_words():
     both = describe_selection(None, None, None, "all", "keep",
                               designs=["Essai contrôlé randomisé"], levels=["Élevée"])
     assert "devis" in both and "niveaux de preuve Élevée" in both and " et " in both
+
+
+# ── 6. Par pays : le lieu de l'ÉTUDE, lu comme l'onglet Géographie ──────────
+# Le panneau « D'où vient la preuve » compte les pays depuis le lieu que l'extraction a
+# relevé dans le papier. Un relecteur qui le lit veut ensuite pouvoir dire « garde l'Italie
+# et la France », et que tout ce qui suit (extraction, estimations groupées, brief,
+# assistant) parle de ce sous-corpus. C'est un découpage comme les autres, donc il passe
+# par le même mécanisme, avec la même règle sur les articles qu'il ne sait pas juger.
+
+def _place(conn, doc_id: int, location: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = %s",
+                    (json.dumps({"v": 1, "source": "abstract", "truncated": False,
+                                 "ref": {"location": location}, "coverage": {},
+                                 "observations": []}), doc_id))
+
+
+@pytest.fixture()
+def placed(seeded):
+    """9601 Italy, 9602 France, 9603 China, 9604 extracted with no place, 9605 never
+    extracted. 9606 is the reviewer's own exclusion and is out of every count."""
+    _place(seeded, 9601, "Lombardy, Italy")
+    _place(seeded, 9602, "Paris, France")
+    _place(seeded, 9603, "Guangdong, China")
+    _place(seeded, 9604, "")
+    return seeded
+
+
+def test_narrowing_by_country_keeps_the_studies_done_there(placed):
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"countries": ["IT"]}).json()
+    assert body["exclude_sample"] == [9602, 9603], body
+    # Neither 9604 (extracted, no place) nor 9605 (never extracted) can be judged.
+    assert body["undecided_sample"] == [9604, 9605]
+    assert (body["keep"], body["exclude"], body["undecided"]) == (3, 2, 2)
+    assert body["by_dimension"]["countries"] == {"in": 1, "out": 2, "unknown": 2}
+    assert body["meta"]["countries"]["n_placed"] == 3
+    assert {c["value"] for c in body["meta"]["countries"]["countries"]} == {"IT", "FR", "CN"}
+
+
+def test_europe_is_every_nuts_country_and_the_articles_with_no_single_country(placed):
+    # An article whose place says "Europe" is European without being placeable on a map.
+    _place(placed, 9604, "Europe")
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"countries": ["EUROPE"]}).json()
+    assert body["exclude_sample"] == [9603], body          # China, and only China
+    assert body["undecided_sample"] == [9605]              # never extracted
+    assert (body["keep"], body["exclude"]) == (4, 1)
+    # Asking for Italy alone JUDGES that article and leaves it out: it is not unknown.
+    only_it = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                             json={"countries": ["IT"]}).json()
+    assert 9604 in only_it["exclude_sample"] and 9604 not in only_it["undecided_sample"]
+
+
+def test_several_countries_narrow_together(placed):
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"countries": ["IT", "FR"]}).json()
+    assert body["exclude_sample"] == [9603]
+    assert body["by_dimension"]["countries"] == {"in": 2, "out": 1, "unknown": 2}
+
+
+def test_a_country_absent_from_the_corpus_is_a_404_not_an_empty_selection(placed):
+    r = _client().post(f"/user-scenarios/{SID}/subset/preview", json={"countries": ["JP"]})
+    assert r.status_code == 404 and "JP" in r.json()["detail"]
+
+
+def test_applying_a_country_narrowing_writes_the_country_in_the_reason(placed):
+    out = _client().post(f"/user-scenarios/{SID}/subset/apply",
+                         json={"countries": ["IT"]}, headers=HDR).json()
+    assert out["status"] == "applied" and out["applied"] == 2
+    assert "pays Italy" in out["reason"], out["reason"]
+    with placed.cursor() as cur:
+        cur.execute("SELECT document_id FROM article_scenarios WHERE scenario_id = %s "
+                    "AND screening_status = 'excluded' AND screening_reason LIKE %s "
+                    "ORDER BY document_id", (SID, SUBSET_REASON_PREFIX + "%"))
+        assert [r[0] for r in cur.fetchall()] == [9602, 9603]
+
+
+def test_a_country_and_a_cluster_narrow_together(placed):
+    """The point of the whole module: the criteria compose. Cluster 0 is 9601 and 9602;
+    keeping Italy as well leaves 9601 alone, plus whatever nothing could judge."""
+    body = _client().post(f"/user-scenarios/{SID}/subset/preview",
+                          json={"clusters": [0], "countries": ["IT"]}).json()
+    assert body["exclude_sample"] == [9602, 9603, 9604], body
+    assert body["undecided_sample"] == [9605]              # neither dimension judges it
+    assert (body["keep"], body["exclude"]) == (2, 3)
+
+
+def test_the_geography_panel_offers_the_narrowing_in_both_languages():
+    """The countries are read in the Geography panel, so that is where they are ticked.
+    Pinned here because the dimension is useless if nothing sends it: the panel must post
+    `countries`, and both locales must carry the same strings with the same placeholders."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    panel = (root / "frontend" / "src" / "components" / "GeographyPanel.tsx").read_text(encoding="utf-8")
+    assert "previewScenarioSubset(scenarioId, { countries: picked })" in panel
+    assert "applyScenarioSubset(scenarioId, { countries: picked })" in panel
+    assert 'setPicked(["EUROPE"])' in panel, "the one selection nobody assembles by hand"
+
+    keys = ("narrowEurope", "narrowPick", "narrowPicked", "narrowPlan", "narrowUnjudged",
+            "narrowApply", "narrowClear", "narrowNeedsKey", "narrowHint", "narrowApplied")
+    import re
+    seen = {}
+    for loc in ("fr", "en"):
+        txt = (root / "frontend" / "src" / "i18n" / "locales" / f"{loc}.ts").read_text(encoding="utf-8")
+        for k in keys:
+            line = next((l for l in txt.splitlines() if l.strip().startswith(f"{k}:")), None)
+            assert line, f"{loc}: {k} manquant"
+            seen.setdefault(k, {})[loc] = set(re.findall(r"\{(\w+)\}", line))
+    for k in keys:
+        assert seen[k]["fr"] == seen[k]["en"], f"{k}: placeholders différents entre fr et en"
