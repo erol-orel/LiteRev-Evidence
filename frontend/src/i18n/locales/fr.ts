@@ -1152,6 +1152,7 @@ copyQuery: "Copier",
       learningTrained:
         "Entraîné sur {included} inclusions et {excluded} exclusions : la liste met en premier ce que vos décisions rendent probable. Parmi les {remaining} articles pertinents restants, le modèle en attend environ {left} à inclure.",
       learningAuc: "AUC en validation croisée {auc} (1 : il sépare parfaitement vos décisions, 0,5 : le hasard).",
+      learningAboveSplit: "Au-dessus du seuil, parmi les articles qui restent à juger, le modèle en garderait {keep} et en écarterait {drop}.",
       learningSuggested: "{n} articles sous le seuil de pertinence ressemblent à ce que vous incluez. Les {inQueue} premiers sont déjà dans la liste ci-dessous, marqués comme suggestions :",
       learningBadge: "appris {score}",
       learningDownloadAll: "Télécharger les {n} en CSV, dans l'ordre du modèle",

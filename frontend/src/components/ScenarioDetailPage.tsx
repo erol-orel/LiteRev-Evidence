@@ -6771,6 +6771,17 @@ function DoubleBlindSection({ scenarioId }: { scenarioId: string }) {
                       .replace("{left}", queue.learning.expected_relevant_left != null
                         ? Math.round(queue.learning.expected_relevant_left).toLocaleString() : "?")}
                   </p>
+                  {/* Des deux côtés du seuil, comptés de la même manière. L'écran ne
+                      disait que ce qui dort SOUS le seuil, alors que le travail d'un
+                      relecteur se fait au-dessus : savoir que le modèle écarterait la
+                      moitié de la file change l'ordre dans lequel on la prend. */}
+                  {(queue.learning.above_threshold_suggested ?? 0) > 0 && (
+                    <p className="text-white/50">
+                      {t("scenarioDetail.doubleBlind.learningAboveSplit")
+                        .replace("{keep}", (queue.learning.above_threshold_suggested ?? 0).toLocaleString())
+                        .replace("{drop}", (queue.learning.above_threshold_rejected ?? 0).toLocaleString())}
+                    </p>
+                  )}
                   {queue.learning.cv_auc != null && (
                     <p className="text-white/40">
                       {t("scenarioDetail.doubleBlind.learningAuc").replace("{auc}", queue.learning.cv_auc.toFixed(2))}
