@@ -173,6 +173,11 @@ def _ensure_spec_proposal_columns():
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_projection_generated_at TIMESTAMP"))
         # Série OBSERVÉE (réelle) attachée au modèle SEIR pour superposition + calibration.
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS seir_observed_json JSONB"))
+        # Le portrait du corpus de l'onglet Preuves : six agrégats sur tout le corpus, dix
+        # secondes sur 52 765 articles et quatorze sur 86 716. Il ne change qu'avec le
+        # corpus, donc il se calcule une fois (le pipeline le fait) et se sert tel quel.
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS evidence_brief_json JSONB"))
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS evidence_brief_at TIMESTAMP"))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")
 
 

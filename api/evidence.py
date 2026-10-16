@@ -265,11 +265,106 @@ def get_user_scenario_evidence_gaps(
     return concept_matrix(scenario_id, rows, cols, max_labels=max_labels)
 
 
+def evidence_brief_stamp(scenario_id: str) -> str:
+    """Une empreinte BON MARCHÉ de tout ce qui fait changer le portrait : le nombre de
+    liens du corpus, les décisions de screening, les votes des deux relecteurs, la
+    dernière décision et le seuil. Une seule table, un seul index : quelques dizaines de
+    millisecondes là où le portrait en coûte dix mille.
+
+    Elle existe parce qu'une purge de cache oubliée est pire qu'un cache absent : elle
+    sert les chiffres du corpus PRÉCÉDENT sous le corpus actuel. Une empreinte vide veut
+    dire « je ne sais pas » et interdit de servir le cache. Ce que l'empreinte ne voit
+    pas (un PICO, un texte intégral ou une extraction qui arrivent) est écrit par le
+    pipeline, qui recalcule le portrait à son étape Preuves, après ces enrichissements."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT COUNT(*) AS n,
+                       COUNT(*) FILTER (WHERE screening_status IS NOT NULL) AS screened,
+                       COUNT(*) FILTER (WHERE reviewer_1_status IS NOT NULL) AS r1,
+                       COUNT(*) FILTER (WHERE reviewer_2_status IS NOT NULL) AS r2,
+                       MAX(screened_at) AS last_at
+                FROM article_scenarios WHERE scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().fetchone()
+        thr = _get_scenario_threshold(scenario_id)
+        if not row:
+            return ""
+        return (f"{row['n']}|{row['screened']}|{row['r1']}|{row['r2']}|"
+                f"{row['last_at']}|{thr}")
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"evidence_brief_stamp {scenario_id}: {_e}")
+        return ""
+
+
+def cached_evidence_brief(scenario_id: str) -> dict[str, Any] | None:
+    """Le portrait du corpus déjà calculé pour ce scénario, ou None. Ne lève pas.
+
+    Rendu seulement si son empreinte est encore celle du scénario : un cache dont
+    l'empreinte a bougé n'est pas vieux, il est FAUX."""
+    stamp = evidence_brief_stamp(scenario_id)
+    if not stamp:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT evidence_brief_json AS j, evidence_brief_at AS at
+                FROM scenario_settings WHERE scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().fetchone()
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"cached_evidence_brief {scenario_id}: {_e}")
+        return None
+    if not row or not isinstance(row["j"], dict) or not row["j"]:
+        return None
+    if str(row["j"].get("_stamp") or "") != stamp:
+        return None
+    out = {k: v for k, v in row["j"].items() if k != "_stamp"}
+    if not out:                           # une empreinte seule n'est pas un portrait
+        return None
+    return {**out, "cached_at": row["at"].isoformat() if row["at"] else None}
+
+
+def store_evidence_brief(scenario_id: str, brief: dict[str, Any]) -> bool:
+    """Garde ce portrait jusqu'au prochain changement de corpus. Ne lève pas : un cache
+    qui n'arrive pas à s'écrire ne doit pas faire échouer la réponse qu'il accompagne."""
+    import json as _json
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO scenario_settings (scenario_id, updated_at) VALUES (:sid, NOW())
+                ON CONFLICT (scenario_id) DO NOTHING
+            """), {"sid": scenario_id})
+            conn.execute(text("""
+                UPDATE scenario_settings
+                SET evidence_brief_json = CAST(:j AS jsonb), evidence_brief_at = NOW()
+                WHERE scenario_id = :sid
+            """), {"sid": scenario_id,
+                   "j": _json.dumps({**brief, "_stamp": evidence_brief_stamp(scenario_id)},
+                                    ensure_ascii=False, default=str)})
+        return True
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"store_evidence_brief {scenario_id}: {_e}")
+        return False
+
+
 @app.get("/user-scenarios/{scenario_id}/evidence-brief")
-def get_user_scenario_evidence_brief(scenario_id: str) -> dict[str, Any]:
-    """Evidence Brief d'un scénario utilisateur (délègue au constructeur générique)."""
+def get_user_scenario_evidence_brief(scenario_id: str, refresh: bool = False) -> dict[str, Any]:
+    """Evidence Brief d'un scénario utilisateur, SERVI DEPUIS LE CACHE quand il existe.
+
+    Le portrait tient en six agrégats sur tout le corpus : dix secondes sur les 52 765
+    articles de la stratégie ISS, quatorze sur les 86 716 de l'exposition COVID. L'onglet
+    Preuves les relançait à chaque ouverture, d'où « Chargement des statistiques du
+    corpus… » à chaque visite. Ils ne dépendent que du corpus, donc ils se calculent une
+    fois : le pipeline les écrit après un changement de seuil, et toute modification du
+    corpus périme le cache (CORPUS_DERIVED_CACHE_RESET). `refresh=1` force le recalcul."""
     _get_user_scenario_or_404(scenario_id)
-    return _build_evidence_brief(scenario_id)
+    if not refresh:
+        hit = cached_evidence_brief(scenario_id)
+        if hit is not None:
+            return {**hit, "cached": True}
+    out = _build_evidence_brief(scenario_id)
+    store_evidence_brief(scenario_id, out)
+    return {**out, "cached": False}
 
 
 def _build_evidence_brief(scenario_id: str) -> dict[str, Any]:

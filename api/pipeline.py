@@ -4043,6 +4043,14 @@ def _run_user_scenario_full_pipeline(scenario_id: str, query: str, filters: dict
         # ── Evidence Brief (narratif LLM, mis en cache) - prêt sans clic ───────
         try:
             update_step("evidence", "running")
+            # Le portrait du corpus d'abord, et MIS EN CACHE : c'est lui que l'onglet
+            # Preuves attend pendant dix à quatorze secondes à chaque ouverture. Calculé
+            # ici, il est déjà là quand quelqu'un ouvre l'onglet.
+            try:
+                from .evidence import _build_evidence_brief, store_evidence_brief
+                store_evidence_brief(scenario_id, _build_evidence_brief(scenario_id))
+            except Exception as _e_bs:                       # noqa: BLE001
+                logger.warning(f"Evidence brief cache {scenario_id}: {_e_bs}")
             _generate_evidence_brief_llm(scenario_id, lang=lang or "fr")
             update_step("evidence", "done")
         except Exception as _e_ev:

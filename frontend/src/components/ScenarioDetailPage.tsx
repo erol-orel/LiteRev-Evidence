@@ -151,6 +151,7 @@ import {
   type ClusterPoint,
   type PicoData,
   type PicoBulkResponse,
+  type PicoScope,
   type EvidenceBriefData,
   type LlmEvidenceBrief,
   type ScenarioVariables,
@@ -5505,6 +5506,9 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
   const [filter, setFilter] = React.useState<'all'|'with_pico'|'without_pico'>('all');
   const [search, setSearch] = React.useState('');
   const [sortBy, setSortBy] = React.useState<'year'|'confidence'|'design'>('year');
+  // Ce que la table couvre : le sous-ensemble pertinent, ou tout le corpus. Le second
+  // est un choix explicite, parce qu'il coûte des dizaines de mégaoctets.
+  const [picoScope, setPicoScope] = React.useState<PicoScope>('relevant');
   // Les lignes montrées, par tranches de 100, remises à 100 quand la vue change (même
   // mécanique que la table d'extraction). La table s'arrêtait aux cent premières sans
   // autre recours que le CSV.
@@ -5521,13 +5525,15 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
 
   React.useEffect(() => {
     setLoading(true);
-    // Le corpus ENTIER, page par page : l'onglet annonce « tous les articles » et
-    // l'export CSV n'écrit que ce qui est chargé ; il n'en chargeait que 200.
-    fetchAllScenarioPico(scenarioId)
+    // Les articles PERTINENTS, page par page. Le corpus entier était le défaut, et sur
+    // 52 765 articles cela faisait 66 Mo de JSON que le navigateur n'a jamais fini de
+    // lire : l'onglet restait sur « Chargement des données PICO ». Le PICO ne s'extrait
+    // que sur les pertinents, donc le reste ne portait qu'un `has_pico: false`.
+    fetchAllScenarioPico(scenarioId, 40, picoScope)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [scenarioId]);
+  }, [scenarioId, picoScope]);
 
   const exportCsv = () => {
     if (!data) return;
@@ -5585,6 +5591,23 @@ function PicoSection({ scenarioId }: { scenarioId: string }) {
           </div>
         ))}
       </div>
+      {/* Ce que la table couvre, et comment en changer. Sans cette ligne, « 1 011
+          articles » se lisait comme la taille du corpus. */}
+      <p className="text-[11px] text-white/50">
+        {(data.scope === "all"
+          ? t("scenarioDetail.pico.scopeAll")
+          : t("scenarioDetail.pico.scopeRelevant"))
+          .replace("{n}", data.total.toLocaleString())
+          .replace("{corpus}", (data.corpus_total ?? data.total).toLocaleString())}
+        {" "}
+        <button onClick={() => setPicoScope(data.scope === "all" ? "relevant" : "all")}
+          className="underline underline-offset-2 text-brand-300/90 hover:text-brand-300">
+          {data.scope === "all"
+            ? t("scenarioDetail.pico.scopeToRelevant")
+            : t("scenarioDetail.pico.scopeToAll")
+                .replace("{corpus}", (data.corpus_total ?? data.total).toLocaleString())}
+        </button>
+      </p>
       {/* Coverage bar */}
       <div className="rounded-xl border border-white/5 bg-white/2 p-3">
         <div className="flex justify-between text-[10px] text-white/40 mb-1.5">
