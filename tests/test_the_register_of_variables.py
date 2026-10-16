@@ -235,6 +235,25 @@ def test_the_design_is_folded_and_named_in_the_asked_language(seeded):
     assert labels_en != labels_fr, "the label follows the language, the value does not"
 
 
+def test_europe_elsewhere_and_no_place_add_up_to_the_papers_read(seeded):
+    """The three buckets of the place question must sum to the papers that were read, and
+    "elsewhere" is not "placed minus European".
+
+    A paper can be European without naming one country ("Europe", "Germany and the
+    Netherlands"), so it is not among the papers with a named country. Subtracting all the
+    European papers from the placed ones removes those twice: on the HPAI exposure review
+    that printed 339 where the truth is 382, while the country selection, counting the same
+    thing another way, said 382. Making the three sum to the denominator makes that class of
+    mistake impossible to repeat unseen."""
+    out = variables_of_interest(SID, lang="en")
+    europe = _by_key(out)["europe"]
+    buckets = {x["value"]: x["n"] for x in europe["values"]}
+    assert set(buckets) == {"europe", "elsewhere", "no_place"}
+    assert sum(buckets.values()) == out["n_extracted"] == europe["denominator"]
+    # Of the two papers read, one is in Italy and one in China, and both name a country.
+    assert buckets == {"europe": 1, "elsewhere": 1, "no_place": 0}
+
+
 def test_the_scenarios_own_variables_are_its_codebook_groups(seeded):
     """One variable per codebook group, named as the codebook names it, counted over the
     papers that answered it. A group nobody answered is listed with zero: that is the gap
@@ -276,9 +295,38 @@ def test_a_group_the_codebook_maps_to_nothing_is_listed_as_unmapped(seeded, db_c
     out = variables_of_interest(SID, lang="en")
     own = {v["key"]: v for v in out["variables"] if v["family"] == "own"}
     assert out["n_unmapped"] == 1
+    assert out["n_papers_unmapped"] == 1, "the papers behind the stray labels, not the labels"
     stray = own["animal.wild bird"]
     assert stray["unmapped"] is True and stray["n_with_value"] == 1
     assert own["animal.species"]["n_with_value"] == 0, "and it did not join Species by accident"
+
+
+def test_a_declared_group_is_never_cut_by_the_cap_on_stray_labels(seeded, db_conn):
+    """On a real corpus the model writes a long tail of group labels the codebook cannot
+    place: 102 of them on the HPAI exposure review. A single cap over both kinds let that
+    tail push the review's own questions off the page, which turns the gap map into a list of
+    whatever happens to be present. The declared groups are therefore never cut, the tail is,
+    and the payload says how long it really is."""
+    import json as _json
+
+    from api.variables_of_interest import _MAX_UNMAPPED_SHOWN
+
+    obs = [{"sheet": "animal", "group": f"stray label {i}", "covariate": "nothing known",
+            "disease": "HPAI H5N1", "quote": "q", "quote_verified": True}
+           for i in range(_MAX_UNMAPPED_SHOWN + 12)]
+    with db_conn.cursor() as cur:
+        cur.execute("UPDATE literature_document SET extraction_json = %s::jsonb WHERE id = 9702",
+                    (_json.dumps({"source": "fulltext", "version": 1,
+                                  "ref": {"location": "Guangdong, China"},
+                                  "coverage": {}, "observations": obs}),))
+    out = variables_of_interest(SID, lang="en")
+    own = [v for v in out["variables"] if v["family"] == "own"]
+    declared = [v for v in own if not v.get("unmapped")]
+    strays = [v for v in own if v.get("unmapped")]
+    assert out["n_unmapped"] == _MAX_UNMAPPED_SHOWN + 12, "the true length, not the shown one"
+    assert len(strays) == _MAX_UNMAPPED_SHOWN == out["n_unmapped_shown"]
+    assert len(declared) == out["n_own"] >= 19, "every declared group survived the tail"
+    assert "human_susc.sex_gender" in {v["key"] for v in declared}
 
 
 def test_a_source_that_cannot_be_read_loses_its_counts_not_the_page(seeded):
