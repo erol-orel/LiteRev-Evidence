@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
+import { VariablesOfInterestPanel } from "./VariablesOfInterestPanel";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
@@ -15,7 +16,7 @@ import {
   Globe, Upload, CheckCircle2, AlertCircle, Info,
   Microscope, Loader2, Download, Table2, BookOpen,
   Network, Bell, Users, Rss, Sparkles, ClipboardList,
-  TrendingUp, X, Plus, Sliders, Activity, Target
+  TrendingUp, X, Plus, Sliders, Activity, Target, ListTree
 } from "lucide-react";
 import {
   fetchScenarioDetail,
@@ -9219,11 +9220,14 @@ function EpidemicParametersPanel({ scenarioId }: { scenarioId: string }) {
 
 function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: ScenarioDetail }) {
   const { t } = useI18n();
-  const [sub, setSub] = React.useState<"evidences" | "pico" | "extraction">("evidences");
+  const [sub, setSub] = React.useState<"evidences" | "pico" | "extraction" | "register">("evidences");
   const SUB = [
     { key: "evidences" as const, label: t("scenarioDetail.evidenceTab.subEvidences"), icon: <BookOpen size={12} /> },
     { key: "pico" as const,      label: t("scenarioDetail.evidenceTab.subPicoTable"), icon: <Table2 size={12} /> },
     { key: "extraction" as const, label: t("scenarioDetail.evidenceTab.subExtraction"), icon: <ClipboardList size={12} /> },
+    // Le registre vient APRÈS l'extraction : il liste ce que la revue demande à chaque
+    // article, et l'extraction est ce qui en remplit la moitié.
+    { key: "register" as const, label: t("scenarioDetail.evidenceTab.subRegister"), icon: <ListTree size={12} /> },
   ];
   return (
     <div className="space-y-4">
@@ -9245,6 +9249,7 @@ function EvidenceTab({ scenarioId, detail }: { scenarioId: string; detail: Scena
       )}
       {sub === "pico" && <PicoSection scenarioId={scenarioId} />}
       {sub === "extraction" && <ExtractionSection key={scenarioId} scenarioId={scenarioId} />}
+      {sub === "register" && <VariablesOfInterestPanel key={scenarioId} scenarioId={scenarioId} />}
     </div>
   );
 }
