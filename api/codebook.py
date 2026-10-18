@@ -425,6 +425,41 @@ def validate_nodes(nodes: Any) -> list[dict[str, Any]]:
     return out
 
 
+def merge_nodes(existing: list[dict[str, Any]],
+                incoming: Any) -> tuple[list[dict[str, Any]], int, int]:
+    """(nodes, added, merged): `incoming` ADDED to `existing` rather than replacing it. PURE.
+
+    A partner's annex names the covariates of their review, not the universal frame: its
+    natural place is beside a starter, not instead of it. So a node whose key is already
+    there keeps its position and gains the synonyms the annex gives it (and a label, only
+    where it had none), and a key nobody had is appended.
+
+    The result goes back through `validate_nodes`, so a merge that pushes a node past the
+    synonym ceiling is refused with the node named, never quietly cut."""
+    out = [dict(n) for n in existing]
+    at = {(n["sheet"], n["l1"], n.get("l2"), n.get("l3")): i for i, n in enumerate(out)}
+    added = merged = 0
+    for raw in validate_nodes(incoming):
+        key = (raw["sheet"], raw["l1"], raw.get("l2"), raw.get("l3"))
+        i = at.get(key)
+        if i is None:
+            at[key] = len(out)
+            out.append(raw)
+            added += 1
+            continue
+        kept = out[i]
+        syn = list(kept.get("synonyms") or [])
+        for s_ in raw.get("synonyms") or []:
+            if s_ not in syn:
+                syn.append(s_)
+        kept["synonyms"] = syn
+        for lab in ("label_en", "label_fr"):
+            if not kept.get(lab) and raw.get(lab):
+                kept[lab] = raw[lab]
+        merged += 1
+    return validate_nodes(out), added, merged
+
+
 def parse_codebook_csv(content: str) -> list[dict[str, Any]]:
     """The reviewers' hierarchy from a CSV with the columns sheet, level1, level2, level3,
     synonyms (separated by | or ;), label_en, label_fr. Headers are matched loosely."""
@@ -525,6 +560,45 @@ def normalise(index: Index, sheet: str, group: Any, covariate: Any) -> dict[str,
                 "group_key": l1, "covariate_key": c or None}
     return {"l1": None, "l2": None, "l3": None, "matched": False,
             "group_key": g or None, "covariate_key": c or None}
+
+
+def find_variable(index: Index, *texts: Any) -> tuple[str, str] | None:
+    """The codebook GROUP a variable's name denotes, as (sheet, l1), or None. PURE.
+
+    The join between a model's predictor and the question the extraction asked. A model
+    names its variables in its own words ("occupation of the cases", "temperature"); the
+    codebook names what every paper was read for. Matching the two turns a count of
+    MENTIONS into a count of READINGS, which is the whole difference between a word that
+    appears in an abstract and a figure a paper reports.
+
+    Each text is tried in order, so the variable's own name wins over its keywords. Within
+    one text: an exact level-1 synonym first, then the longest whole-word containment, so
+    "occupation of the cases" finds `occupation`. Two different groups matching equally
+    well return None: an ambiguous join is worth less than no join, because the caller can
+    say "not matched" but cannot un-say a wrong variable."""
+    for text_ in texts:
+        t = clean_label(text_)
+        if not t:
+            continue
+        exact = {(sheet, l1) for sheet, syns in index.l1_syn.items()
+                 for syn, l1 in syns.items() if syn == t}
+        if len(exact) == 1:
+            return next(iter(exact))
+        if exact:
+            continue                                   # ambiguous: no join rather than a wrong one
+        ttok = tuple(t.split())
+        best: set[tuple[str, str]] = set()
+        best_len = 0
+        for sheet, syns in index.l1_syn.items():
+            for syn, l1 in syns.items():
+                stok = tuple(syn.split())
+                if len(stok) >= best_len and _contains(ttok, stok):
+                    if len(stok) > best_len:
+                        best, best_len = set(), len(stok)
+                    best.add((sheet, l1))
+        if len(best) == 1:
+            return next(iter(best))
+    return None
 
 
 def label_path(n: dict[str, Any]) -> str | None:
@@ -704,14 +778,24 @@ def export_codebook(scenario_id: str) -> Response:
 
 @app.put("/user-scenarios/{scenario_id}/codebook")
 def write_codebook(scenario_id: str, payload: dict[str, Any], _: None = Depends(require_api_key)) -> dict[str, Any]:
-    """Replace the scenario's codebook with `{"nodes": [...]}`."""
+    """Write `{"nodes": [...]}` as the scenario's codebook.
+
+    `"mode": "add"` keeps the vocabulary already there and folds the nodes into it, which
+    is what an annex wants: it names a review's own covariates, next to a starter rather
+    than over it. Without it the write REPLACES, as an import does."""
     _get_user_scenario_or_404(scenario_id)
+    add = str(payload.get("mode") or "replace").strip().lower() == "add"
     try:
-        nodes = validate_nodes(payload.get("nodes"))
+        if add:
+            nodes, n_added, n_merged = merge_nodes(get_codebook(scenario_id)["nodes"],
+                                                   payload.get("nodes"))
+        else:
+            nodes, n_added, n_merged = validate_nodes(payload.get("nodes")), 0, 0
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     _store(scenario_id, nodes)
-    return {"scenario_id": scenario_id, "source": "custom", "n_nodes": len(nodes)}
+    return {"scenario_id": scenario_id, "source": "custom", "n_nodes": len(nodes),
+            "mode": "add" if add else "replace", "n_added": n_added, "n_merged": n_merged}
 
 
 @app.post("/user-scenarios/{scenario_id}/codebook/import")

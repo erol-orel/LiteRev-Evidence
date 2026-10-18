@@ -1282,6 +1282,21 @@ Retourne UNIQUEMENT le JSON valide."""
                     if isinstance(_pv, dict):
                         _pv["evidence_count"], _pv["evidence_level"] = None, None
                 _carried["evidence_count_error"] = str(_ev_err)[:300]
+
+            # Et ce que l'extraction a VRAIMENT lu de chaque variable : le compte ci-dessus
+            # compte les mentions dans un résumé, celui-ci les articles dont l'extraction
+            # rapporte la variable du codebook que le nom du prédicteur désigne. Les deux
+            # restent, nommés séparément : une mention n'est pas une lecture.
+            try:
+                from .variables_of_interest import (REGISTER_EVIDENCE_RULE,
+                                                    register_evidence)
+
+                _reg = register_evidence(scenario_id, variables, threshold, lang or "en")
+                _carried["register_evidence_rule"] = REGISTER_EVIDENCE_RULE
+                _carried["register_evidence"] = _reg
+            except Exception as _rg_err:                     # jamais bloquant
+                logger.warning(f"Jointure au registre {scenario_id}: {_rg_err}")
+                _carried["register_evidence_error"] = str(_rg_err)[:300]
             _carried.update(_epi_meta(_epi_targeted))
             _carried["truncated"] = bool(_cut or _parse.get("repaired"))
             if _parse.get("repaired"):

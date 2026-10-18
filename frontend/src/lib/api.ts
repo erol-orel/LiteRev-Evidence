@@ -5412,3 +5412,102 @@ export async function runExtractionForNewVariables(
   if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
   return r.json();
 }
+
+// ─── Lire l'annexe d'un partenaire ────────────────────────────────────────────
+export interface CodebookNodeIn {
+  sheet: string;
+  l1: string;
+  l2: string | null;
+  l3: string | null;
+  synonyms: string[];
+  label_en: string | null;
+  label_fr: string | null;
+}
+
+export interface CodebookProposal {
+  nodes: CodebookNodeIn[];
+  n_nodes: number;
+  n_groups: number;
+  groups: Array<{ sheet: string; group: string }>;
+  format: string;
+  n_chars_read: number;
+  truncated: boolean;
+  /** Le début du texte lu : le relecteur voit SUR QUOI porte la proposition. */
+  text_preview: string;
+  model_note: string | null;
+  warnings: string[];
+  /** Toujours faux : la lecture propose, seule l'approbation écrit. */
+  stored: boolean;
+}
+
+/** Lire un document de codebook (docx, xlsx, pdf, csv, txt) et PROPOSER le tableau strict.
+ *  N'écrit rien : c'est `writeCodebook` qui écrit, une fois la proposition approuvée. */
+export async function readCodebookAnnex(
+  scenarioId: string, file: File, lang: string,
+): Promise<CodebookProposal> {
+  const q = new URLSearchParams({ filename: file.name || "annex.docx", lang });
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook/read?${q}`, {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/octet-stream" }),
+    body: await file.arrayBuffer(),
+  });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+/** Écrire des nœuds approuvés. `add` les ajoute au vocabulaire en place (ce que veut une
+ *  annexe : elle nomme les covariables d'une revue, à côté du vocabulaire de départ et non
+ *  par-dessus) ; sans lui, l'écriture REMPLACE, comme un import. */
+export async function writeCodebook(
+  scenarioId: string, nodes: CodebookNodeIn[], mode: "add" | "replace",
+): Promise<{ n_nodes: number; mode: string; n_added: number; n_merged: number }> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/codebook`, {
+    method: "PUT", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ nodes, mode }),
+  });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+// ─── Ce que l'extraction a lu des variables du modèle ─────────────────────────
+export interface ModelEvidenceRow {
+  /** La position dans le spec stocké : c'est par elle qu'on rapproche les deux listes,
+   *  le nom affiché pouvant être traduit. */
+  index: number;
+  machine_name?: string | null;
+  name: string | null;
+  importance: string | null;
+  /** Articles dont le titre/résumé/PICO MENTIONNE le nom de la variable (compte de mots). */
+  mentions: number | null;
+  mentions_level: string | null;
+  /** La variable du codebook que ce nom désigne, quand la jointure a abouti. */
+  register_variable: string | null;
+  register_name: string | null;
+  /** Articles dont l'extraction RAPPORTE cette variable : une lecture, pas une mention. */
+  register_count: number | null;
+  register_level: string | null;
+  register_values: Array<{ value: string; label: string; n: number }>;
+  register_n_values: number | null;
+  matched_by: "codebook" | null;
+}
+
+export interface ModelEvidence {
+  scenario_id: string;
+  status: "ok" | "no_variables";
+  n_variables: number;
+  matched: number;
+  /** Les articles LUS : le dénominateur de register_count. */
+  denominator: number;
+  /** Les articles pertinents : le dénominateur de mentions. */
+  evidence_count_denominator?: number | null;
+  rule: string;
+  variables: ModelEvidenceRow[];
+}
+
+/** La jointure entre les entrées du modèle et ce que l'extraction a lu. Lecture seule :
+ *  aucun appel de modèle, et le spec stocké n'est pas réécrit. */
+export async function fetchModelEvidence(scenarioId: string, lang: string): Promise<ModelEvidence> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/model-evidence?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}

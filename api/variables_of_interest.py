@@ -40,7 +40,7 @@ from fastapi import HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import text
 
-from .codebook import get_codebook, get_index, normalise, sheet_key
+from .codebook import find_variable, get_codebook, get_index, normalise, sheet_key
 from .core import _norm_lang, app, engine, logger
 from .digest import _rows
 from .extraction import COVERAGE_KEYS, _OBS_FROM
@@ -551,6 +551,131 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The join to a model's inputs: what the extraction READ, not what a word matches
+# ─────────────────────────────────────────────────────────────────────────────
+#: Les mots-clés d'une variable essayés après son nom, dans cet ordre : le nom gagne.
+_JOIN_KEYS = ("keywords", "synonyms", "definition")
+#: Valeurs rendues par variable jointe. Au-delà, le registre lui-même les montre toutes.
+_JOIN_MAX_VALUES = 6
+
+
+def _join_terms(pv: dict[str, Any]) -> list[str]:
+    """Le nom d'une variable prédictive puis ses mots-clés, pour la jointure. PUR."""
+    out: list[str] = []
+    for raw in [pv.get("name")] + [pv.get(k) for k in _JOIN_KEYS]:
+        vals = raw if isinstance(raw, list) else [raw]
+        for v in vals:
+            t = " ".join(str(v).split()) if isinstance(v, str) else ""
+            if 2 < len(t) <= 120 and t not in out:
+                out.append(t)
+    return out[:12]
+
+
+def register_evidence(scenario_id: str, variables: dict[str, Any],
+                      threshold: float | None = None,
+                      lang: str = "en") -> dict[str, Any]:
+    """For each predictor variable of a model, what the EXTRACTION read about it.
+
+    A predictive scenario's variables carry `evidence_count`: the relevant articles whose
+    title, abstract or PICO contains the variable's name, matched as whole words. That is a
+    count of MENTIONS, and it is the best one can do before any paper has been read. Once
+    the extraction has run, the review knows something stronger: which papers reported that
+    variable, and with which values, because the codebook asked them for it by name.
+
+    So this joins the two vocabularies. `find_variable` maps a predictor's name onto a
+    codebook group; the papers behind that group are counted over the whole relevant subset
+    in one SQL pass, with no sampling and no model call. Each variable gains
+    `register_variable` (the group), `register_count` / `register_level` ("n/N" of the
+    papers read), `register_values` and `register_matched_by`.
+
+    `evidence_count` is NEVER touched. Two numbers that measure two different things both
+    stay, each labelled: a mention is not a reading, and a variable no codebook asks for
+    keeps its word count rather than reading as zero evidence."""
+    pvs = [pv for pv in (variables.get("predictor_variables") or []) if isinstance(pv, dict)]
+    out: dict[str, Any] = {"denominator": 0, "matched": 0, "n_variables": len(pvs),
+                           "matched_variables": []}
+    if not pvs:
+        return out
+    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    index = get_index(scenario_id)
+    names = display_names(index, lang)
+
+    # La jointure, variable par variable. Un même groupe peut servir deux prédicteurs
+    # (« occupation » et « profession à risque ») : il est compté une fois.
+    joined: dict[int, tuple[str, str]] = {}
+    for i, pv in enumerate(pvs):
+        hit = find_variable(index, *_join_terms(pv))
+        if hit is not None:
+            joined[i] = hit
+
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    per_group: dict[tuple[str, str], set] = {}
+    per_value: dict[tuple[str, str], dict[str, set]] = {}
+    with engine.connect() as conn:
+        head = _rows(conn, f"""
+            SELECT COUNT(*) FILTER (WHERE jsonb_typeof(d.extraction_json) = 'object') AS n
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {gate}
+        """, scenario_id, thr)
+        out["denominator"] = int(head[0]["n"]) if head else 0
+        if joined:
+            wanted = set(joined.values())
+            for r in _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, o->>'group' AS grp, o->>'covariate' AS cov,
+                       array_agg(DISTINCT d.id) AS ids
+                {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'group'), '') IS NOT NULL
+                GROUP BY 1, 2, 3
+            """, scenario_id, thr):
+                sheet = sheet_key(r["sheet"]) or (r["sheet"] or "")
+                pos = normalise(index, sheet, r["grp"], r["cov"])
+                gkey = pos["group_key"] or (r["grp"] or "").strip().lower()
+                if (sheet, gkey) not in wanted:
+                    continue
+                ids = set(r["ids"] or ())
+                per_group.setdefault((sheet, gkey), set()).update(ids)
+                if pos["covariate_key"]:
+                    (per_value.setdefault((sheet, gkey), {})
+                     .setdefault(pos["covariate_key"], set()).update(ids))
+
+    for i, pv in enumerate(pvs):
+        hit = joined.get(i)
+        if hit is None:
+            # Pas de zéro ici : le registre ne sait pas, et le compte de mentions reste.
+            pv["register_variable"] = None
+            pv["register_count"] = pv["register_level"] = None
+            pv["register_values"] = []
+            pv["register_matched_by"] = None
+            continue
+        sheet, gkey = hit
+        ids = per_group.get(hit) or set()
+        vals = sorted((per_value.get(hit) or {}).items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        pv["register_variable"] = f"{sheet}.{gkey}"
+        pv["register_name"] = display_path(names, sheet, gkey, None, lang)
+        pv["register_count"] = len(ids)
+        pv["register_level"] = f"{len(ids)}/{out['denominator']}"
+        pv["register_values"] = [
+            {"value": v, "label": display_path(names, sheet, gkey, v, lang).split(" > ")[-1],
+             "n": len(vids)} for v, vids in vals[:_JOIN_MAX_VALUES]]
+        pv["register_n_values"] = len(vals)
+        pv["register_matched_by"] = "codebook"
+        out["matched"] += 1
+        out["matched_variables"].append({"name": pv.get("name"),
+                                         "variable": pv["register_variable"],
+                                         "n_papers": len(ids)})
+    return out
+
+
+#: La règle de la jointure, recopiée dans le `_meta` du spec à côté de EVIDENCE_COUNT_RULE.
+REGISTER_EVIDENCE_RULE = (
+    "register_count = the number of relevant articles (all of them, counted in SQL) whose "
+    "extraction REPORTS the codebook variable the predictor's name maps onto, which is what "
+    "the papers were read for; register_level = register_count / the articles read. It is a "
+    "different measure from evidence_count, which counts the articles whose title, abstract "
+    "or PICO merely MENTIONS the predictor's name. Both are kept, each under its own name.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # One variable, read per article, for the selection
 # ─────────────────────────────────────────────────────────────────────────────
 #: Les variables que la SÉLECTION résout par un chemin à elle, dans api/subsets : leur
@@ -890,3 +1015,51 @@ def get_variables_of_interest(scenario_id: str, lang: str = Query("en", max_leng
     subset. Read only: nothing is extracted, nothing is written, no model is called."""
     _get_user_scenario_or_404(scenario_id)
     return variables_of_interest(scenario_id, lang=lang, threshold=threshold)
+
+
+@app.get("/user-scenarios/{scenario_id}/variables-of-interest/model-evidence")
+def get_model_evidence(scenario_id: str, lang: str = Query("en", max_length=8),
+                       threshold: float | None = Query(None, ge=0.0, le=1.0)) -> dict[str, Any]:
+    """For a predictive scenario: what the extraction READ about each model input.
+
+    Read only, and over the variables ALREADY generated: it re-reads the stored spec through
+    the codebook and counts in SQL, so a review does not have to pay for a generation to see
+    the join. The stored spec is not rewritten; only the answer carries the counts."""
+    _get_user_scenario_or_404(scenario_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT variables_json, variables_proposal_json "
+                                "FROM scenario_settings WHERE scenario_id = :sid"),
+                           {"sid": scenario_id}).mappings().first()
+    stored = None
+    for slot in ("variables_json", "variables_proposal_json"):
+        if row and row.get(slot):
+            stored = dict(row[slot])
+            break
+    if not stored:
+        return {"scenario_id": scenario_id, "status": "no_variables", "variables": [],
+                "n_variables": 0, "matched": 0, "denominator": 0,
+                "rule": REGISTER_EVIDENCE_RULE}
+    # Une COPIE : la jointure écrit sur les variables qu'on lui passe, et le spec stocké
+    # ne doit pas bouger parce que quelqu'un a ouvert une page.
+    pvs = [dict(pv) for pv in (stored.get("predictor_variables") or []) if isinstance(pv, dict)]
+    work = {"predictor_variables": pvs}
+    out = register_evidence(scenario_id, work, threshold, _norm_lang(lang))
+    return {"scenario_id": scenario_id, "status": "ok",
+            "n_variables": out["n_variables"], "matched": out["matched"],
+            "denominator": out["denominator"], "rule": REGISTER_EVIDENCE_RULE,
+            "evidence_count_denominator": stored.get("_meta", {}).get("evidence_count_denominator"),
+            # `index` est la position dans le spec stocké, et c'est par elle que la page
+            # rapproche les deux listes : le nom affiché, lui, peut être TRADUIT, et un
+            # rapprochement par le nom perdrait la jointure dès qu'on lit en français.
+            "variables": [{
+                "index": i, "machine_name": pv.get("machine_name"),
+                "name": pv.get("name"), "importance": pv.get("importance"),
+                "mentions": pv.get("evidence_count"), "mentions_level": pv.get("evidence_level"),
+                "register_variable": pv.get("register_variable"),
+                "register_name": pv.get("register_name"),
+                "register_count": pv.get("register_count"),
+                "register_level": pv.get("register_level"),
+                "register_values": pv.get("register_values") or [],
+                "register_n_values": pv.get("register_n_values"),
+                "matched_by": pv.get("register_matched_by"),
+            } for i, pv in enumerate(pvs)]}

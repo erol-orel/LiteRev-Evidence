@@ -55,4 +55,6 @@ MODULES = (
     # géographie, devis, clusters, pooling) : il vient donc en dernier, et peut les
     # importer au niveau du module.
     "variables_of_interest",
+    # La lecture d'une annexe de codebook : elle lit additions (PDF, xlsx) et codebook.
+    "codebook_reader",
 )

@@ -57,7 +57,9 @@ unchecked reading.
 | Piece | Backend | Frontend |
 |---|---|---|
 | Per-article extraction (map), cached in `literature_document.extraction_json` | `api/extraction.py` | `ExtractionSection.tsx` (Evidence tab, Extraction sub-tab) |
-| Codebook (label normalisation at read time, never rewrites stored labels) | `api/codebook.py` | `CodebookPanel.tsx` |
+| Codebook (label normalisation at read time, never rewrites stored labels), four starter vocabularies, `mode: add` to fold one codebook into another | `api/codebook.py` | `CodebookPanel.tsx` |
+| Reading a partner's codebook document (docx, xlsx, pdf, csv) into the strict table: one model call per upload, stores nothing, the reviewer approves | `api/codebook_reader.py` | `CodebookPanel.tsx` |
+| Register of variables of interest: one list of what the review asks of every paper, with its denominators, a selection on any variable, a crosstab of any two, and the bill of a variable added after the reading | `api/variables_of_interest.py` | `VariablesOfInterestPanel.tsx`, `SelectionBar.tsx`, `CrosstabPanel.tsx` |
 | Disease names (one key per disease at read time: A(H5N1) for HPAI H5N1, influenza A(H5N1), H5N1...; other diseases as written) | `api/diseases.py` | `PooledPanel.tsx` (Disease column, with the spellings each pool merged) |
 | Reviewer decisions (accept, edit, reject, clear; Cohen's kappa) in table `extraction_review` | `api/extraction_review.py` | `ObservationPanel.tsx`, `ReviewSummaryCard.tsx` |
 | Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies; rows that split one sample, 142 men and 81 women among 225 of one disease, are marked in the proportions and left out of the odds ratios) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
@@ -101,6 +103,12 @@ Reads, no key needed:
     GET  /user-scenarios/{sid}/codebook
     GET  /user-scenarios/{sid}/codebook/export
     GET  /user-scenarios/{sid}/codebook/unmapped
+    GET  /codebook/templates
+    GET  /user-scenarios/{sid}/variables-of-interest
+    GET  /user-scenarios/{sid}/variables-of-interest/crosstab
+    GET  /user-scenarios/{sid}/variables-of-interest/export
+    GET  /user-scenarios/{sid}/variables-of-interest/model-evidence
+    GET  /user-scenarios/{sid}/extraction/variable-gap
     GET  /geo/nuts/status
     GET  /geo/resolve
 
@@ -109,10 +117,13 @@ Writes, `X-API-Key` required:
     POST   /user-scenarios/{sid}/extraction/run
     POST   /user-scenarios/{sid}/articles/{aid}/extraction/review
     POST   /user-scenarios/{sid}/articles/{aid}/extraction/review/bulk
-    PUT    /user-scenarios/{sid}/codebook
+    PUT    /user-scenarios/{sid}/codebook            ("mode": "add" folds into what is there)
     POST   /user-scenarios/{sid}/codebook/import
+    POST   /user-scenarios/{sid}/codebook/read       (proposes from a document, stores nothing)
+    POST   /user-scenarios/{sid}/codebook/template/{key}
     POST   /user-scenarios/{sid}/codebook/synonym
     DELETE /user-scenarios/{sid}/codebook
+    POST   /user-scenarios/{sid}/extraction/run?new_variables=true
     POST   /geo/nuts/import
 
 ## Rules to keep (also in CLAUDE.md)
