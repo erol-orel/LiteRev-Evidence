@@ -106,9 +106,13 @@ STANDARD: tuple[dict[str, Any], ...] = (
     _v("has_doi", "record", "metadata", COST_FREE, BOOL, ("corpus",), crossable=False),
     # ── B. The review's own decisions ───────────────────────────────────────
     _v("screening", "decision", "reviewers", COST_FREE, CAT, ("review", "prisma")),
+    # Le côté du seuil et la portée ne se filtrent PAS: ils sont la porte et le mécanisme
+    # eux-mêmes. « Garder ce qui est au-dessus du seuil » est déjà ce que fait la porte, et
+    # « garder ce qui est hors de portée » demanderait de garder des articles exclus.
     _v("above_threshold", "decision", "scoring", COST_FREE, BOOL, ("seuil",),
-       of=OF_CORPUS, crossable=False),
-    _v("scope", "decision", "selection", COST_FREE, CAT, ("subset", "prisma"), crossable=False),
+       of=OF_CORPUS, filterable=False, crossable=False),
+    _v("scope", "decision", "selection", COST_FREE, CAT, ("subset", "prisma"),
+       filterable=False, crossable=False),
     _v("kappa", "decision", "double_blind", COST_FREE, CAT, ("doubleBlind",)),
     # Le MOTIF d'une décision, pas un marqueur d'import : une décision importée d'une revue
     # précédente arrive dans `screening_status` avec son motif, sans drapeau à part. Le motif
@@ -127,10 +131,14 @@ STANDARD: tuple[dict[str, Any], ...] = (
     _v("country", "place", "place_resolver", COST_FREE, CAT, ("geography",), of=OF_EXTRACTED),
     _v("europe", "place", "place_resolver", COST_FREE, BOOL, ("geography", "extraction"),
        of=OF_EXTRACTED),
+    # La région se filtrera quand le résolveur rendra le code NUTS par article; il ne rend
+    # aujourd'hui que le pays, et promettre un filtre que rien ne résout serait pire que
+    # l'absence du filtre.
     _v("nuts", "place", "nuts_list", COST_FREE, CAT, ("geography",), of=OF_EXTRACTED,
-       covers=("nuts1", "nuts2", "nuts3")),
+       filterable=False, covers=("nuts1", "nuts2", "nuts3")),
     _v("study_period", "place", "extraction", COST_ALREADY_RUN, DATE, ("extraction",),
-       of=OF_EXTRACTED, crossable=False, covers=("study_start", "study_end")),
+       of=OF_EXTRACTED, filterable=False, crossable=False,
+       covers=("study_start", "study_end")),
     # ── E. Topic ────────────────────────────────────────────────────────────
     _v("cluster", "topic", "clustering", COST_ALREADY_RUN, CAT, ("clustering",)),
     _v("concepts", "topic", "concept_pass", COST_ALREADY_RUN, CAT, ("knowledgeGraph",)),
@@ -139,8 +147,10 @@ STANDARD: tuple[dict[str, Any], ...] = (
     # ── F. What was read, and the quantities ────────────────────────────────
     _v("read_from", "measure", "extraction", COST_ALREADY_RUN, CAT, ("extraction",),
        of=OF_EXTRACTED, crossable=False),
+    # Trois nombres sur une ligne: une condition porte sur UNE variable, donc ils se
+    # filtreront séparément le jour où ils seront trois lignes.
     _v("counts", "measure", "extraction", COST_ALREADY_RUN, NUM, ("extraction", "pooled"),
-       of=OF_EXTRACTED, covers=("risk_pop", "positive", "percent_positive")),
+       of=OF_EXTRACTED, filterable=False, covers=("risk_pop", "positive", "percent_positive")),
     _v("math_model", "measure", "extraction", COST_ALREADY_RUN, BOOL, ("extraction",),
        of=OF_EXTRACTED),
     _v("epi_params", "measure", "parameter_pass", COST_ALREADY_RUN, NUM, ("epiParams", "seir"),
@@ -212,8 +222,8 @@ def _corpus_total(conn, scenario_id: str) -> int:
 
 
 #: The categorical variables whose values are a column or a cached field, counted in one
-#: query. `(key, expression, fallback)`: the fallback names the papers with no value, which
-#: is itself a value a reviewer filters on.
+#: query, and read per article by `variable_membership`. One table for both, so a variable
+#: can never be counted one way on the page and filtered another way by the selection.
 _VALUE_SOURCES: tuple[tuple[str, str], ...] = (
     ("language", "COALESCE(NULLIF(TRIM(d.language), ''), '')"),
     ("publication_type", "COALESCE(NULLIF(TRIM(d.publication_type), ''), '')"),
@@ -228,6 +238,13 @@ _VALUE_SOURCES: tuple[tuple[str, str], ...] = (
     ("has_fulltext", "CASE WHEN d.has_fulltext IS TRUE THEN 'yes' ELSE 'no' END"),
     ("math_model", "COALESCE(NULLIF(TRIM(d.extraction_json->'ref'->>'math_model'), ''), '')"),
     ("year", "COALESCE(d.year::text, '')"),
+)
+
+#: Lues PAR ARTICLE seulement. Leur liste de modalités n'apprendrait rien (des centaines
+#: d'entiers distincts pour les citations), mais une condition sur elles a du sens.
+_MEMBERSHIP_ONLY: tuple[tuple[str, str], ...] = (
+    ("citations", "COALESCE(d.citation_count::text, '')"),
+    ("has_doi", "CASE WHEN COALESCE(TRIM(d.doi), '') <> '' THEN 'yes' ELSE 'no' END"),
 )
 
 
@@ -530,6 +547,165 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
     out["finding_directions"] = list(FINDING_DIRECTIONS)
     out["complete"] = not out["incomplete"]
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# One variable, read per article, for the selection
+# ─────────────────────────────────────────────────────────────────────────────
+#: Les variables que la SÉLECTION résout par un chemin à elle, dans api/subsets : leur
+#: sémantique est particulière (le bruit du clustering, l'Europe sans pays unique, « devis
+#: non précisé » qui est une réponse) et éprouvée. Nommées ici pour que le registre et la
+#: sélection ne se contredisent jamais sur qui traite quoi.
+ROUTED_TO_SUBSETS = {"cluster": "clusters", "design": "designs", "grade_level": "levels",
+                     "country": "countries", "europe": "countries", "concepts": "concepts"}
+
+#: Les types lus comme des nombres : la condition porte alors un intervalle, pas une liste.
+_NUMBER_KEYS = {"year", "citations"}
+
+
+def filterable_keys() -> set[str]:
+    """Les clés sur lesquelles une condition de sélection a un sens: les variables standard
+    marquées filtrables, plus les groupes du codebook (`sheet.group`, reconnus au point)."""
+    return {v["key"] for v in STANDARD if v["filterable"]}
+
+
+def variable_membership(scenario_id: str, variable: str,
+                        threshold: float | None = None) -> dict[str, Any]:
+    """Qui porte quelle valeur, pour UNE variable, sur tout le sous-ensemble pertinent.
+
+    Renvoie `of` ({article: valeur}, ou {article: set(valeurs)} quand un article peut en
+    porter plusieurs), `kind` ("value", "multi" ou "number"), `labels` ({valeur: nom lisible})
+    et `present` (les valeurs effectivement portées). `judgeable` reste implicite: un article
+    absent de `of` n'a pas de valeur, donc la condition ne sait pas le juger et ne vote ni
+    pour ni contre, exactement comme une projection plafonnée.
+
+    Les cinq dimensions de ROUTED_TO_SUBSETS ne passent PAS ici: la sélection les résout
+    par leur chemin propre. Demander l'une d'elles est donc une erreur de programmation,
+    signalée comme telle plutôt que silencieusement mal répondue."""
+    if variable in ROUTED_TO_SUBSETS:
+        raise ValueError(f"{variable} is resolved by api/subsets, not here")
+    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    gate = relevant_gate_sql("d", "ars", ":thr")
+    out: dict[str, Any] = {"variable": variable, "kind": "value", "of": {}, "labels": {},
+                           "present": []}
+
+    # ── Un groupe du codebook: `sheet.group`. Un article peut en porter plusieurs valeurs
+    #    (deux professions, trois espèces), donc `multi`.
+    if "." in variable:
+        sheet, _, gkey = variable.partition(".")
+        index = get_index(scenario_id)
+        names = display_names(index, "en")
+        of: dict[int, set] = {}
+        labels: dict[str, str] = {}
+        with engine.connect() as conn:
+            for r in _rows(conn, f"""
+                SELECT o->>'sheet' AS sheet, o->>'group' AS grp, o->>'covariate' AS cov,
+                       array_agg(DISTINCT d.id) AS ids
+                {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'group'), '') IS NOT NULL
+                GROUP BY 1, 2, 3
+            """, scenario_id, thr):
+                s = sheet_key(r["sheet"]) or (r["sheet"] or "")
+                if s != sheet:
+                    continue
+                pos = normalise(index, s, r["grp"], r["cov"])
+                if (pos["group_key"] or (r["grp"] or "").strip().lower()) != gkey:
+                    continue
+                # Une ligne dont la VALEUR ne se rattache à rien porte quand même son
+                # groupe: l'article a répondu à la question, et l'écarter d'une sélection
+                # sur ce groupe le rendrait injugeable alors qu'il a parlé.
+                vkey = pos["covariate_key"] or ""
+                if not vkey:
+                    continue
+                labels.setdefault(vkey, display_path(names, sheet, gkey, vkey, "en").split(" > ")[-1])
+                for i in (r["ids"] or ()):
+                    of.setdefault(int(i), set()).add(vkey)
+        out.update({"kind": "multi", "of": of, "labels": labels,
+                    "present": sorted({v for vs in of.values() for v in vs})})
+        return out
+
+    # ── La maladie: pliée comme le pooling la plie, et multiple par nature.
+    if variable == "disease":
+        from .diseases import disease_key
+
+        of_d: dict[int, set] = {}
+        with engine.connect() as conn:
+            for r in _rows(conn, f"""
+                SELECT o->>'disease' AS disease, array_agg(DISTINCT d.id) AS ids
+                {_OBS_FROM.format(gate=gate)} AND NULLIF(TRIM(o->>'disease'), '') IS NOT NULL
+                GROUP BY 1
+            """, scenario_id, thr):
+                key = disease_key(r["disease"])
+                for i in (r["ids"] or ()):
+                    of_d.setdefault(int(i), set()).add(key)
+        present = sorted({v for vs in of_d.values() for v in vs})
+        out.update({"kind": "multi", "of": of_d, "labels": {k: k for k in present},
+                    "present": present})
+        return out
+
+    # ── Une colonne ou un champ caché, par la MÊME expression que le comptage.
+    expr = dict(_VALUE_SOURCES + _MEMBERSHIP_ONLY).get(variable)
+    if expr is None:
+        raise ValueError(f"unknown variable {variable!r}")
+    number = variable in _NUMBER_KEYS
+    of_v: dict[int, Any] = {}
+    with engine.connect() as conn:
+        for r in _rows(conn, f"""
+            SELECT d.id AS id, {expr} AS v
+            FROM literature_document d
+            JOIN article_scenarios ars ON ars.document_id = d.id
+            WHERE ars.scenario_id = :sid AND {gate}
+        """, scenario_id, thr):
+            raw = (r["v"] or "").strip()
+            if not raw:
+                continue
+            if number:
+                try:
+                    of_v[int(r["id"])] = int(float(raw))
+                except (TypeError, ValueError):
+                    continue
+            else:
+                of_v[int(r["id"])] = raw
+    present = sorted({str(v) for v in of_v.values()})
+    out.update({"kind": "number" if number else "value", "of": of_v,
+                "labels": {v: v for v in present}, "present": present})
+    return out
+
+
+def condition_verdict(of: dict[int, Any], kind: str, wanted: set | None = None,
+                      lo: float | None = None, hi: float | None = None):
+    """La fonction de verdict d'UNE condition: `in`, `out` ou `unknown` par article. PURE.
+
+    `unknown` veut dire « cette condition ne sait rien de cet article », jamais « non »:
+    un article sans valeur ne vote ni pour ni contre, et c'est la même règle que pour le
+    clustering plafonné. Confondre les deux viderait un corpus sur la foi d'une absence."""
+    if kind == "multi":
+        want = wanted or set()
+
+        def _multi(i: int) -> str:
+            vs = of.get(i)
+            if not vs:
+                return "unknown"
+            return "in" if (vs & want) else "out"
+        return _multi
+    if kind == "number":
+        def _num(i: int) -> str:
+            v = of.get(i)
+            if v is None:
+                return "unknown"
+            if lo is not None and v < lo:
+                return "out"
+            if hi is not None and v > hi:
+                return "out"
+            return "in"
+        return _num
+    want_v = wanted or set()
+
+    def _value(i: int) -> str:
+        v = of.get(i)
+        if v is None:
+            return "unknown"
+        return "in" if str(v) in want_v else "out"
+    return _value
 
 
 @app.get("/user-scenarios/{scenario_id}/variables-of-interest")

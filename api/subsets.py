@@ -62,6 +62,13 @@ def plan_subset(
     levels_wanted: set[str] | None = None,
     country_of: dict[int, str] | None = None,
     countries_wanted: set[str] | None = None,
+    # Les conditions GÉNÉRIQUES, une par variable du registre que les cinq dimensions
+    # nommées ci-dessus ne couvrent pas : `(nom, fonction de verdict)`. Les cinq gardent
+    # leur chemin propre parce que leur sémantique est particulière et éprouvée (le bruit
+    # du clustering, l'Europe sans pays unique, « devis non précisé » qui EST une réponse),
+    # et une unification qui les réécrirait changerait leur comportement le jour où elle
+    # est faite. Ce qui s'unifie, c'est le nombre de dimensions, pas leurs règles.
+    conditions: list[tuple[str, Any]] | None = None,
     combine: str = "all",
     unassigned: str = "keep",
     # Les articles qu'un relecteur a INCLUS À LA MAIN. Ils ne sont jamais exclus par
@@ -153,10 +160,13 @@ def plan_subset(
             return "in" if key in wanted_countries else "out"
 
         verdicts.append(("countries", _country))
+    for name, fn in (conditions or ()):
+        verdicts.append((str(name), fn))
 
     if not verdicts:
         raise ValueError("aucune dimension de sélection : donnez des clusters, des concepts, "
-                         "des devis d'étude, des niveaux de preuve ou des pays")
+                         "des devis d'étude, des niveaux de preuve, des pays, ou une condition "
+                         "sur une variable du registre")
 
     keep: list[int] = []
     drop: list[int] = []
@@ -215,7 +225,8 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
                        threshold: float | None = None,
                        designs: list[str] | None = None,
                        levels: list[str] | None = None,
-                       countries: list[str] | None = None) -> str:
+                       countries: list[str] | None = None,
+                       conditions: list[str] | None = None) -> str:
     """La phrase stockée dans `screening_reason`, donc celle que lira la PRISMA et qui
     devra tenir dans une section Méthodes. Elle nomme ce qui a été GARDÉ, pas un
     identifiant de calcul : les numéros de cluster changent au recalcul suivant.
@@ -241,6 +252,10 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
     # section Méthodes, « hors de IT, FR » non.
     if countries:
         parts.append("pays " + ", ".join(countries))
+    # Les conditions génériques arrivent déjà rédigées (« année à partir de 2015 »,
+    # « langue en, fr ») : elles nomment leur variable et leurs valeurs en clair, pour la
+    # même raison que les clusters sont nommés plutôt que numérotés.
+    parts.extend(conditions or [])
     joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
     # Le seuil EN TÊTE : le motif est coupé à 480 caractères, et une longue sélection
@@ -511,7 +526,109 @@ def _concept_membership(scenario_id: str, concepts: list[str], mode: str,
 
 
 # ─── Le plan complet, tel que les trois endpoints le partagent ──────────────
+#: Une condition générique, telle que l'appelant l'écrit:
+#:   {"variable": "year", "min": 2015}                      un intervalle, pour un nombre
+#:   {"variable": "language", "values": ["en", "fr"]}       une liste de modalités
+#:   {"variable": "human_exp.occupation", "values": [...]}  un groupe du codebook
+#: Les variables que les cinq dimensions nommées couvrent déjà sont REDIRIGÉES vers elles,
+#: pour que « pays Italie » écrit en condition et écrit en `countries` fassent exactement la
+#: même chose, l'extension de l'Europe comprise.
+_CONDITION_KEYS = ("variable", "values", "min", "max")
+
+
+def _fold_conditions(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Le payload avec les conditions redirigées vers les cinq dimensions nommées quand
+    elles les couvrent, et la liste de celles qui restent génériques. PUR."""
+    from .variables_of_interest import ROUTED_TO_SUBSETS
+
+    raw = payload.get("conditions")
+    if raw is None:
+        return payload, []
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=422, detail="`conditions` doit être une liste.")
+    folded = dict(payload)
+    generic: list[dict[str, Any]] = []
+    for i, c in enumerate(raw, 1):
+        if not isinstance(c, dict) or not str(c.get("variable") or "").strip():
+            raise HTTPException(status_code=422,
+                                detail=f"condition {i} : il faut `variable`.")
+        var = str(c["variable"]).strip()
+        values = c.get("values")
+        slot = ROUTED_TO_SUBSETS.get(var)
+        if slot:
+            if var == "europe":
+                # « En Europe » EST la sélection par pays avec la clé Europe: une seule
+                # résolution, donc un seul comportement à vérifier.
+                values = [EUROPE_KEY]
+            if not values:
+                raise HTTPException(status_code=422,
+                                    detail=f"condition {i} ({var}) : il faut `values`.")
+            folded[slot] = list(folded.get(slot) or []) + list(values)
+            continue
+        generic.append({"variable": var, "values": values,
+                        "min": c.get("min"), "max": c.get("max")})
+    return folded, generic
+
+
+def _generic_conditions(scenario_id: str, threshold: float,
+                        wanted: list[dict[str, Any]]) -> tuple[list[tuple[str, Any]], list[str], dict]:
+    """Les verdicts des conditions génériques, les phrases qui les nomment, et leur méta.
+
+    Chaque variable est lue par le registre (`variable_membership`), qui la lit par la MÊME
+    expression que celle qui la compte sur la page: une condition ne peut donc pas porter
+    sur une autre lecture que celle que le relecteur a vue."""
+    from .variables_of_interest import condition_verdict, filterable_keys, variable_membership
+
+    out: list[tuple[str, Any]] = []
+    phrases: list[str] = []
+    meta: dict[str, Any] = {}
+    allowed = filterable_keys()
+    for c in wanted:
+        var = c["variable"]
+        if "." not in var and var not in allowed:
+            raise HTTPException(
+                status_code=404,
+                detail=f"La variable « {var} » ne se filtre pas. Filtrables : "
+                       f"{', '.join(sorted(allowed))}, ou un groupe du codebook (sheet.group).")
+        try:
+            got = variable_membership(scenario_id, var, threshold)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        kind, of, labels = got["kind"], got["of"], got["labels"]
+        lo = hi = None
+        asked: set[str] = set()
+        if kind == "number":
+            if c.get("min") is None and c.get("max") is None:
+                raise HTTPException(status_code=422,
+                                    detail=f"« {var} » est un nombre : donnez `min` et/ou `max`.")
+            try:
+                lo = None if c.get("min") is None else float(c["min"])
+                hi = None if c.get("max") is None else float(c["max"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"« {var} » : `min` et `max` sont des nombres.")
+            if lo is not None and hi is not None and lo > hi:
+                raise HTTPException(status_code=422, detail=f"« {var} » : `min` dépasse `max`.")
+            bounds = " ".join(filter(None, [f"à partir de {lo:g}" if lo is not None else "",
+                                            f"jusqu'à {hi:g}" if hi is not None else ""]))
+            phrases.append(f"{var} {bounds}")
+        else:
+            asked = {str(v) for v in (c.get("values") or []) if str(v).strip()}
+            if not asked:
+                raise HTTPException(status_code=422, detail=f"« {var} » : aucune valeur demandée.")
+            missing = sorted(asked - set(got["present"]))
+            if missing:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Valeur(s) absente(s) de ce corpus pour « {var} » : {missing} "
+                           f"(présentes : {', '.join(got['present'][:25]) or 'aucune'}).")
+            phrases.append(f"{var} " + ", ".join(labels.get(v, v) for v in sorted(asked)))
+        out.append((var, condition_verdict(of, kind, asked, lo, hi)))
+        meta[var] = {"kind": kind, "n_with_value": len(of), "n_values": len(got["present"])}
+    return out, phrases, meta
+
+
 def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload, generic = _fold_conditions(payload)
     clusters = payload.get("clusters")
     concepts = payload.get("concepts")
     concept_filter = payload.get("concept_filter")
@@ -524,11 +641,11 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     if concept_mode not in ("any", "all"):
         raise HTTPException(status_code=422, detail="concept_mode doit valoir 'any' ou 'all'")
     if not clusters and not concepts and not concept_filter and not designs and not levels \
-            and not countries:
+            and not countries and not generic:
         raise HTTPException(status_code=422,
-                            detail="Donnez au moins `clusters`, `concepts`, `concept_filter`, `designs`, "
-                                   "`levels` ou `countries` : sans dimension de sélection il n'y a "
-                                   "rien à découper.")
+                            detail="Donnez au moins une condition (`conditions`), ou `clusters`, "
+                                   "`concepts`, `concept_filter`, `designs`, `levels` ou `countries` : "
+                                   "sans dimension de sélection il n'y a rien à découper.")
 
     threshold = _get_scenario_threshold(scenario_id)
     relevant = _relevant_ids(scenario_id, threshold)
@@ -617,12 +734,18 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         country_labels = labels
         meta["countries"] = cnmeta
 
+    conditions, condition_phrases, condition_meta = _generic_conditions(
+        scenario_id, threshold, generic)
+    if condition_meta:
+        meta["conditions"] = condition_meta
+
     try:
         plan = plan_subset(relevant, cluster_of=cluster_of, clusters_wanted=wanted_clusters,
                            concept_match=concept_match, concept_known=concept_known,
                            design_of=design_of, designs_wanted=wanted_designs,
                            level_of=level_of, levels_wanted=wanted_levels,
                            country_of=country_of, countries_wanted=wanted_countries,
+                           conditions=conditions,
                            combine=combine, unassigned=unassigned,
                            included_ids=_manually_included_ids(scenario_id))
     except ValueError as e:
@@ -634,7 +757,8 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
                                         threshold=threshold,
                                         designs=sorted(wanted_designs) if wanted_designs else None,
                                         levels=sorted(wanted_levels) if wanted_levels else None,
-                                        countries=country_labels or None)
+                                        countries=country_labels or None,
+                                        conditions=condition_phrases or None)
     return plan
 
 
