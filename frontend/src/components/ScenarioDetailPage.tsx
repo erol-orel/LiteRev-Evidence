@@ -45,6 +45,7 @@ import {
   generateEvidenceBrief,
   getBriefGenerationStatus,
   getScenarioVariables,
+  fetchModelEvidence,
   generateScenarioVariables,
   getVariablesGenerationStatus,
   validateScenarioVariables,
@@ -155,6 +156,7 @@ import {
   type PicoScope,
   type EvidenceBriefData,
   type LlmEvidenceBrief,
+  type ModelEvidence,
   type ScenarioVariables,
   type KnowledgeGraphData,
   type KGNode,
@@ -1788,12 +1790,19 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
   const mountedRef = useRef(true);
   const trainPollRef = useRef<PollHandle<unknown> | null>(null);
 
+  // Ce que l'extraction a LU de chaque entrée du modèle. Deux mesures différentes vivent
+  // côte à côte : `evidence_count` compte les articles dont le résumé MENTIONNE le nom de
+  // la variable, celle-ci les articles dont l'extraction la RAPPORTE, parce que le codebook
+  // la leur a demandée par son nom. Lecture seule, sans appel de modèle.
+  const [modelEv, setModelEv] = useState<ModelEvidence | null>(null);
+
   const loadLlmVars = React.useCallback(() => {
     setLlmLoading(true);
     getScenarioVariables(scenarioId)
       .then(d => { setLlmVars(d); setLlmLoading(false); })
       .catch(() => { setLlmLoading(false); });
-  }, [scenarioId]);
+    fetchModelEvidence(scenarioId, lang).then(setModelEv).catch(() => setModelEv(null));
+  }, [scenarioId, lang]);
 
   React.useEffect(() => {
     loadLlmVars();
@@ -2084,6 +2093,7 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                   <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableType")}</th>
                   <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableDefinition")}</th>
                   <th className="py-2.5 px-3">{t("scenarioDetail.variables.tableSource")}</th>
+                  <th className="py-2.5 px-3 text-center">{t("scenarioDetail.variables.tableEvidence")}</th>
                   <th className="py-2.5 px-3 text-center">{t("scenarioDetail.variables.tableAvailability")}</th>
                   <th className="py-2.5 px-3 text-center">{t("scenarioDetail.variables.tableImportance")}</th>
                 </tr>
@@ -2106,6 +2116,39 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                         : v._seir_role === 'parameter'
                         ? t("scenarioDetail.variables.seirParamSourceLabel")
                         : v.data_source}
+                    </td>
+                    {/* La preuve, en deux mesures qui ne disent pas la même chose : les
+                        articles dont l'extraction RAPPORTE la variable (le codebook la leur
+                        a demandée), et à défaut les articles qui la MENTIONNENT. Jamais un
+                        zéro quand le registre ne sait pas : une mention n'est pas une
+                        lecture, et l'absence de jointure n'est pas l'absence de preuve. */}
+                    <td className="py-3 px-3 text-center">
+                      {(() => {
+                        // Rapproché par POSITION : les deux listes sortent du même spec
+                        // stocké, et le nom affiché ici peut être une traduction.
+                        const ev = modelEv?.variables?.[i];
+                        if (ev?.register_count != null && ev.register_variable) {
+                          const top = ev.register_values.slice(0, 3)
+                            .map(x => `${x.label} ${x.n}`).join(", ");
+                          return (
+                            <span title={`${ev.register_name || ev.register_variable}${top ? ` - ${top}` : ""}`}
+                              className="inline-flex flex-col items-center gap-0.5">
+                              <span className="font-mono text-[11px] text-brand-300">{ev.register_level}</span>
+                              <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceRead")}</span>
+                            </span>
+                          );
+                        }
+                        if (v.evidence_count != null) {
+                          return (
+                            <span title={t("scenarioDetail.variables.evidenceMentionedHint")}
+                              className="inline-flex flex-col items-center gap-0.5">
+                              <span className="font-mono text-[11px] text-white/55">{v.evidence_level ?? v.evidence_count}</span>
+                              <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceMentioned")}</span>
+                            </span>
+                          );
+                        }
+                        return <span className="text-white/25">-</span>;
+                      })()}
                     </td>
                     <td className="py-3 px-3 text-center">
                       {(() => {
@@ -2164,6 +2207,17 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
               </tbody>
             </table>
           </div>
+          {/* Les deux dénominateurs, dits une fois sous le tableau : « lu » se compte sur
+              les articles que l'extraction a lus, « mentionné » sur les pertinents. */}
+          {modelEv?.status === "ok" && (
+            <p className="text-[10px] leading-4 text-white/35">
+              {t("scenarioDetail.variables.evidenceNote")
+                .replace("{matched}", String(modelEv.matched))
+                .replace("{total}", String(modelEv.n_variables))
+                .replace("{read}", String(modelEv.denominator))
+                .replace("{relevant}", String(modelEv.evidence_count_denominator ?? "?"))}
+            </p>
+          )}
 
           {/* Algorithme recommande */}
           {llmVars.recommended_algorithm && (
