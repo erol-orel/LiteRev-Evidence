@@ -5349,3 +5349,32 @@ export async function fetchVariablesCrosstab(
 export function variablesOfInterestExportUrl(scenarioId: string, lang: string): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/export?lang=${encodeURIComponent(lang)}`;
 }
+
+export interface CodebookTemplate {
+  key: string;
+  name: string;
+  note: string;
+  n_nodes: number;
+  n_groups: number;
+  /** Le vocabulaire dont part un scénario créé maintenant. */
+  is_default_for_new: boolean;
+}
+
+export async function fetchCodebookTemplates(lang: string): Promise<{
+  templates: CodebookTemplate[]; default_for_new: string;
+}> {
+  const r = await safeFetch(`${API_BASE_URL}/codebook/templates?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Remplace le codebook du scénario par un vocabulaire de départ. */
+export async function loadCodebookTemplate(
+  scenarioId: string, key: string,
+): Promise<{ template: string; n_nodes: number }> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/codebook/template/${encodeURIComponent(key)}`,
+    { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}

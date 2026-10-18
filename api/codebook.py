@@ -210,6 +210,170 @@ DEFAULT_NODES: list[dict[str, Any]] = _default_nodes()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starter vocabularies
+# ─────────────────────────────────────────────────────────────────────────────
+# The vocabulary above is the ONE HEALTH one, and it is right for the reviews it was
+# written for: poultry worker, live bird market, duck, biosecurity. It is the wrong
+# starting point for a review of hospital capacity or of how long a virus survives on a
+# surface, and a reviewer who meets it there has to delete most of it before adding
+# anything. So it becomes one starter among several, loaded in one click, and the generic
+# one holds only what is true of any epidemiological review.
+#
+# DEFAULT_NODES is NOT changed. A scenario that never stored a codebook reads it at serve
+# time, so changing it would silently rewrite the labels of every review already running,
+# the four partner ones included. New scenarios are given the generic starter at creation
+# instead, which leaves the existing ones exactly as they are.
+def _generic_nodes() -> list[dict[str, Any]]:
+    """What any epidemiological review asks, with no disease in it.
+
+    The groups of the One Health vocabulary that are not about one pathogen, keeping only
+    their disease-agnostic values: an occupation is a health worker or a farmer, not a
+    poultry culler; a setting is a household or a hospital, not a live bird market."""
+    S, E, V, N = "human_susc", "human_exp", "env", "animal"
+    keep_whole = {"sex_gender", "age", "comorbidity", "pregnancy", "ethnicity", "socioeconomic"}
+    out = [n for n in DEFAULT_NODES if n["sheet"] == S and n["l1"] in keep_whole]
+    out += [
+        _n(S, "immune_status", None, ("immune status", "immunity", "serostatus", "vaccination status", "vaccination", "immunite"), "Immune status", "Statut immunitaire"),
+        _n(S, "immune_status", "vaccinated", ("vaccinated", "immunized", "immunised", "received vaccine", "vaccin"), "Vaccinated", "Vaccinés"),
+        _n(S, "immune_status", "unvaccinated", ("unvaccinated", "not vaccinated", "non vaccine", "vaccine naive"), "Unvaccinated", "Non vaccinés"),
+        _n(S, "immune_status", "seropositive", ("seropositive", "seroprevalence", "antibody positive", "seroconversion"), "Seropositive", "Séropositifs"),
+        _n(S, "outcome", None, ("outcome", "severity", "clinical outcome", "issue", "evolution"), "Outcome", "Évolution"),
+        _n(S, "outcome", "hospitalised", ("hospitalised", "hospitalized", "admitted", "admission", "hospitalisation"), "Hospitalised", "Hospitalisés"),
+        _n(S, "outcome", "severe", ("severe", "critical", "intensive care", "icu", "grave", "severe disease"), "Severe or critical", "Grave ou critique"),
+        _n(S, "outcome", "death", ("death", "died", "fatal", "fatality", "mortality", "deces", "letalite"), "Death", "Décès"),
+        _n(S, "outcome", "recovered", ("recovered", "recovery", "discharged", "guerison"), "Recovered", "Guéris"),
+        _n(E, "occupation", None, ("occupation", "profession", "job", "work", "occupational group", "workplace", "metier"), "Occupation", "Profession"),
+        _n(E, "occupation", "health_worker", ("health worker", "healthcare worker", "hcw", "nurse", "physician", "doctor", "clinician", "medical staff", "soignant"), "Health worker", "Soignant"),
+        _n(E, "occupation", "farmer", ("farmer", "farm worker", "agricultural worker", "livestock worker", "agriculteur"), "Farmer", "Agriculteur"),
+        _n(E, "occupation", "laboratory_worker", ("laboratory worker", "lab worker", "laboratory staff", "technician"), "Laboratory worker", "Personnel de laboratoire"),
+        _n(E, "occupation", "general_public", ("general public", "general population", "community", "resident", "population generale"), "General public", "Grand public"),
+        _n(E, "contact_type", None, ("contact", "contact type", "type of contact", "exposure", "exposure type", "type d exposition"), "Type of contact", "Type de contact"),
+        _n(E, "contact_type", "direct_contact", ("direct contact", "close contact", "household contact", "face to face"), "Direct contact", "Contact direct"),
+        _n(E, "contact_type", "indirect_contact", ("indirect contact", "contaminated surface", "fomite", "contaminated material"), "Indirect contact", "Contact indirect"),
+        _n(E, "contact_type", "airborne", ("airborne", "aerosol", "droplet", "respiratory transmission"), "Airborne or droplet", "Aérien ou gouttelettes"),
+        _n(E, "contact_type", "waterborne_foodborne", ("waterborne", "foodborne", "water", "food", "ingestion", "consumption"), "Water or food", "Eau ou aliment"),
+        _n(E, "behaviour_kap", None, ("kap", "knowledge attitude practice", "knowledge", "attitude", "practice", "behaviour", "behavior", "risk perception", "awareness", "connaissance", "comportement"), "Knowledge, attitudes, practices", "Connaissances, attitudes, pratiques"),
+        _n(E, "ppe", None, ("ppe", "personal protective equipment", "protective equipment", "protection", "mask", "equipement de protection", "epi"), "Protective equipment", "Équipements de protection"),
+        _n(V, "setting", None, ("setting", "location type", "place", "contexte", "milieu"), "Setting", "Contexte"),
+        _n(V, "setting", "household", ("household", "home", "family", "domestic", "foyer", "menage"), "Household", "Foyer"),
+        _n(V, "setting", "healthcare", ("hospital", "healthcare setting", "clinic", "health facility", "nosocomial", "hopital"), "Healthcare setting", "Milieu de soins"),
+        _n(V, "setting", "school", ("school", "university", "childcare", "daycare", "ecole"), "School", "École"),
+        _n(V, "setting", "workplace", ("workplace", "occupational setting", "factory", "office", "lieu de travail"), "Workplace", "Lieu de travail"),
+        _n(V, "setting", "community", ("community", "population based", "general community", "communaute"), "Community", "Communauté"),
+        _n(V, "climate", None, ("climate", "weather", "season", "seasonality", "temperature", "humidity", "rainfall", "climat"), "Climate or season", "Climat ou saison"),
+        _n(N, "test", None, ("test", "diagnostic test", "assay", "laboratory result", "pcr", "serology", "elisa", "test result"), "Test", "Test"),
+        _n(N, "test", "pcr_positive", ("pcr positive", "rt pcr positive", "rt qpcr positive", "nucleic acid", "viral rna"), "PCR positive", "PCR positive"),
+        _n(N, "test", "seropositive", ("seropositive", "antibody positive", "elisa positive", "serological"), "Seropositive", "Séropositif"),
+    ]
+    return out
+
+
+def _healthcare_capacity_nodes() -> list[dict[str, Any]]:
+    """What a review of healthcare capacity asks. The codebook the ISS reviewers asked for."""
+    S, E, V = "human_susc", "human_exp", "env"
+    return [
+        _n(V, "beds", None, ("bed", "beds", "bed capacity", "hospital beds", "beds per", "lits"), "Beds", "Lits"),
+        _n(V, "beds", "icu_beds", ("icu bed", "intensive care bed", "critical care bed", "lit de reanimation"), "Intensive care beds", "Lits de réanimation"),
+        _n(V, "beds", "acute_beds", ("acute bed", "ward bed", "general bed", "inpatient bed", "lit d hospitalisation"), "Acute care beds", "Lits d'hospitalisation"),
+        _n(V, "beds", "occupancy", ("occupancy", "bed occupancy", "occupancy rate", "saturation", "taux d occupation"), "Occupancy", "Taux d'occupation"),
+        _n(V, "staff", None, ("staff", "workforce", "personnel", "human resources", "staffing", "effectif"), "Staff", "Personnel"),
+        _n(V, "staff", "nurses", ("nurse", "nurses", "nursing staff", "nurse to patient", "infirmier"), "Nurses", "Infirmiers"),
+        _n(V, "staff", "physicians", ("physician", "doctor", "medical staff", "intensivist", "medecin"), "Physicians", "Médecins"),
+        _n(V, "staff", "shortage", ("shortage", "understaffing", "absenteeism", "burnout", "penurie"), "Shortage", "Pénurie"),
+        _n(V, "equipment", None, ("equipment", "ventilator", "oxygen", "supplies", "stockpile", "equipement"), "Equipment", "Équipement"),
+        _n(V, "equipment", "ventilators", ("ventilator", "mechanical ventilation", "respirator", "respirateur"), "Ventilators", "Respirateurs"),
+        _n(V, "equipment", "oxygen", ("oxygen", "oxygen supply", "medical oxygen", "oxygene"), "Oxygen", "Oxygène"),
+        _n(V, "surge", None, ("surge", "surge capacity", "escalation", "contingency", "crisis standard", "plan blanc"), "Surge capacity", "Capacité de montée en charge"),
+        _n(V, "access", None, ("access", "accessibility", "catchment", "distance", "travel time", "referral", "acces"), "Access", "Accès"),
+        _n(V, "access", "referral", ("referral", "transfer", "inter hospital transfer", "transfert"), "Referral or transfer", "Transfert"),
+        _n(V, "access", "triage", ("triage", "prioritisation", "prioritization", "rationing", "tri"), "Triage", "Tri"),
+        _n(E, "occupation", None, ("occupation", "staff category", "profession", "metier"), "Occupation", "Profession"),
+        _n(E, "occupation", "health_worker", ("health worker", "healthcare worker", "hcw", "nurse", "physician", "soignant"), "Health worker", "Soignant"),
+        _n(S, "outcome", None, ("outcome", "mortality", "severity", "length of stay", "evolution"), "Outcome", "Évolution"),
+        _n(S, "outcome", "death", ("death", "mortality", "fatality", "died", "deces"), "Death", "Décès"),
+        _n(S, "outcome", "length_of_stay", ("length of stay", "los", "duration of stay", "duree de sejour"), "Length of stay", "Durée de séjour"),
+        _n(S, "sex_gender", None, ("sex", "gender", "sexe", "genre"), "Sex or gender", "Sexe ou genre"),
+        _n(S, "age", None, ("age", "age group", "age band", "tranche d age"), "Age", "Âge"),
+    ]
+
+
+def _persistence_nodes() -> list[dict[str, Any]]:
+    """What a review of environmental persistence asks: a matrix, a condition, a survival."""
+    V, N = "env", "animal"
+    return [
+        _n(V, "matrix", None, ("matrix", "medium", "substrate", "surface", "material", "sample type", "matrice"), "Matrix", "Matrice"),
+        _n(V, "matrix", "water", ("water", "surface water", "waste water", "wastewater", "sewage", "eau"), "Water", "Eau"),
+        _n(V, "matrix", "soil", ("soil", "sediment", "dust", "litter", "manure", "slurry", "sol"), "Soil or litter", "Sol ou litière"),
+        _n(V, "matrix", "surface", ("surface", "stainless steel", "plastic", "glass", "fomite", "steel"), "Hard surface", "Surface dure"),
+        _n(V, "matrix", "air", ("air", "aerosol", "airborne", "droplet", "dust particle"), "Air", "Air"),
+        _n(V, "matrix", "food", ("food", "meat", "egg", "milk", "produce", "aliment"), "Food", "Aliment"),
+        _n(V, "persistence", None, ("persistence", "survival", "stability", "viability", "persistance", "survie"), "Persistence", "Persistance"),
+        _n(V, "persistence", "survival_time", ("survival time", "half life", "t90", "d value", "time to inactivation", "duree de survie"), "Survival time", "Durée de survie"),
+        _n(V, "persistence", "decay_rate", ("decay rate", "inactivation rate", "log reduction", "k value", "taux de decroissance"), "Decay rate", "Taux de décroissance"),
+        _n(V, "condition", None, ("condition", "experimental condition", "treatment", "condition experimentale"), "Condition", "Condition"),
+        _n(V, "condition", "temperature", ("temperature", "degrees", "celsius", "cold", "heat", "frozen", "temperature"), "Temperature", "Température"),
+        _n(V, "condition", "humidity", ("humidity", "relative humidity", "rh", "moisture", "humidite"), "Humidity", "Humidité"),
+        _n(V, "condition", "ph", ("ph", "acidity", "alkaline", "acidite"), "pH", "pH"),
+        _n(V, "condition", "uv_sunlight", ("uv", "ultraviolet", "sunlight", "solar", "irradiation", "lumiere"), "UV or sunlight", "UV ou lumière"),
+        _n(V, "condition", "disinfectant", ("disinfectant", "chlorine", "ethanol", "sodium hypochlorite", "biocide", "desinfectant"), "Disinfectant", "Désinfectant"),
+        _n(N, "test", None, ("test", "assay", "detection method", "quantification", "titre"), "Test", "Test"),
+        _n(N, "test", "pcr_positive", ("pcr", "rt pcr", "qpcr", "genome copies", "viral rna"), "PCR", "PCR"),
+        _n(N, "test", "culture", ("culture", "infectivity", "plaque assay", "tcid50", "eid50", "viable virus"), "Culture or infectivity", "Culture ou infectiosité"),
+    ]
+
+
+#: The starters a reviewer can load, in the order the picker shows them. `nodes` is built
+#: lazily by `codebook_template`, so a template is validated the same way an uploaded file
+#: is: a starter that would not pass an import must not pass here either.
+TEMPLATES: tuple[dict[str, Any], ...] = (
+    {"key": "generic_epi", "builder": _generic_nodes,
+     "name_en": "Generic epidemiology", "name_fr": "Épidémiologie générique",
+     "note_en": "What any epidemiological review asks, with no disease in it. What a new scenario starts from.",
+     "note_fr": "Ce que toute revue épidémiologique demande, sans maladie dedans. Le point de départ d'un nouveau scénario."},
+    {"key": "one_health", "builder": _default_nodes,
+     "name_en": "One Health zoonoses", "name_fr": "Une seule santé, zoonoses",
+     "note_en": "Species, settings, contact types, protective equipment and biosecurity: the vocabulary the avian influenza reviews were written with.",
+     "note_fr": "Espèces, contextes, types de contact, équipements de protection et biosécurité : le vocabulaire des revues sur la grippe aviaire."},
+    {"key": "healthcare_capacity", "builder": _healthcare_capacity_nodes,
+     "name_en": "Healthcare capacity", "name_fr": "Capacité de soins",
+     "note_en": "Beds, intensive care, staff, equipment, surge capacity, triage and referral.",
+     "note_fr": "Lits, réanimation, personnel, équipement, montée en charge, tri et transfert."},
+    {"key": "env_persistence", "builder": _persistence_nodes,
+     "name_en": "Environmental persistence", "name_fr": "Persistance environnementale",
+     "note_en": "Matrix, temperature, humidity, pH, disinfectant, survival time and decay rate.",
+     "note_fr": "Matrice, température, humidité, pH, désinfectant, durée de survie et taux de décroissance."},
+)
+#: The starter a scenario created from now on begins with.
+DEFAULT_TEMPLATE = "generic_epi"
+
+
+def codebook_template(key: str) -> list[dict[str, Any]]:
+    """The nodes of one starter, validated. Raises ValueError on an unknown key."""
+    spec = next((t for t in TEMPLATES if t["key"] == key), None)
+    if spec is None:
+        raise ValueError(f"unknown codebook template {key!r}; "
+                         f"available: {', '.join(t['key'] for t in TEMPLATES)}")
+    return validate_nodes([dict(n) for n in spec["builder"]()])
+
+
+def template_list(lang: str = "en") -> list[dict[str, Any]]:
+    """The starters as the picker shows them: a name, a note, and how big each one is."""
+    en = (lang or "en").lower().startswith("en")
+    out = []
+    for t in TEMPLATES:
+        try:
+            nodes = codebook_template(t["key"])
+        except ValueError:                                   # pragma: no cover - defensive
+            continue
+        groups = {(n["sheet"], n["l1"]) for n in nodes}
+        out.append({"key": t["key"], "name": t["name_en"] if en else t["name_fr"],
+                    "note": t["note_en"] if en else t["note_fr"],
+                    "n_nodes": len(nodes), "n_groups": len(groups),
+                    "is_default_for_new": t["key"] == DEFAULT_TEMPLATE})
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Validation, CSV, the index
 # ─────────────────────────────────────────────────────────────────────────────
 def _clean_node(raw: Any) -> dict[str, Any]:
@@ -512,6 +676,33 @@ def reset_codebook(scenario_id: str, _: None = Depends(require_api_key)) -> dict
     _get_user_scenario_or_404(scenario_id)
     _store(scenario_id, None)
     return {"scenario_id": scenario_id, "source": "default", "n_nodes": len(DEFAULT_NODES)}
+
+
+@app.get("/codebook/templates")
+def read_codebook_templates(lang: str = Query("en", max_length=8)) -> dict[str, Any]:
+    """The starter vocabularies a reviewer can load, and which one a new scenario begins
+    with. Not per scenario: a starter is the same for everyone, which is the point."""
+    return {"templates": template_list(lang), "default_for_new": DEFAULT_TEMPLATE}
+
+
+@app.post("/user-scenarios/{scenario_id}/codebook/template/{key}")
+def load_codebook_template(scenario_id: str, key: str,
+                           _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Replace the scenario's codebook with a starter.
+
+    It REPLACES, like an import does, and says how many nodes it wrote: a starter loaded
+    on top of a hand-mapped codebook would otherwise lose the mapping silently. The stored
+    extractions are untouched, because labels are normalised at read time: loading a
+    starter re-reads every extraction already made through the new vocabulary, with no new
+    model call."""
+    _get_user_scenario_or_404(scenario_id)
+    try:
+        nodes = codebook_template(key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    _store(scenario_id, nodes)
+    return {"scenario_id": scenario_id, "source": "custom", "template": key,
+            "n_nodes": len(nodes)}
 
 
 @app.get("/user-scenarios/{scenario_id}/codebook/unmapped")

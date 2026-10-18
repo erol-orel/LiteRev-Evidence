@@ -2,10 +2,10 @@ import React from "react";
 import { AlertTriangle, ChevronDown, ChevronUp, Download, Upload } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
 import {
-  addCodebookSynonym, codebookExportUrl, fetchCodebook, fetchUnmappedLabelsUpTo, hasApiKey,
-  importCodebookCsv, resetCodebook,
+  addCodebookSynonym, codebookExportUrl, fetchCodebook, fetchCodebookTemplates,
+  fetchUnmappedLabelsUpTo, hasApiKey, importCodebookCsv, loadCodebookTemplate, resetCodebook,
 } from "../lib/api";
-import type { CodebookResponse, UnmappedResponse } from "../lib/api";
+import type { CodebookResponse, CodebookTemplate, UnmappedResponse } from "../lib/api";
 import { mappedShare, nodeOptions } from "../lib/codebook";
 
 // Labels listed per step. The table stopped at the first 50 under "N labels still to
@@ -26,6 +26,9 @@ export function CodebookPanel({ scenarioId, onChanged }: { scenarioId: string; o
   const [pick, setPick] = React.useState<Record<string, string>>({});
   const [loadingMore, setLoadingMore] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
+  // Les vocabulaires de départ. Chargés à l'ouverture du panneau seulement : ils ne
+  // dépendent pas du scénario, et une revue qui n'ouvre pas le codebook n'en a pas besoin.
+  const [templates, setTemplates] = React.useState<CodebookTemplate[] | null>(null);
   const keyed = hasApiKey();
   // How many labels the table lists; a mapping reloads that many, not the first 50.
   const wanted = React.useRef(UNMAPPED_PAGE);
@@ -72,6 +75,18 @@ export function CodebookPanel({ scenarioId, onChanged }: { scenarioId: string; o
     if (!file) return;
     const out = await importCodebookCsv(scenarioId, await file.text());
     setMsg(T("uploaded").replace("{n}", String(out.n_nodes)));
+    await refresh();
+  });
+
+  React.useEffect(() => {
+    if (!open || templates) return;
+    fetchCodebookTemplates(currentLang()).then((t) => setTemplates(t.templates)).catch(() => {});
+  }, [open, templates]);
+
+  const loadTemplate = (key: string, name: string) => guard(async () => {
+    if (!window.confirm(T("confirmTemplate").replace("{name}", name))) return;
+    const out = await loadCodebookTemplate(scenarioId, key);
+    setMsg(T("templateLoaded").replace("{name}", name).replace("{n}", String(out.n_nodes)));
     await refresh();
   });
 
@@ -128,6 +143,31 @@ export function CodebookPanel({ scenarioId, onChanged }: { scenarioId: string; o
               )}
             </div>
           )}
+          {/* Les vocabulaires de départ. Le vocabulaire « Une seule santé » n'est plus le
+              point de départ imposé : c'est l'un des quatre, et une revue sur la capacité
+              hospitalière ou sur la persistance d'un virus part du sien. Charger remplace,
+              et le dit avant : un vocabulaire posé sur un codebook rattaché à la main
+              perdrait le rattachement. */}
+          {templates && templates.length > 0 && keyed && (
+            <div className="space-y-1.5 rounded-xl border border-white/5 bg-white/[0.02] px-3 py-2">
+              <p className="text-[10.5px] font-semibold text-white/70">{T("templatesTitle")}</p>
+              <p className="text-[10px] leading-4 text-white/40">{T("templatesNote")}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {templates.map((tpl) => (
+                  <button key={tpl.key} onClick={() => loadTemplate(tpl.key, tpl.name)}
+                    title={`${tpl.note} (${tpl.n_groups} ${T("groups")}, ${tpl.n_nodes} ${T("nodes")})`}
+                    className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-left text-[10px] text-white/75 hover:border-brand-400/50 hover:text-white transition">
+                    {tpl.name}
+                    <span className="ml-1 font-mono text-[9px] text-white/35">{tpl.n_groups}</span>
+                    {tpl.is_default_for_new && (
+                      <span className="ml-1 font-mono text-[9px] uppercase text-brand-300/80">{T("templateDefault")}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {msg && <p className="text-[11px] text-gold-300/80">{msg}</p>}
 
           {un && un.unmapped.length === 0 ? (
