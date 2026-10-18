@@ -5378,3 +5378,37 @@ export async function loadCodebookTemplate(
   if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
   return r.json();
 }
+
+export interface VariableGap {
+  scenario_id: string;
+  variables_asked_now: string[];
+  n_relevant: number;
+  n_extracted: number;
+  /** Les articles qu'une relecture concernerait vraiment, et son coût : un appel chacun. */
+  n_papers_missing_a_variable: number;
+  n_calls_estimate: number;
+  /** Lus avant qu'on note ce qui leur a été demandé : on ne peut pas savoir. */
+  n_papers_unknown: number;
+  by_variable: Array<{ key: string; name: string; n_papers: number }>;
+  complete: boolean;
+  error?: string;
+}
+
+export async function fetchVariableGap(scenarioId: string): Promise<VariableGap> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/extraction/variable-gap`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Relire les articles qu'une variable ajoutée n'a jamais atteints. DÉPENSE des appels :
+ *  n'appeler qu'après avoir montré la facture que `fetchVariableGap` donne. */
+export async function runExtractionForNewVariables(
+  scenarioId: string,
+): Promise<{ status: string; reason?: string; n_relevant?: number; n_pending?: number }> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/extraction/run?new_variables=true`,
+    { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
