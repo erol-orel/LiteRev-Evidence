@@ -97,6 +97,26 @@ def test_the_terms_of_a_variable_read_its_name_then_its_keywords():
     assert len(terms) <= 12
 
 
+def test_a_definition_is_a_sentence_and_never_joins_a_variable():
+    """The defect this guards, found on the live exposure review: the join read the
+    DEFINITION too, and "Virus subtype and clade", defined as "present at the exposure
+    source", was reported as 277 of 818 papers having READ a contact type. A sentence
+    contains a group's name without being about it, so only labels join.
+
+    The definitions below are the ones production actually stores."""
+    ix = _index()
+    subtype = {"name": "Virus subtype and clade",
+               "keywords": ["virus subtype", "clade", "H5N1", "H5N8"],
+               "definition": "Genetically characterized HPAI subtype and clade present at "
+                             "the exposure source, such as H5N1 clade 2.3.4.4b or H5N8."}
+    assert "exposure" not in " ".join(_join_terms(subtype)).lower()
+    assert find_variable(ix, *_join_terms(subtype)) is None, "no join beats a wrong join"
+    # And a variable whose own name does name a question still joins.
+    ppe = {"name": "Personal protective equipment use", "keywords": ["mask", "gloves"],
+           "definition": "Any use of protective equipment during the exposure window."}
+    assert find_variable(ix, *_join_terms(ppe)) == ("human_exp", "ppe")
+
+
 # ── Over the database ───────────────────────────────────────────────────────
 def _engine_ok() -> bool:
     try:
