@@ -37,6 +37,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import text
 
 from .codebook import get_codebook, get_index, normalise, sheet_key
@@ -706,6 +707,180 @@ def condition_verdict(of: dict[int, Any], kind: str, wanted: set | None = None,
             return "unknown"
         return "in" if str(v) in want_v else "out"
     return _value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Crossing two variables
+# ─────────────────────────────────────────────────────────────────────────────
+#: Combien de modalités par axe. Au-delà, une grille ne se lit plus, et la longueur vraie
+#: de chaque axe est dite à côté pour qu'une troncature ne passe pas pour un corpus pauvre.
+_CROSS_MAX_LABELS = 12
+
+
+def _as_sets(of: dict[int, Any], kind: str) -> dict[int, set]:
+    """Une carte article -> valeurs, quelle que soit sa forme. Un nombre devient sa propre
+    valeur: croiser l'année avec autre chose a un sens, et une année EST une modalité."""
+    if kind == "multi":
+        return {i: set(v) for i, v in of.items() if v}
+    return {i: {str(v)} for i, v in of.items() if v is not None}
+
+
+def cross_counts(of_rows: dict[int, set], of_cols: dict[int, set],
+                 max_labels: int = _CROSS_MAX_LABELS) -> dict[str, Any]:
+    """La grille de deux variables, en articles DISTINCTS. PURE.
+
+    Le total d'un axe est le nombre d'articles qui portent cette modalité, jamais la somme
+    de ses cellules: un article qui porte deux professions et un pays compte une fois pour
+    ce pays, et une somme de cellules le compterait deux fois. La carte des concepts, qui
+    additionne, le dit dans sa propre note; ici les deux lectures ne peuvent pas diverger.
+
+    La population de la grille est l'ensemble des articles que les DEUX variables savent
+    juger, et les trois autres cas sont comptés à part: un lecteur doit savoir ce que la
+    grille n'a pas pu placer avant de lire une case vide comme un manque."""
+    both = set(of_rows) & set(of_cols)
+    cells: dict[tuple[str, str], set] = {}
+    row_ids: dict[str, set] = {}
+    col_ids: dict[str, set] = {}
+    for i in both:
+        for r in of_rows[i]:
+            row_ids.setdefault(r, set()).add(i)
+            for c in of_cols[i]:
+                cells.setdefault((r, c), set()).add(i)
+        for c in of_cols[i]:
+            col_ids.setdefault(c, set()).add(i)
+
+    def _axis(ids: dict[str, set]) -> list[str]:
+        return [k for k, _ in sorted(ids.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+
+    all_rows, all_cols = _axis(row_ids), _axis(col_ids)
+    rows, cols = all_rows[:max_labels], all_cols[:max_labels]
+    grid = [{"row": r, "col": c, "n": len(cells.get((r, c)) or ())} for r in rows for c in cols]
+    return {
+        "rows": [{"value": r, "n": len(row_ids[r])} for r in rows],
+        "cols": [{"value": c, "n": len(col_ids[c])} for c in cols],
+        "rows_total": len(all_rows), "cols_total": len(all_cols),
+        "cells": grid,
+        "n_both": len(both),
+        "n_rows_only": len(set(of_rows) - set(of_cols)),
+        "n_cols_only": len(set(of_cols) - set(of_rows)),
+        "pairs_observed": sum(1 for c in grid if c["n"] > 0),
+        "cells_shown": len(grid),
+    }
+
+
+def membership_for_crossing(scenario_id: str, variable: str, threshold: float,
+                            lang: str = "en") -> tuple[dict[int, set], dict[str, str]]:
+    """(article -> valeurs, {valeur: nom lisible}) pour N'IMPORTE QUELLE variable du
+    registre, les cinq que la sélection résout elle-même comprises.
+
+    Elles passent par les MÊMES fonctions que la sélection et que les panneaux (le pliage
+    des devis, le résolveur de lieux, le cache du clustering), de sorte qu'une case de la
+    grille ne peut pas compter autrement que la barre qui montre la même chose ailleurs."""
+    from .study_design import design_label, level_label
+    from .subsets import EUROPE_KEY, _cluster_membership, _country_membership, _design_membership
+
+    if variable in ("design", "grade_level"):
+        design_of, level_of, _ = _design_membership(scenario_id, threshold)
+        of = design_of if variable == "design" else level_of
+        fn = design_label if variable == "design" else level_label
+        return ({i: {v} for i, v in of.items()},
+                {v: fn(v, lang) for v in set(of.values())})
+    if variable in ("country", "europe"):
+        from .geography import COUNTRY_NAME
+
+        country_of, _ = _country_membership(scenario_id, threshold)
+        if variable == "europe":
+            from .geography import NUTS_ISO
+
+            eu = set(NUTS_ISO) | {EUROPE_KEY}
+            return ({i: {"europe" if v in eu else "elsewhere"} for i, v in country_of.items()},
+                    {"europe": "Europe", "elsewhere": "elsewhere"})
+        return ({i: {v} for i, v in country_of.items()},
+                {v: (COUNTRY_NAME.get(v, v) if v != EUROPE_KEY else "Europe (no single country)")
+                 for v in set(country_of.values())})
+    if variable == "cluster":
+        cluster_of, names, _ = _cluster_membership(scenario_id)
+        return ({i: {str(c)} for i, c in cluster_of.items()},
+                {str(c): n for c, n in names.items()})
+    got = variable_membership(scenario_id, variable, threshold)
+    return _as_sets(got["of"], got["kind"]), dict(got["labels"])
+
+
+def crosstab(scenario_id: str, rows: str, cols: str, lang: str = "en",
+             threshold: float | None = None) -> dict[str, Any]:
+    """Deux variables du registre croisées sur tout le sous-ensemble pertinent.
+
+    Jamais d'exception: une variable que sa source ne sait pas lire (un clustering non
+    calculé) rend une grille vide qui dit pourquoi, parce qu'un panneau qui tombe en entier
+    n'apprend rien à personne."""
+    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
+    lang = _norm_lang(lang) or "en"
+    out: dict[str, Any] = {"scenario_id": scenario_id, "rows_variable": rows,
+                           "cols_variable": cols, "threshold": thr, "lang": lang}
+    if rows == cols:
+        raise HTTPException(status_code=422, detail="Croisez deux variables différentes.")
+    crossable = {v["key"] for v in STANDARD if v["crossable"]}
+    for key in (rows, cols):
+        if "." not in key and key not in crossable:
+            raise HTTPException(
+                status_code=404,
+                detail=f"La variable « {key} » ne se croise pas. Croisables : "
+                       f"{', '.join(sorted(crossable))}, ou un groupe du codebook (sheet.group).")
+    try:
+        of_r, labels_r = membership_for_crossing(scenario_id, rows, thr, lang)
+        of_c, labels_c = membership_for_crossing(scenario_id, cols, thr, lang)
+    except HTTPException as e:
+        out.update({"complete": False, "note": str(e.detail)[:300], "cells": [],
+                    "rows": [], "cols": []})
+        return out
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"crosstab {scenario_id} {rows}x{cols}: {e}")
+        out.update({"complete": False, "error": str(e)[:200], "cells": [], "rows": [], "cols": []})
+        return out
+    grid = cross_counts(of_r, of_c)
+    for r in grid["rows"]:
+        r["label"] = labels_r.get(r["value"], r["value"])
+    for c in grid["cols"]:
+        c["label"] = labels_c.get(c["value"], c["value"])
+    out.update(grid)
+    out["complete"] = True
+    return out
+
+
+@app.get("/user-scenarios/{scenario_id}/variables-of-interest/crosstab")
+def get_variables_crosstab(scenario_id: str, rows: str = Query(..., max_length=80),
+                           cols: str = Query(..., max_length=80),
+                           lang: str = Query("en", max_length=8)) -> dict[str, Any]:
+    """Deux variables croisées, en articles distincts, sur tout le sous-ensemble pertinent."""
+    _get_user_scenario_or_404(scenario_id)
+    return crosstab(scenario_id, rows, cols, lang)
+
+
+@app.get("/user-scenarios/{scenario_id}/variables-of-interest/export")
+def export_variables_of_interest(scenario_id: str, lang: str = Query("en", max_length=8)):
+    """Le registre en CSV: une ligne par variable, sa couverture et son dénominateur.
+
+    C'est la carte des manques sous la forme qu'un partenaire peut coller dans son tableur:
+    « voilà les questions que la revue pose, et combien d'articles y répondent »."""
+    import csv as _csv
+    import io as _io
+
+    _get_user_scenario_or_404(scenario_id)
+    reg = variables_of_interest(scenario_id, lang=lang)
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["variable", "name", "family", "filled_by", "cost", "type",
+                "papers_with_a_value", "out_of", "denominator", "n_values",
+                "values_shown", "unmapped"])
+    for v in reg["variables"]:
+        w.writerow([v["key"], v.get("name") or "", v["family"], v["source"], v["cost"],
+                    v["type"], "" if v["n_with_value"] is None else v["n_with_value"],
+                    v["denominator"], v["denominator_of"], v["n_values"],
+                    " | ".join(f"{x['label']}={x['n']}" for x in v["values"]),
+                    "yes" if v.get("unmapped") else ""])
+    return Response(content="﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="variables-{scenario_id}.csv"'})
 
 
 @app.get("/user-scenarios/{scenario_id}/variables-of-interest")
