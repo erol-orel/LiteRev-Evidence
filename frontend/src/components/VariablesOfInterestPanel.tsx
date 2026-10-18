@@ -1,8 +1,11 @@
 import React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
-import { fetchVariablesOfInterest, variablesOfInterestExportUrl } from "../lib/api";
-import type { SubsetCondition, VoiRegister, VoiVariable } from "../lib/api";
+import {
+  fetchVariableGap, fetchVariablesOfInterest, hasApiKey, runExtractionForNewVariables,
+  variablesOfInterestExportUrl,
+} from "../lib/api";
+import type { SubsetCondition, VariableGap, VoiRegister, VoiVariable } from "../lib/api";
 import { share } from "../lib/extraction";
 import { SelectionBar } from "./SelectionBar";
 import { CrosstabPanel } from "./CrosstabPanel";
@@ -34,6 +37,12 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   // Le croisement : la première variable cochée devient les lignes, la seconde les
   // colonnes, une troisième repart des lignes. Deux clics suffisent, sans menu.
   const [cross, setCross] = React.useState<string[]>([]);
+  // La facture d'une relecture : ce que coûterait de poser aux anciens articles une
+  // variable ajoutée depuis. Lue séparément du registre, parce qu'elle parle de dépense
+  // et non de contenu, et parce qu'elle doit pouvoir manquer sans vider la page.
+  const [gap, setGap] = React.useState<VariableGap | null>(null);
+  const [asking, setAsking] = React.useState(false);
+  const [askNote, setAskNote] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let alive = true;
@@ -47,6 +56,30 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   // Un scénario différent, une sélection différente : garder les conditions ferait porter
   // sur un corpus des valeurs lues dans un autre.
   React.useEffect(() => { setConds([]); }, [scenarioId]);
+
+  React.useEffect(() => {
+    let alive = true;
+    setGap(null);
+    fetchVariableGap(scenarioId)
+      .then((g) => { if (alive) setGap(g); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId, reload]);
+
+  const askNewVariables = async () => {
+    setAsking(true);
+    setAskNote(null);
+    try {
+      const out = await runExtractionForNewVariables(scenarioId);
+      setAskNote(out.status === "running" ? T("gapRunning")
+        : out.status === "paused" ? (out.reason || T("gapPaused"))
+        : out.status === "no_llm" ? T("gapNoLlm") : T("gapStarted"));
+    } catch (e) {
+      setAskNote((e as Error).message);
+    } finally {
+      setAsking(false);
+    }
+  };
 
   const condOf = (key: string) => conds.find((c) => c.variable === key);
   const toggleCond = (v: VoiVariable) => setConds((cs) => (
@@ -116,6 +149,39 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
           </div>
         ))}
       </div>
+
+      {/* La facture d'une relecture. Elle n'apparaît que s'il y a quelque chose à relire,
+          et le bouton est le SEUL chemin qui dépense : ni le pipeline ni l'extraction
+          ordinaire ne relisent un article parce qu'une variable a été ajoutée. */}
+      {gap?.complete && gap.n_papers_missing_a_variable > 0 && (
+        <div className="rounded-2xl border border-gold-400/25 bg-gold-400/[0.06] px-3 py-2.5 space-y-1.5">
+          <p className="text-[11px] leading-4 text-gold-200">
+            {T("gapTitle")
+              .replace("{papers}", gap.n_papers_missing_a_variable.toLocaleString())
+              .replace("{calls}", gap.n_calls_estimate.toLocaleString())}
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {gap.by_variable.slice(0, 8).map((v) => (
+              <span key={v.key} className="rounded border border-white/10 bg-white/[0.05] px-1.5 py-px text-[10px] text-white/75">
+                {v.name}<span className="ml-1 font-mono text-white/40">{v.n_papers}</span>
+              </span>
+            ))}
+          </div>
+          {gap.n_papers_unknown > 0 && (
+            <p className="text-[10px] leading-4 text-white/45">
+              {T("gapUnknown").replace("{n}", gap.n_papers_unknown.toLocaleString())}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={askNewVariables} disabled={asking || !hasApiKey()}
+              title={hasApiKey() ? undefined : T("gapNeedsKey")}
+              className="rounded-lg bg-gold-500/80 px-2.5 py-1 text-[11px] font-semibold text-onsolid disabled:opacity-40">
+              {T("gapAsk").replace("{papers}", gap.n_papers_missing_a_variable.toLocaleString())}
+            </button>
+            {askNote && <span className="text-[10.5px] text-gold-200">{askNote}</span>}
+          </div>
+        </div>
+      )}
 
       {/* Ce que les chiffres veulent dire, dit une fois, en haut : un taux de couverture sans
           son dénominateur est le défaut que cette page existe pour corriger. */}

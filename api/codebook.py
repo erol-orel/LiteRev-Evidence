@@ -540,6 +540,63 @@ def annotate(index: Index, obs: dict[str, Any]) -> dict[str, Any]:
             "group_key": n["group_key"], "covariate_key": n["covariate_key"], "label_path": label_path(n)}
 
 
+def asked_variable_keys(nodes: list[dict[str, Any]]) -> list[str]:
+    """The variables a review asks of every paper, as `sheet.group`, sorted. PURE.
+
+    One list for two uses that must never disagree: the prompt asks for exactly these, and
+    each extraction records exactly these as what it was asked. A key here is a register
+    row on the Variables of interest page, which is why the shape is the page's."""
+    return sorted({f"{n['sheet']}.{n['l1']}" for n in nodes if n.get("l1")})
+
+
+#: Combien de valeurs par variable le prompt cite, et la taille du bloc. Un codebook de
+#: cent groupes ne tient pas dans un prompt à côté du texte de l'article : le bloc est donc
+#: borné, et il DIT qu'il est borné plutôt que de laisser croire que la liste est entière.
+_ASK_MAX_VALUES = 10
+_ASK_MAX_CHARS = 3500
+
+
+def asked_variables_prompt(nodes: list[dict[str, Any]], lang: str = "en") -> str:
+    """The block that tells the model what THIS review asks of the paper. PURE.
+
+    `vocabulary_prompt` only steers how a group is NAMED, which is why a reviewer could add
+    "biosecurity level" to the codebook and see nothing change: nothing asked for it. This
+    block asks, by name, with the values the codebook knows, and it is the half of the
+    register that costs money, so it is also the half that is recorded per paper."""
+    by: dict[str, list[str]] = {}
+    names: dict[str, str] = {}
+    for n in nodes:
+        key = f"{n['sheet']}.{n['l1']}"
+        by.setdefault(key, [])
+        label = (n.get("label_en") if (lang or "en").lower().startswith("en") else n.get("label_fr"))
+        if not n.get("l2"):
+            names.setdefault(key, label or n["l1"].replace("_", " "))
+        elif len(by[key]) < _ASK_MAX_VALUES:
+            by[key].append(label or n["l2"].replace("_", " "))
+    if not by:
+        return ""
+    lines: list[str] = []
+    cut = 0
+    for key in sorted(by):
+        sheet, _, group = key.partition(".")
+        name = names.get(key) or group.replace("_", " ")
+        vals = by[key]
+        line = f"- {name} (sheet {sheet}, group {group})"
+        if vals:
+            line += ": " + ", ".join(vals)
+        if sum(len(x) for x in lines) + len(line) > _ASK_MAX_CHARS:
+            cut += 1
+            continue
+        lines.append(line)
+    tail = (f"\n{cut} more variables are not listed here for length; report them too if the "
+            "paper names them." if cut else "")
+    return ("\n\nVARIABLES THIS REVIEW ASKS FOR. Report each of these when the paper gives "
+            "data on it, one observation per value, with 'group' spelled exactly as the "
+            "group name in brackets and 'covariate' in the paper's own words. A variable the "
+            "paper says nothing about is simply left out: never infer it.\n"
+            + "\n".join(lines) + tail)
+
+
 def vocabulary_prompt(nodes: list[dict[str, Any]]) -> str:
     """The level-1 and level-2 names, for the extraction prompt, so the model words its
     groups the way the codebook does. A paper's own wording is still kept in the label

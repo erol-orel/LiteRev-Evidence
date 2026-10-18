@@ -40,7 +40,8 @@ from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import text
 
-from .codebook import annotate, get_codebook, get_index, normalise, sheet_key, vocabulary_prompt
+from .codebook import (annotate, asked_variable_keys, asked_variables_prompt, get_codebook,
+                       get_index, normalise, sheet_key, vocabulary_prompt)
 from .diseases import disease_key
 from .core import (_env_int, _is_openai_quota_error, _openai_in_cooldown, _trip_openai_cooldown, app,
                    engine, logger, require_api_key)
@@ -240,8 +241,10 @@ _EXTRACTION_SYSTEM = (
 )
 
 
-#: Which prompt produced an extraction, for the reproducibility record: any edit to the prompt
-#: changes it, so two extractions of the same corpus can be told apart.
+#: L'empreinte du prompt FIXE, celui d'avant le vocabulaire du scénario. Ce qui est écrit sur
+#: chaque article est l'empreinte du prompt RÉELLEMENT envoyé (le fixe, plus le vocabulaire,
+#: plus les variables demandées) : deux registres différents se distinguent donc d'eux-mêmes
+#: dans le relevé, ce que cette constante seule ne saurait pas faire.
 PROMPT_SHA = hashlib.sha256(_EXTRACTION_SYSTEM.encode("utf-8")).hexdigest()[:10]
 
 
@@ -618,6 +621,79 @@ def _cut_under_smaller_limit(ex: dict) -> bool:
     return cut_at < EXTRACTION_MAX_CHARS
 
 
+def _vars_asked_of(ex: Any) -> list[str] | None:
+    """The variables this extraction was asked, or None when it was read before that was
+    recorded. PURE. None is not an empty list: it means UNKNOWN, and the difference is the
+    whole safety of the delta pass below."""
+    if not isinstance(ex, dict):
+        return None
+    got = ex.get("vars_asked")
+    return [str(x) for x in got] if isinstance(got, list) else None
+
+
+def _missing_variables(ex: Any, asked_now: list[str]) -> list[str]:
+    """The variables the register asks today that this paper was demonstrably NOT asked.
+
+    Empty when the paper's record is unknown: a paper read before the record existed may
+    well have been asked them, and re-reading a corpus on a maybe is how a one-time cost
+    becomes a recurring one. The bill counts those papers on their own line instead."""
+    asked = _vars_asked_of(ex)
+    if asked is None:
+        return []
+    return sorted(set(asked_now) - set(asked))
+
+
+def variable_gap(scenario_id: str) -> dict[str, Any]:
+    """The BILL before a re-read: what the register asks now, and which papers were never
+    asked it. Read only, no model call, no write.
+
+    Three numbers a reviewer needs before spending anything: how many papers would be read
+    again because a variable they added was demonstrably never asked of them; how many were
+    read before the record existed, so nobody can tell; and which variables are concerned."""
+    from .pooling import display_names, display_path
+
+    out: dict[str, Any] = {"scenario_id": scenario_id}
+    try:
+        nodes = get_codebook(scenario_id)["nodes"]
+        asked_now = asked_variable_keys(nodes)
+        rows = _relevant_rows(scenario_id)
+        extracted = [r for r in rows if isinstance(r.get("extraction_json"), dict)]
+        per_var: dict[str, int] = {}
+        n_missing = n_unknown = 0
+        for r in extracted:
+            ex = r["extraction_json"]
+            if _vars_asked_of(ex) is None:
+                n_unknown += 1
+                continue
+            gap = _missing_variables(ex, asked_now)
+            if gap:
+                n_missing += 1
+                for key in gap:
+                    per_var[key] = per_var.get(key, 0) + 1
+        index = get_index(scenario_id)
+        names = display_names(index, "en")
+        out.update({
+            "variables_asked_now": asked_now,
+            "n_relevant": len(rows), "n_extracted": len(extracted),
+            # Les articles qu'une relecture concernerait VRAIMENT, et ce qu'elle coûterait :
+            # un appel par article, le texte étant déjà en cache.
+            "n_papers_missing_a_variable": n_missing,
+            "n_calls_estimate": n_missing,
+            # Lus avant que l'on note ce qui leur a été demandé : on ne peut pas savoir, et
+            # on le dit plutôt que de les relire par précaution.
+            "n_papers_unknown": n_unknown,
+            "by_variable": [
+                {"key": k, "name": display_path(names, k.split(".")[0], k.split(".")[-1], None, "en"),
+                 "n_papers": v}
+                for k, v in sorted(per_var.items(), key=lambda kv: (-kv[1], kv[0]))],
+            "complete": True,
+        })
+    except Exception as e:                                   # noqa: BLE001 - never blocks the panel
+        logger.warning(f"variable_gap {scenario_id}: {e}")
+        out.update({"complete": False, "error": str(e)[:200]})
+    return out
+
+
 def _needs_extraction(row: dict) -> bool:
     """An article is (re)extracted when it has none, when the extraction version moved,
     when the full text arrived after an abstract-only pass, or when its text was cut under a
@@ -693,8 +769,16 @@ def _llm_client():
 _JOB_COUNTS = ("total", "done", "failed", "transient", "skipped")
 
 
-def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: int = 0) -> dict[str, int]:
-    rows = [r for r in _relevant_rows(scenario_id) if _needs_extraction(r)]
+def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: int = 0,
+                      new_variables: bool = False) -> dict[str, int]:
+    _asked_now = asked_variable_keys(get_codebook(scenario_id)["nodes"])
+    rows = [r for r in _relevant_rows(scenario_id)
+            # `new_variables` est FAUX partout sauf sur l'endpoint qui le demande : le
+            # pipeline ne doit pas se mettre à relire un corpus parce qu'une variable a
+            # été ajoutée. Ajouter une variable est une dépense, et une dépense se clique.
+            if _needs_extraction(r) or (new_variables
+                                        and int(r.get("extraction_attempts") or 0) < _MAX_ATTEMPTS
+                                        and _missing_variables(r.get("extraction_json"), _asked_now))]
     cap = int(max_articles or EXTRACTION_MAX_ARTICLES or 0)
     if cap > 0:
         rows = rows[:cap]
@@ -703,8 +787,15 @@ def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: 
     if not rows:
         return {"total": 0, "done": 0, "failed": 0}
     client = _llm_client()
-    # The scenario's own codebook steers how the model names its groups.
-    system = _EXTRACTION_SYSTEM + vocabulary_prompt(get_codebook(scenario_id)["nodes"])
+    # Le codebook du scénario ne faisait que STEERER le nom des groupes : un relecteur
+    # pouvait ajouter « niveau de biosécurité » et ne rien voir changer, parce que rien ne
+    # le DEMANDAIT. Le registre demande maintenant ses variables par leur nom, et chaque
+    # extraction enregistre lesquelles lui ont été demandées (`vars_asked`), de sorte
+    # qu'ajouter une variable soit un travail qu'on peut compter et qu'en retirer une ne
+    # coûte rien.
+    _nodes = get_codebook(scenario_id)["nodes"]
+    system = (_EXTRACTION_SYSTEM + vocabulary_prompt(_nodes) + asked_variables_prompt(_nodes))
+    asked_now = asked_variable_keys(_nodes)
     # An outage is not the article's fault. A refused call (the switch, the budget), a quota,
     # a timeout or a 5xx used to count as one of the article's three attempts, so one bad
     # night gave up the whole queue; now they cost nothing, and when the provider looks down
@@ -719,6 +810,10 @@ def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: 
                 info = _article_text_info(conn, row)
             result = extract_article(client, row, info["text"], info["source"], info["truncated"],
                                      disease_hint, system, text_info=info)
+            # Ce qui a été DEMANDÉ à cet article, pour que l'ajout d'une variable sache
+            # quels articles ne l'ont jamais été. Écrit par le job, pas par le parseur :
+            # c'est une propriété de l'appel, pas de la réponse du modèle.
+            result["vars_asked"] = asked_now
             watch.success()
             with engine.begin() as conn:
                 conn.execute(text("""
@@ -757,7 +852,8 @@ def _extract_scenario(scenario_id: str, disease_hint: str | None, max_articles: 
         return {k: _jobs[scenario_id][k] for k in ("total", "done", "failed")}
 
 
-def start_extraction(scenario_id: str, disease_hint: str | None = None, max_articles: int = 0) -> dict[str, Any]:
+def start_extraction(scenario_id: str, disease_hint: str | None = None, max_articles: int = 0,
+                     new_variables: bool = False) -> dict[str, Any]:
     """Start the extraction in the background, one run per scenario at a time. Nothing is
     started while no call could be made (the master switch, the day's budget, the quota
     circuit breaker): `paused`, with the reason."""
@@ -773,7 +869,7 @@ def start_extraction(scenario_id: str, disease_hint: str | None = None, max_arti
 
     def _run():
         try:
-            _extract_scenario(scenario_id, disease_hint, max_articles)
+            _extract_scenario(scenario_id, disease_hint, max_articles, new_variables)
         except Exception as e:                               # noqa: BLE001
             logger.warning(f"extraction {scenario_id}: {e}")
             with _jobs_lock:
@@ -1323,6 +1419,7 @@ def build_long_csv(articles: list[dict], id_prefix: str = "LR", index=None, revi
 # ─────────────────────────────────────────────────────────────────────────────
 @app.post("/user-scenarios/{scenario_id}/extraction/run")
 def run_scenario_extraction(scenario_id: str, max_articles: int = 0, retry_given_up: bool = False,
+                            new_variables: bool = False,
                             _: None = Depends(require_api_key)) -> dict[str, Any]:
     """Extract, in the background, every relevant article that has no extraction yet (or
     whose full text arrived since an abstract-only pass, or whose text was cut under a smaller
@@ -1332,14 +1429,30 @@ def run_scenario_extraction(scenario_id: str, max_articles: int = 0, retry_given
 
     `retry_given_up` first gives the articles left alone after three failures their
     attempts back, for when the cause of the failures has been fixed (the answer ceiling
-    that cut the richest papers, for one). Only this scenario's relevant articles."""
+    that cut the richest papers, for one). Only this scenario's relevant articles.
+
+    `new_variables` ALSO reads again the papers that were demonstrably never asked a
+    variable the register asks today, which is what adding a variable to the register
+    costs. It is false everywhere else, the pipeline included: GET
+    `extraction/variable-gap` prices it first, and nothing spends on it without this
+    flag. Papers read before that record existed are never swept in by it."""
     scenario = _get_user_scenario_or_404(scenario_id)
     n_reset = reset_given_up(scenario_id) if retry_given_up else 0
-    out = start_extraction(scenario_id, scenario.get("name"), max(0, int(max_articles or 0)))
+    out = start_extraction(scenario_id, scenario.get("name"), max(0, int(max_articles or 0)),
+                           new_variables=bool(new_variables))
     if retry_given_up:
         out = {**out, "n_reset": n_reset}
     return {**out, **{k: v for k, v in extraction_status(scenario_id).items()
                       if k in ("n_relevant", "n_pending")}}
+
+
+@app.get("/user-scenarios/{scenario_id}/extraction/variable-gap")
+def get_scenario_variable_gap(scenario_id: str) -> dict[str, Any]:
+    """What a re-read would cost before anything is spent: the variables the register asks
+    today, how many papers were demonstrably never asked one of them, and how many were read
+    before that record existed, so nobody can tell. Read only."""
+    _get_user_scenario_or_404(scenario_id)
+    return variable_gap(scenario_id)
 
 
 @app.get("/user-scenarios/{scenario_id}/extraction/status")
