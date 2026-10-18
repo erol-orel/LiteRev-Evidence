@@ -5313,3 +5313,68 @@ export async function fetchVariablesOfInterest(scenarioId: string, lang: string)
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
+
+export interface VoiCrosstab {
+  scenario_id: string;
+  rows_variable: string;
+  cols_variable: string;
+  threshold: number;
+  rows: Array<{ value: string; label: string; n: number }>;
+  cols: Array<{ value: string; label: string; n: number }>;
+  rows_total: number;
+  cols_total: number;
+  cells: Array<{ row: string; col: string; n: number }>;
+  /** Les articles que LES DEUX variables savent juger : la population de la grille. */
+  n_both: number;
+  n_rows_only: number;
+  n_cols_only: number;
+  pairs_observed: number;
+  cells_shown: number;
+  complete: boolean;
+  note?: string;
+  error?: string;
+}
+
+export async function fetchVariablesCrosstab(
+  scenarioId: string, rows: string, cols: string, lang: string,
+): Promise<VoiCrosstab> {
+  const qs = `rows=${encodeURIComponent(rows)}&cols=${encodeURIComponent(cols)}&lang=${encodeURIComponent(lang)}`;
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/crosstab?${qs}`);
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+/** Le registre en CSV : la carte des manques, une ligne par variable. */
+export function variablesOfInterestExportUrl(scenarioId: string, lang: string): string {
+  return `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/export?lang=${encodeURIComponent(lang)}`;
+}
+
+export interface CodebookTemplate {
+  key: string;
+  name: string;
+  note: string;
+  n_nodes: number;
+  n_groups: number;
+  /** Le vocabulaire dont part un scénario créé maintenant. */
+  is_default_for_new: boolean;
+}
+
+export async function fetchCodebookTemplates(lang: string): Promise<{
+  templates: CodebookTemplate[]; default_for_new: string;
+}> {
+  const r = await safeFetch(`${API_BASE_URL}/codebook/templates?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}
+
+/** Remplace le codebook du scénario par un vocabulaire de départ. */
+export async function loadCodebookTemplate(
+  scenarioId: string, key: string,
+): Promise<{ template: string; n_nodes: number }> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/codebook/template/${encodeURIComponent(key)}`,
+    { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}

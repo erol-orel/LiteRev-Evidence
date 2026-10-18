@@ -632,6 +632,19 @@ def create_user_scenario(payload: UserScenarioIn, request: Request = None, lang:
                 _ensure_alert_subscription(conn, payload.owner_email, new_id)
             except Exception as _e:
                 logger.warning(f"auto-subscribe owner {new_id}: {_e}")
+    # Le vocabulaire de DÉPART d'un scénario neuf : l'épidémiologie générique, sans maladie
+    # dedans. Le vocabulaire « Une seule santé » (travailleur de la volaille, marché
+    # d'oiseaux vivants, canard) reste la valeur par défaut LUE par les scénarios qui n'ont
+    # rien stocké, donc les revues déjà en cours ne changent pas d'un mot ; les nouvelles
+    # partent d'un registre qui ne présume pas de leur sujet et chargent un autre
+    # vocabulaire en un clic. Best-effort : un scénario se crée même si cette écriture
+    # échoue, il lira alors le vocabulaire par défaut comme avant.
+    try:
+        from .codebook import DEFAULT_TEMPLATE, _store, codebook_template
+
+        _store(new_id, codebook_template(DEFAULT_TEMPLATE))
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"starter codebook on {new_id}: {_e}")
     # Génération de la stratégie de recherche en arrière-plan : l'appel OpenAI
     # ne doit JAMAIS bloquer (ni faire échouer) la création du scénario. On la
     # saute si le client a déjà fourni la stratégie (recherche booléenne).

@@ -28,6 +28,7 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 from api.variables_of_interest import (  # noqa: E402
     COST_FREE,
+    crosstab,
     FAMILIES,
     OF_EXTRACTED,
     OF_RELEVANT,
@@ -340,6 +341,87 @@ def test_a_source_that_cannot_be_read_loses_its_counts_not_the_page(seeded):
     cluster = _by_key(out)["cluster"]
     assert cluster["n_with_value"] == 0 and cluster["values"] == []
     assert _by_key(out)["year"]["n_with_value"] == 3, "the rest of the register is served"
+
+
+def test_an_axis_of_a_crosstab_counts_articles_not_cells():
+    """The trap a grid falls into. Article 1 reports two occupations and one country, so the
+    country's column holds TWO articles (1 and 2), not the three a sum of its cells gives.
+    The concept map adds its cells up and says so in its own note; here the grid and the bar
+    that shows the same thing elsewhere cannot disagree."""
+    from api.variables_of_interest import cross_counts
+
+    g = cross_counts({1: {"poultry_worker", "farmer"}, 2: {"farmer"}, 3: {"vet"}},
+                     {1: {"IT"}, 2: {"IT"}, 4: {"CN"}})
+    assert {c["value"]: c["n"] for c in g["cols"]} == {"IT": 2}
+    assert {r["value"]: r["n"] for r in g["rows"]} == {"farmer": 2, "poultry_worker": 1}
+    assert sum(c["n"] for c in g["cells"]) == 3, "the cells do add to more, which is why"
+
+
+def test_a_crosstab_says_what_it_could_not_place():
+    """An empty cell only means something inside a known population. Article 3 has a row
+    value and no column value, article 4 the reverse: neither can be in the grid, and both
+    are counted on their own line rather than quietly dropped."""
+    from api.variables_of_interest import cross_counts
+
+    g = cross_counts({1: {"a"}, 3: {"a"}}, {1: {"x"}, 4: {"x"}})
+    assert g["n_both"] == 1 and g["n_rows_only"] == 1 and g["n_cols_only"] == 1
+
+
+def test_the_crosstab_agrees_with_the_register_on_the_same_variable(seeded):
+    """Country by language over the live corpus. Both papers that were read name a country,
+    one Italy and one China, and both are in English or French: the grid's axis totals are
+    the register's own counts, because they come through the same membership functions."""
+    out = variables_of_interest(SID, lang="en")
+    reg_countries = {v["value"]: v["n"] for v in _by_key(out)["country"]["values"]}
+    grid = crosstab(SID, "country", "language", lang="en")
+    assert grid["complete"] is True
+    assert {r["value"]: r["n"] for r in grid["rows"]} == reg_countries
+    assert grid["n_both"] == 2, "the two papers that were read"
+    assert grid["n_cols_only"] == 1, "a third paper has a language and no place read"
+
+
+def test_a_crosstab_of_a_codebook_group_by_place(seeded):
+    """The question the register exists for, in a grid: who reports what, where."""
+    grid = crosstab(SID, "human_exp.occupation", "country", lang="en")
+    cells = {(c["row"], c["col"]): c["n"] for c in grid["cells"] if c["n"]}
+    assert cells == {("poultry_worker", "IT"): 1}
+    assert [r["label"] for r in grid["rows"]] == ["Poultry worker"]
+
+
+def test_a_crosstab_refuses_a_variable_it_cannot_cross_and_says_which_it_can(seeded):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(main.app)
+    base = f"/user-scenarios/{SID}/variables-of-interest/crosstab"
+    r = client.get(base, params={"rows": "language", "cols": "language"})
+    assert r.status_code == 422, "crossing a variable with itself says nothing"
+    r = client.get(base, params={"rows": "scope", "cols": "language"})
+    assert r.status_code == 404 and "ne se croise pas" in r.json()["detail"]
+    assert "design" in r.json()["detail"]
+
+
+def test_a_crosstab_whose_source_is_missing_is_empty_with_its_reason(seeded):
+    """No clustering is cached, which is the normal state of a new review. The grid comes
+    back empty, saying why, rather than failing the panel."""
+    grid = crosstab(SID, "cluster", "language", lang="en")
+    assert grid["complete"] is False and grid["cells"] == []
+    assert "clustering" in (grid.get("note") or "").lower()
+
+
+def test_the_register_exports_as_a_csv_a_partner_can_open(seeded):
+    """The gap map in the shape a partner pastes into a spreadsheet: one line per question
+    the review asks, how many papers answer it, and out of what."""
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).get(f"/user-scenarios/{SID}/variables-of-interest/export")
+    assert r.status_code == 200
+    assert r.text.startswith("﻿"), "Excel needs the BOM to read the accents"
+    lines = [ln for ln in r.text.splitlines() if ln.strip()]
+    header = lines[0].lstrip("﻿").split(",")
+    assert header[:3] == ["variable", "name", "family"]
+    assert "papers_with_a_value" in header and "denominator" in header
+    assert any(ln.startswith("design,") for ln in lines)
+    assert any(ln.startswith("human_exp.occupation,") for ln in lines)
 
 
 def test_the_endpoint_serves_the_register_read_only(seeded):

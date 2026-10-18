@@ -1,10 +1,11 @@
 import React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
-import { fetchVariablesOfInterest } from "../lib/api";
+import { fetchVariablesOfInterest, variablesOfInterestExportUrl } from "../lib/api";
 import type { SubsetCondition, VoiRegister, VoiVariable } from "../lib/api";
 import { share } from "../lib/extraction";
 import { SelectionBar } from "./SelectionBar";
+import { CrosstabPanel } from "./CrosstabPanel";
 
 /** Le registre des variables d'intérêt : ce que cette revue demande à CHAQUE article, en une
  *  seule liste, compté sur tout le sous-ensemble pertinent.
@@ -30,6 +31,9 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   const [conds, setConds] = React.useState<SubsetCondition[]>([]);
   const [combine, setCombine] = React.useState<"all" | "any">("all");
   const [reload, setReload] = React.useState(0);
+  // Le croisement : la première variable cochée devient les lignes, la seconde les
+  // colonnes, une troisième repart des lignes. Deux clics suffisent, sans menu.
+  const [cross, setCross] = React.useState<string[]>([]);
 
   React.useEffect(() => {
     let alive = true;
@@ -56,6 +60,8 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
     setConds((cs) => cs.map((c) => (c.variable === key
       ? { ...c, [which]: raw.trim() === "" ? null : Number(raw) } : c)));
   const removeCond = (key: string) => setConds((cs) => cs.filter((c) => c.variable !== key));
+  const toggleCross = (key: string) => setCross((xs) => (
+    xs.includes(key) ? xs.filter((x) => x !== key) : [...xs, key].slice(-2)));
 
   if (error) {
     return (
@@ -83,11 +89,18 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
 
   return (
     <div className="space-y-4">
-      <div>
-        <h3 className="text-sm font-semibold text-white/90">{T("title")}</h3>
-        <p className="mt-1 max-w-[760px] text-[11px] leading-5 text-white/55">
-          {T("subtitle").replace("{relevant}", reg.n_relevant.toLocaleString())}
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-white/90">{T("title")}</h3>
+          <p className="mt-1 max-w-[760px] text-[11px] leading-5 text-white/55">
+            {T("subtitle").replace("{relevant}", reg.n_relevant.toLocaleString())}
+          </p>
+        </div>
+        {/* La carte des manques dans la forme qu'un partenaire colle dans son tableur. */}
+        <a href={variablesOfInterestExportUrl(scenarioId, currentLang())}
+          className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-[10.5px] text-white/65 hover:text-white hover:border-white/25">
+          {T("exportCsv")}
+        </a>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -111,6 +124,15 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
       <SelectionBar scenarioId={scenarioId} conditions={conds} combine={combine}
         onCombine={setCombine} onRemove={removeCond}
         onApplied={() => { setConds([]); setReload((n) => n + 1); }} />
+
+      {cross.length === 2 && (
+        <CrosstabPanel scenarioId={scenarioId} rows={cross[0]} cols={cross[1]}
+          nameOf={(key) => {
+            const v = reg.variables.find((x) => x.key === key);
+            return v ? name(v) : key;
+          }}
+          onClear={() => setCross([])} />
+      )}
 
       {Object.entries(reg.incomplete).map(([fam, why]) => (
         <p key={fam} className="text-[10px] text-gold-300/80">
@@ -139,7 +161,8 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
                   <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]}
                     cond={condOf(v.key)} onToggle={() => toggleCond(v)}
                     onValues={(vals) => setValues(v.key, vals)}
-                    onBound={(w, raw) => setBound(v.key, w, raw)} />
+                    onBound={(w, raw) => setBound(v.key, w, raw)}
+                    crossAs={cross.indexOf(v.key)} onCross={() => toggleCross(v.key)} />
                 ))}
                 {/* La traîne des libellés de groupe que le codebook ne sait pas placer. Elle
                     est à part, sous son propre compte VRAI : sur un vrai corpus elle est plus
@@ -161,7 +184,8 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
                   <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]}
                     cond={condOf(v.key)} onToggle={() => toggleCond(v)}
                     onValues={(vals) => setValues(v.key, vals)}
-                    onBound={(w, raw) => setBound(v.key, w, raw)} />
+                    onBound={(w, raw) => setBound(v.key, w, raw)}
+                    crossAs={cross.indexOf(v.key)} onCross={() => toggleCross(v.key)} />
                 ))}
               </div>
             )}
@@ -174,7 +198,8 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   );
 }
 
-function VariableRow({ v, name, T, label, note, cond, onToggle, onValues, onBound }: {
+function VariableRow({ v, name, T, label, note, cond, onToggle, onValues, onBound,
+                      crossAs, onCross }: {
   v: VoiVariable;
   name: string;
   T: (k: string) => string;
@@ -184,6 +209,9 @@ function VariableRow({ v, name, T, label, note, cond, onToggle, onValues, onBoun
   onToggle: () => void;
   onValues: (values: string[]) => void;
   onBound: (which: "min" | "max", raw: string) => void;
+  /** -1 quand la variable n'est pas croisée, 0 pour les lignes, 1 pour les colonnes. */
+  crossAs: number;
+  onCross: () => void;
 }) {
   const known = v.n_with_value != null;
   const picked = new Set(cond?.values || []);
@@ -286,7 +314,14 @@ function VariableRow({ v, name, T, label, note, cond, onToggle, onValues, onBoun
             <span className="rounded border border-dashed border-white/[0.07] px-1.5 font-mono text-[9px] uppercase text-white/20"
               title={T("notFilterable")}>{T("actFilter")}</span>
           )}
-          {v.crossable && <span className="rounded border border-dashed border-white/10 px-1.5 font-mono text-[9px] uppercase text-white/30">{T("actCross")}</span>}
+          {v.crossable && (
+            <button onClick={onCross}
+              className={`rounded border px-1.5 font-mono text-[9px] uppercase transition ${crossAs >= 0
+                ? "border-gold-400/60 bg-gold-400/15 text-gold-300"
+                : "border-white/10 text-white/40 hover:border-white/25 hover:text-white/70"}`}>
+              {crossAs === 0 ? T("actCrossRows") : crossAs === 1 ? T("actCrossCols") : T("actCross")}
+            </button>
+          )}
         </div>
       </div>
     </div>
