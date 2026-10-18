@@ -169,7 +169,7 @@ def test_the_prompt_says_the_document_is_data_and_never_an_instruction():
     assert "never invent a sheet" in _READ_SYSTEM
     # The house rule travels into the prompts that generate text.
     assert "em dash" in _READ_SYSTEM
-    assert "—" not in _READ_SYSTEM
+    assert chr(0x2014) not in _READ_SYSTEM            # the house rule, in the prompt too
 
 
 # ── read_annex, with the model stood in for ─────────────────────────────────

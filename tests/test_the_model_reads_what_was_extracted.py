@@ -266,7 +266,7 @@ def test_the_rule_says_what_each_of_the_two_numbers_counts():
     assert "register_count" in REGISTER_EVIDENCE_RULE
     assert "REPORTS" in REGISTER_EVIDENCE_RULE and "MENTIONS" in REGISTER_EVIDENCE_RULE
     assert "evidence_count" in REGISTER_EVIDENCE_RULE
-    assert "—" not in REGISTER_EVIDENCE_RULE
+    assert chr(0x2014) not in REGISTER_EVIDENCE_RULE
 
 
 # ── The endpoint ────────────────────────────────────────────────────────────
