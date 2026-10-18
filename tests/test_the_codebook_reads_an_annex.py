@@ -48,10 +48,15 @@ from api.codebook_reader import (  # noqa: E402
 def _docx(paragraphs: list[str], rows: list[list[str]] | None = None) -> bytes:
     """A .docx is a zip holding XML. Built here rather than fixtured: the test then says
     what shape it expects, instead of pointing at an opaque binary."""
-    body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+    # Avec les attributs que Word écrit vraiment (w14:paraId, xml:space) et un paragraphe
+    # coupé en deux runs : c'est la forme que le lecteur doit supporter, pas la forme idéale.
+    body = "".join(
+        f'<w:p w14:paraId="1F2A{i}"><w:r><w:t xml:space="preserve">{p[:3]}</w:t></w:r>'
+        f"<w:r><w:t>{p[3:]}</w:t></w:r></w:p>" for i, p in enumerate(paragraphs))
     for row in rows or []:
-        cells = "".join(f"<w:tc><w:p><w:r><w:t>{c}</w:t></w:r></w:p></w:tc>" for c in row)
-        body += f"<w:tbl><w:tr>{cells}</w:tr></w:tbl>"
+        cells = "".join(f'<w:tc><w:p><w:r><w:t xml:space="preserve">{c}</w:t></w:r>'
+                        "</w:p></w:tc>" for c in row)
+        body += f'<w:tbl><w:tr w:rsidR="00A1"><w:tab/>{cells}</w:tr></w:tbl>'
     xml = ('<?xml version="1.0"?><w:document xmlns:w="x"><w:body>' + body
            + "</w:body></w:document>")
     buf = io.BytesIO()
