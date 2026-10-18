@@ -71,9 +71,11 @@ OF_RELEVANT, OF_EXTRACTED, OF_CORPUS = "relevant", "extracted", "corpus"
 #: How many values of a variable are listed. The COUNTS are over everything; only the list
 #: is cut, and `n_values` says how many values it stands for.
 _MAX_VALUES = 10
-#: How many of the scenario's own variables are returned. A codebook may hold thousands of
-#: nodes; the groups are what this page lists, and there are never many of them.
-_MAX_OWN = 120
+#: How many UNMAPPED groups are listed. The groups a codebook declares are never cut: they
+#: are the questions the review asks, and a cap that hid one would turn the gap map into a
+#: list of what happens to be present. What the model writes besides them is a long tail, so
+#: it is cut here, with its true length and the papers behind it said in the payload.
+_MAX_UNMAPPED_SHOWN = 30
 
 
 def _v(key: str, family: str, source: str, cost: str, vtype: str, shown: tuple[str, ...],
@@ -328,16 +330,14 @@ def _own_variables(conn, scenario_id: str, thr: float, lang: str) -> list[dict[s
         if vkey:
             per_value.setdefault((sheet, gkey), {}).setdefault(vkey, set()).update(ids)
 
-    out: list[dict[str, Any]] = []
-    for sheet, gkey in declared + [k for k in per_group if k not in declared]:
+    def _row(sheet: str, gkey: str, unmapped: bool) -> dict[str, Any]:
         ids = per_group.get((sheet, gkey)) or set()
         vals = [{"value": v, "label": display_path(names, sheet, gkey, v, lang).split(" > ")[-1],
                  "n": len(vids)}
                 for v, vids in sorted((per_value.get((sheet, gkey)) or {}).items(),
                                       key=lambda kv: (-len(kv[1]), kv[0]))]
         shown, n_values = _cut(vals)
-        unmapped = (sheet, gkey) not in declared
-        out.append({
+        return {
             "key": f"{sheet}.{gkey}", "family": "own", "source": "codebook",
             "cost": COST_ONE_PASS, "type": CAT, "shown_in": ["extraction", "pooled"],
             "denominator_of": OF_EXTRACTED, "filterable": True, "crossable": True,
@@ -346,9 +346,32 @@ def _own_variables(conn, scenario_id: str, thr: float, lang: str) -> list[dict[s
                      else display_path(names, sheet, gkey, None, lang)),
             "sheet": sheet, "group": gkey, "unmapped": unmapped,
             "n_with_value": len(ids), "values": shown, "n_values": n_values,
-        })
-    out.sort(key=lambda v: (-v["n_with_value"], v["name"]))
-    return out[:_MAX_OWN]
+        }
+
+    # Les groupes DÉCLARÉS par le codebook passent toujours, en entier : ils sont la
+    # question que la revue pose, et un plafond qui en cache un transformerait la carte
+    # des manques en liste des présents. Sur un vrai corpus le modèle écrit en plus une
+    # longue traîne de libellés de groupe que le codebook ne sait pas placer (102 sur la
+    # revue HPAI) : eux sont plafonnés, et le total est dit plutôt que coupé en silence,
+    # avec le nombre d'articles derrière, parce que c'est ce nombre qui dit si la traîne
+    # mérite une séance de rattachement.
+    mine = sorted((_row(s, g, False) for s, g in declared),
+                  key=lambda v: (-v["n_with_value"], v["name"]))
+    strays = sorted((_row(s, g, True) for s, g in per_group if (s, g) not in declared),
+                    key=lambda v: (-v["n_with_value"], v["name"]))
+    stray_ids: set = set()
+    for sheet, gkey in per_group:
+        if (sheet, gkey) not in declared:
+            stray_ids |= per_group[(sheet, gkey)]
+    totals = {
+        "n_declared": len(mine),
+        "n_unmapped": len(strays),
+        "n_unmapped_shown": min(len(strays), _MAX_UNMAPPED_SHOWN),
+        # Les articles qui portent au moins un groupe non rattachable : la mesure du
+        # travail qui reste, et non le nombre d'étiquettes.
+        "n_papers_unmapped": len(stray_ids),
+    }
+    return mine + strays[:_MAX_UNMAPPED_SHOWN], totals
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -399,12 +422,13 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
         out["incomplete"]["design"] = str(e)[:200]
 
     countries: list[dict[str, Any]] = []
-    n_placed = n_europe = n_nuts = n_geo_papers = 0
+    n_placed = n_europe = n_eu_no_country = n_nuts = n_geo_papers = 0
     try:
         geo = geography(scenario_id)
         n_geo_papers = int(geo.get("n_papers") or 0)
         n_placed = int(geo.get("n_resolved") or 0)
         n_europe = int(geo.get("n_in_europe") or 0)
+        n_eu_no_country = int(geo.get("n_in_europe_without_country") or 0)
         for c in geo.get("countries") or []:
             countries.append({"value": c["iso2"], "label": c["name"], "n": int(c["n_papers"])})
             n_nuts += sum(int(g.get("n_papers") or 0) for g in c.get("regions") or [])
@@ -443,8 +467,19 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
     #: Les listes de modalités qui ne viennent pas d'une colonne, par clé de variable.
     computed: dict[str, list[dict[str, Any]]] = {
         "design": designs, "grade_level": levels, "country": countries, "cluster": clusters,
+        # « Ailleurs » n'est PAS « placés moins européens ». Un article peut être européen
+        # sans nommer un pays (« Europe », « Germany and the Netherlands ») : sur la revue
+        # HPAI, 43 des 164 européens sont dans ce cas, et ils ne figurent donc pas parmi les
+        # 503 articles à pays nommé. Retrancher les 164 des 503 les enlevait deux fois et
+        # donnait 339 là où la vérité est 382, ce que la sélection par pays comptait déjà
+        # correctement de son côté. Les trois seaux s'additionnent maintenant au nombre
+        # d'articles lus, ce qui rend l'erreur impossible à refaire sans le voir.
         "europe": [{"value": "europe", "label": "Europe", "n": n_europe},
-                   {"value": "elsewhere", "label": "elsewhere", "n": max(n_placed - n_europe, 0)}],
+                   {"value": "elsewhere", "label": "elsewhere",
+                    "n": max(n_placed - (n_europe - n_eu_no_country), 0)},
+                   {"value": "no_place", "label": "no place stated",
+                    "n": max(n_geo_papers - n_europe
+                             - max(n_placed - (n_europe - n_eu_no_country), 0), 0)}],
         "above_threshold": [{"value": "above", "label": "above", "n": n_relevant},
                             {"value": "below", "label": "below", "n": max(n_corpus - n_relevant, 0)}],
         "scope": [{"value": "in_scope", "label": "in scope", "n": n_relevant},
@@ -469,9 +504,11 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
                           "values": shown, "n_values": n_values})
 
     own: list[dict[str, Any]] = []
+    own_totals: dict[str, int] = {"n_declared": 0, "n_unmapped": 0, "n_unmapped_shown": 0,
+                                  "n_papers_unmapped": 0}
     try:
         with engine.connect() as conn:
-            own = _own_variables(conn, scenario_id, thr, lang)
+            own, own_totals = _own_variables(conn, scenario_id, thr, lang)
     except Exception as e:                                   # noqa: BLE001
         logger.warning(f"variables_of_interest own {scenario_id}: {e}")
         out["incomplete"]["own"] = str(e)[:200]
@@ -480,9 +517,14 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
 
     out["variables"] = variables + own
     out["n_standard"] = len(variables)
-    out["n_own"] = len(own)
-    out["n_unmapped"] = sum(1 for v in own if v.get("unmapped"))
-    # Le nombre d'articles que la géographie a pu lire, pour que « 546 sur 818 » se vérifie.
+    out["n_own"] = own_totals["n_declared"]
+    # Le total VRAI des groupes que le codebook ne sait pas placer, pas le nombre affiché,
+    # et les articles derrière eux : « 102 étiquettes sur 318 articles » dit s'il faut une
+    # séance de rattachement, ce qu'une liste coupée à trente ne dirait pas.
+    out["n_unmapped"] = own_totals["n_unmapped"]
+    out["n_unmapped_shown"] = own_totals["n_unmapped_shown"]
+    out["n_papers_unmapped"] = own_totals["n_papers_unmapped"]
+    # Le nombre d'articles que la géographie a pu lire, pour que « 503 sur 818 » se vérifie.
     out["n_with_place_read"] = n_geo_papers
     out["coverage_keys"] = list(COVERAGE_KEYS)
     out["finding_directions"] = list(FINDING_DIRECTIONS)
