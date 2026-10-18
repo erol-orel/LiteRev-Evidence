@@ -4441,9 +4441,21 @@ export interface SubsetSelection {
    *  paper's own text, plus the pseudo-code "EUROPE" for every NUTS country at once
    *  (it also keeps the European papers that name no single country). */
   countries?: string[];
+  /** Une condition par variable du registre. Les variables que les cinq dimensions
+   *  ci-dessus couvrent déjà y sont redirigées par le serveur, de sorte que « pays Italie »
+   *  écrit ici et écrit dans `countries` fasse exactement la même chose. */
+  conditions?: SubsetCondition[];
   combine?: "any" | "all";
   unassigned?: "keep" | "exclude";
   reason?: string;
+}
+
+export interface SubsetCondition {
+  variable: string;
+  /** Les modalités gardées. Pour une variable numérique, donner `min` et/ou `max`. */
+  values?: string[];
+  min?: number | null;
+  max?: number | null;
 }
 
 export interface SubsetPlan {
@@ -4451,6 +4463,8 @@ export interface SubsetPlan {
   keep: number;
   exclude: number;
   undecided: number;
+  /** Gardés malgré la condition parce qu'un relecteur les avait inclus à la main. */
+  kept_manual?: number;
   by_dimension: Record<string, { in: number; out: number; unknown: number }>;
   combine: string;
   unassigned: string;

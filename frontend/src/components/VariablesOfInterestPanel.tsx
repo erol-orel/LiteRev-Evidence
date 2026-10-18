@@ -2,8 +2,9 @@ import React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
 import { fetchVariablesOfInterest } from "../lib/api";
-import type { VoiRegister, VoiVariable } from "../lib/api";
+import type { SubsetCondition, VoiRegister, VoiVariable } from "../lib/api";
 import { share } from "../lib/extraction";
+import { SelectionBar } from "./SelectionBar";
 
 /** Le registre des variables d'intérêt : ce que cette revue demande à CHAQUE article, en une
  *  seule liste, compté sur tout le sous-ensemble pertinent.
@@ -24,6 +25,11 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   const [reg, setReg] = React.useState<VoiRegister | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [open, setOpen] = React.useState<Record<string, boolean>>({});
+  // La sélection en cours de composition : une condition par variable, dans l'ordre où
+  // elles ont été ouvertes. Elle ne devient une exclusion qu'au clic sur le bouton.
+  const [conds, setConds] = React.useState<SubsetCondition[]>([]);
+  const [combine, setCombine] = React.useState<"all" | "any">("all");
+  const [reload, setReload] = React.useState(0);
 
   React.useEffect(() => {
     let alive = true;
@@ -33,7 +39,23 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
       .then((r) => { if (alive) setReg(r); })
       .catch((e: Error) => { if (alive) setError(e.message); });
     return () => { alive = false; };
-  }, [scenarioId, lang]);
+  }, [scenarioId, lang, reload]);
+  // Un scénario différent, une sélection différente : garder les conditions ferait porter
+  // sur un corpus des valeurs lues dans un autre.
+  React.useEffect(() => { setConds([]); }, [scenarioId]);
+
+  const condOf = (key: string) => conds.find((c) => c.variable === key);
+  const toggleCond = (v: VoiVariable) => setConds((cs) => (
+    cs.some((c) => c.variable === v.key)
+      ? cs.filter((c) => c.variable !== v.key)
+      : [...cs, { variable: v.key, ...(v.type === "number" ? { min: null, max: null } : { values: [] })}]
+  ));
+  const setValues = (key: string, values: string[]) =>
+    setConds((cs) => cs.map((c) => (c.variable === key ? { ...c, values } : c)));
+  const setBound = (key: string, which: "min" | "max", raw: string) =>
+    setConds((cs) => cs.map((c) => (c.variable === key
+      ? { ...c, [which]: raw.trim() === "" ? null : Number(raw) } : c)));
+  const removeCond = (key: string) => setConds((cs) => cs.filter((c) => c.variable !== key));
 
   if (error) {
     return (
@@ -86,6 +108,10 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
           son dénominateur est le défaut que cette page existe pour corriger. */}
       <p className="max-w-[760px] text-[10px] leading-4 text-white/40">{T("denominatorNote")}</p>
 
+      <SelectionBar scenarioId={scenarioId} conditions={conds} combine={combine}
+        onCombine={setCombine} onRemove={removeCond}
+        onApplied={() => { setConds([]); setReload((n) => n + 1); }} />
+
       {Object.entries(reg.incomplete).map(([fam, why]) => (
         <p key={fam} className="text-[10px] text-gold-300/80">
           <AlertTriangle size={10} className="inline mr-1" />
@@ -110,7 +136,10 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
             {isOpen && (
               <div>
                 {vars.filter((v) => !v.unmapped).map((v) => (
-                  <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]} />
+                  <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]}
+                    cond={condOf(v.key)} onToggle={() => toggleCond(v)}
+                    onValues={(vals) => setValues(v.key, vals)}
+                    onBound={(w, raw) => setBound(v.key, w, raw)} />
                 ))}
                 {/* La traîne des libellés de groupe que le codebook ne sait pas placer. Elle
                     est à part, sous son propre compte VRAI : sur un vrai corpus elle est plus
@@ -129,7 +158,10 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
                   </div>
                 )}
                 {vars.filter((v) => v.unmapped).map((v) => (
-                  <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]} />
+                  <VariableRow key={v.key} v={v} name={name(v)} T={T} label={label} note={reg.notes[v.key]}
+                    cond={condOf(v.key)} onToggle={() => toggleCond(v)}
+                    onValues={(vals) => setValues(v.key, vals)}
+                    onBound={(w, raw) => setBound(v.key, w, raw)} />
                 ))}
               </div>
             )}
@@ -142,14 +174,21 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   );
 }
 
-function VariableRow({ v, name, T, label, note }: {
+function VariableRow({ v, name, T, label, note, cond, onToggle, onValues, onBound }: {
   v: VoiVariable;
   name: string;
   T: (k: string) => string;
   label: (k: string, fallback: string) => string;
   note?: string;
+  cond?: SubsetCondition;
+  onToggle: () => void;
+  onValues: (values: string[]) => void;
+  onBound: (which: "min" | "max", raw: string) => void;
 }) {
   const known = v.n_with_value != null;
+  const picked = new Set(cond?.values || []);
+  const toggleValue = (value: string) => onValues(
+    picked.has(value) ? [...picked].filter((x) => x !== value) : [...picked, value]);
   const pct = known && v.denominator > 0 ? share(v.n_with_value as number, v.denominator) : 0;
   return (
     <div className="grid gap-x-3 gap-y-1 border-t border-white/5 px-3 py-2 md:grid-cols-[1.4fr_1.1fr_2fr]">
@@ -191,14 +230,25 @@ function VariableRow({ v, name, T, label, note }: {
       <div className="min-w-0">
         {v.values.length > 0 ? (
           <div className="flex flex-wrap gap-1">
-            {v.values.map((val) => (
+            {/* Une modalité devient CLIQUABLE dès que la variable est une condition : la
+                question qui suit la lecture d'un compte est toujours « et maintenant,
+                donne-moi seulement ceux-là ». */}
+            {v.values.map((val) => (cond && v.type !== "number" ? (
+              <button key={val.value} onClick={() => toggleValue(val.value)} title={val.value}
+                className={`rounded border px-1.5 py-px text-[10px] transition ${picked.has(val.value)
+                  ? "border-brand-400/60 bg-brand-500/20 text-brand-200"
+                  : "border-white/5 bg-white/[0.04] text-white/70 hover:border-white/20"}`}>
+                {val.label}
+                <span className="ml-1 font-mono text-white/40">{val.n.toLocaleString()}</span>
+              </button>
+            ) : (
               <span key={val.value}
                 className="rounded border border-white/5 bg-white/[0.04] px-1.5 py-px text-[10px] text-white/70"
                 title={val.value}>
                 {val.label}
                 <span className="ml-1 font-mono text-white/40">{val.n.toLocaleString()}</span>
               </span>
-            ))}
+            )))}
             {v.n_values > v.values.length && (
               <span className="rounded border border-dashed border-white/10 px-1.5 py-px text-[10px] text-white/35">
                 {T("moreValues").replace("{n}", String(v.n_values - v.values.length))}
@@ -208,8 +258,34 @@ function VariableRow({ v, name, T, label, note }: {
         ) : (
           <p className="text-[10px] text-white/30">{note || (v.covers ? T("covers").replace("{keys}", v.covers.join(", ")) : T("noValues"))}</p>
         )}
+
+        {cond && v.type === "number" && (
+          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-white/50">
+            <label className="inline-flex items-center gap-1">
+              {T("from")}
+              <input type="number" value={cond.min ?? ""} onChange={(e) => onBound("min", e.target.value)}
+                className="w-20 rounded border border-white/10 bg-white/5 px-1 py-px font-mono text-[10px] text-white/85" />
+            </label>
+            <label className="inline-flex items-center gap-1">
+              {T("to")}
+              <input type="number" value={cond.max ?? ""} onChange={(e) => onBound("max", e.target.value)}
+                className="w-20 rounded border border-white/10 bg-white/5 px-1 py-px font-mono text-[10px] text-white/85" />
+            </label>
+          </div>
+        )}
+
         <div className="mt-1 flex gap-1">
-          {v.filterable && <span className="rounded border border-dashed border-white/10 px-1.5 font-mono text-[9px] uppercase text-white/30">{T("actFilter")}</span>}
+          {v.filterable ? (
+            <button onClick={onToggle}
+              className={`rounded border px-1.5 font-mono text-[9px] uppercase transition ${cond
+                ? "border-brand-400/60 bg-brand-500/20 text-brand-200"
+                : "border-white/10 text-white/40 hover:border-white/25 hover:text-white/70"}`}>
+              {cond ? T("actFiltering") : T("actFilter")}
+            </button>
+          ) : (
+            <span className="rounded border border-dashed border-white/[0.07] px-1.5 font-mono text-[9px] uppercase text-white/20"
+              title={T("notFilterable")}>{T("actFilter")}</span>
+          )}
           {v.crossable && <span className="rounded border border-dashed border-white/10 px-1.5 font-mono text-[9px] uppercase text-white/30">{T("actCross")}</span>}
         </div>
       </div>
