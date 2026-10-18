@@ -2130,11 +2130,17 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                         if (ev?.register_count != null && ev.register_variable) {
                           const top = ev.register_values.slice(0, 3)
                             .map(x => `${x.label} ${x.n}`).join(", ");
+                          // Le nom de la QUESTION est affiché, pas seulement en infobulle :
+                          // deux prédicteurs qui posent la même question du codebook
+                          // portent le même nombre, et sans ce nom le lecteur y verrait
+                          // une coïncidence ou une erreur.
                           return (
                             <span title={`${ev.register_name || ev.register_variable}${top ? ` - ${top}` : ""}`}
                               className="inline-flex flex-col items-center gap-0.5">
-                              <span className="font-mono text-[11px] text-brand-300">{ev.register_level}</span>
-                              <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceRead")}</span>
+                              <span className="font-mono text-[11px] text-brand-300">
+                                {ev.register_level} <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceRead")}</span>
+                              </span>
+                              <span className="max-w-[120px] truncate text-[9.5px] text-white/45">{ev.register_name || ev.register_variable}</span>
                             </span>
                           );
                         }
@@ -2142,8 +2148,9 @@ function VariablesSection({ detail, scenarioId, onGoToModel }: { detail: Scenari
                           return (
                             <span title={t("scenarioDetail.variables.evidenceMentionedHint")}
                               className="inline-flex flex-col items-center gap-0.5">
-                              <span className="font-mono text-[11px] text-white/55">{v.evidence_level ?? v.evidence_count}</span>
-                              <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceMentioned")}</span>
+                              <span className="font-mono text-[11px] text-white/55">
+                                {v.evidence_level ?? v.evidence_count} <span className="text-[9px] uppercase tracking-wider text-white/35">{t("scenarioDetail.variables.evidenceMentioned")}</span>
+                              </span>
                             </span>
                           );
                         }

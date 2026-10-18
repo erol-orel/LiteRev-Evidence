@@ -554,7 +554,11 @@ def variables_of_interest(scenario_id: str, lang: str = "en",
 # The join to a model's inputs: what the extraction READ, not what a word matches
 # ─────────────────────────────────────────────────────────────────────────────
 #: Les mots-clés d'une variable essayés après son nom, dans cet ordre : le nom gagne.
-_JOIN_KEYS = ("keywords", "synonyms", "definition")
+#: Des LIBELLÉS, jamais une phrase. La définition en faisait partie et a produit, sur la
+#: revue exposition, « Sous-type et clade du virus » rattaché à « type de contact » : sa
+#: définition dit « présent à la source d'exposition », et ce seul mot suffisait. Une phrase
+#: contient le nom d'un groupe sans porter sur lui, donc elle ne sert pas à la jointure.
+_JOIN_KEYS = ("keywords", "synonyms")
 #: Valeurs rendues par variable jointe. Au-delà, le registre lui-même les montre toutes.
 _JOIN_MAX_VALUES = 6
 

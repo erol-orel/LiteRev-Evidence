@@ -33,7 +33,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, Query, Request
 
 from .additions import MAX_FILE_BYTES, PdfReaderMissing, _decode, pdf_text
-from .codebook import CODEBOOK_SHEETS, validate_nodes
+from .codebook import CODEBOOK_SHEETS, get_codebook, validate_nodes
 from .core import _env_int, app, logger, require_api_key
 from .scenario_store import _get_user_scenario_or_404
 from llm_usage import json_content
@@ -149,6 +149,45 @@ _READ_SYSTEM = (
 )
 
 
+#: Les caractères donnés au modèle pour dire ce que le codebook contient déjà.
+_EXISTING_MAX_CHARS = _env_int("CODEBOOK_ANNEX_EXISTING_CHARS", 2000, 200)
+
+
+def existing_vocabulary(nodes: list[dict[str, Any]]) -> str:
+    """The keys this review's codebook already uses, for the reading prompt. PURE.
+
+    Without it the model names a group from the annex's own wording, and the first live
+    read showed the cost: the row "Use of protective equipment" came back as
+    `use_of_protective_equipment` while the codebook already has `ppe`, and "Species
+    sampled" as `species_sampled` beside `species`. The merge keys on (sheet, level1,
+    level2), so a key reused is a variable ENRICHED and a key invented is a variable
+    DOUBLED, which is the opposite of what approving an annex is for."""
+    by: dict[str, dict[str, list[str]]] = {}
+    for n in nodes or []:
+        by.setdefault(n["sheet"], {}).setdefault(n["l1"], [])
+        if n.get("l2") and n["l2"] not in by[n["sheet"]][n["l1"]]:
+            by[n["sheet"]][n["l1"]].append(n["l2"])
+    if not by:
+        return ""
+    lines: list[str] = []
+    cut = 0
+    for sheet in CODEBOOK_SHEETS:
+        if sheet not in by:
+            continue
+        for l1, vals in by[sheet].items():
+            line = f"- {sheet} / {l1}" + (f": {', '.join(vals[:10])}" if vals else "")
+            if sum(len(x) for x in lines) + len(line) > _EXISTING_MAX_CHARS:
+                cut += 1
+                continue
+            lines.append(line)
+    tail = (f"\n{cut} more variables are not listed here for length." if cut else "")
+    return ("\n\nKEYS THIS REVIEW ALREADY USES. When a row of the document means one of "
+            "these variables, reuse its key EXACTLY in level1, and reuse a value's key in "
+            "level2 when the document gives that same value. Invent a key only for "
+            "something this list does not already have: a key reused enriches a variable, "
+            "a key invented doubles it.\n" + "\n".join(lines) + tail)
+
+
 def _rows_to_nodes(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
     """The model's answer as codebook rows, and what had to be dropped. PURE.
 
@@ -174,8 +213,12 @@ def _rows_to_nodes(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
     return rows, warnings
 
 
-def read_annex(filename: str, data: bytes, lang: str = "en") -> dict[str, Any]:
+def read_annex(filename: str, data: bytes, lang: str = "en",
+               existing: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """A proposal from an annex: the strict rows, what was read, and what was dropped.
+
+    `existing` is the review's current codebook, named in the prompt so that a row the
+    annex shares with it comes back under the key already in use rather than beside it.
 
     Nothing is stored. The caller shows this, the reviewer approves it, and the existing
     `PUT /codebook` writes it: a vocabulary a person has not looked at never becomes a
@@ -196,7 +239,8 @@ def read_annex(filename: str, data: bytes, lang: str = "en") -> dict[str, Any]:
                        "codebook_document": body}, ensure_ascii=False)
     response = client.chat.completions.create(
         model=_model("bulk"),
-        messages=[{"role": "system", "content": _READ_SYSTEM},
+        messages=[{"role": "system",
+                   "content": _READ_SYSTEM + existing_vocabulary(existing or [])},
                   {"role": "user", "content": user}],
         temperature=0, seed=7, max_tokens=_MAX_TOKENS,
         response_format={"type": "json_object"},
@@ -233,7 +277,8 @@ async def read_codebook_annex(scenario_id: str, request: Request,
     The body is the file itself, and `filename` says how to read it (.docx, .xlsx, .pdf,
     .csv, .tsv, .txt, .md). The answer carries the rows, the groups they make, what was
     read and what was dropped; `PUT /codebook` stores them once a person has approved
-    them."""
+    them. The review's current vocabulary is read, and named in the prompt, so that a row
+    it already has comes back under the key in use rather than beside it."""
     _get_user_scenario_or_404(scenario_id)
     data = await request.body()
     # La même limite que le téléversement d'articles : une annexe de codebook tient en
@@ -242,7 +287,8 @@ async def read_codebook_annex(scenario_id: str, request: Request,
         raise HTTPException(status_code=413,
                             detail=f"larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
     try:
-        return read_annex(filename, data, lang)
+        return read_annex(filename, data, lang,
+                          existing=(get_codebook(scenario_id) or {}).get("nodes") or [])
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     except HTTPException:
