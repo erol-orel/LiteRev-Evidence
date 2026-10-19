@@ -32,13 +32,15 @@ because the suite fails.
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
-from fastapi import Query
+from fastapi import Depends, HTTPException, Query
 from sqlalchemy import text
 
-from .core import _norm_lang, app, engine, logger
+from .core import _norm_lang, app, engine, logger, require_api_key
 from .digest import _rows
 from .scenario_store import (CAP_MODEL, DEFAULT_SIMILARITY_THRESHOLD,
                              _get_scenario_threshold, _get_user_scenario_or_404,
@@ -103,27 +105,30 @@ OUTPUTS: tuple[dict[str, Any], ...] = (
     _artefact("brief_portrait", "evidence_brief_json", "evidence_brief_at",
               "evidence", FREE,
               "Corpus portrait", "Portrait du corpus",
-              "POST /user-scenarios/{id}/pipeline", "evidence"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "evidence"),
     _artefact("brief_report", "evidence_brief_llm_json", "brief_generated_at",
               "evidence", ONE_CALL,
               "Evidence report", "Rapport de preuves",
               "POST /scenarios/{id}/evidence-brief/generate", "evidence"),
+    # Le calcul (embeddings en cache, UMAP, HDBSCAN) ne dépense rien, mais les RÉSUMÉS
+    # de clusters sont un appel par groupe, soit une douzaine : ce n'est pas gratuit, et
+    # l'annoncer gratuit est précisément le genre de bouton qui dépense sans prévenir.
     _artefact("clustering", "clustering_json", "clustering_generated_at",
-              "clustering", FREE,
+              "clustering", ONE_CALL,
               "Themes and clusters", "Thèmes et clusters",
-              "POST /user-scenarios/{id}/pipeline", "viz"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "viz"),
     _artefact("knowledge_graph", "knowledge_graph_json", "kg_generated_at",
               "knowledge_graph", FREE,
               "Similarity graph", "Graphe de similarité",
-              "POST /user-scenarios/{id}/pipeline", "viz"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "viz"),
     _artefact("concept_graph", "concept_graph_json", "concept_graph_generated_at",
               "knowledge_graph", ONE_PASS,
               "Concept map", "Carte des concepts",
-              "POST /user-scenarios/{id}/pipeline", "viz"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "viz"),
     _artefact("actions", "recommended_actions_json", "actions_generated_at",
               "actions", ONE_CALL,
               "Recommended actions", "Actions recommandées",
-              "POST /user-scenarios/{id}/pipeline", "review"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "review"),
     _artefact("variables", "variables_json", "variables_generated_at",
               "variables", ONE_CALL,
               "Variables and model spec", "Variables et spec du modèle",
@@ -160,18 +165,23 @@ OUTPUTS: tuple[dict[str, Any], ...] = (
     _coverage("concepts", "jsonb_typeof(d.concepts_json->'concepts') = 'array'",
               OF_RELEVANT, "knowledge_graph", ONE_PASS,
               "Concepts of each paper", "Concepts de chaque article",
-              "POST /user-scenarios/{id}/pipeline", "viz"),
+              "POST /user-scenarios/{id}/outputs/rebuild", "viz"),
     _coverage("epi_params", "jsonb_typeof(d.epi_params_json) = 'object'", OF_RELEVANT,
               "extraction", ONE_PASS,
               "Epidemiological parameters", "Paramètres épidémiologiques",
               "POST /scenarios/{id}/epidemic-parameters/extract", "evidence"),
-    _coverage("place", "COALESCE(TRIM(d.country), '') <> ''", OF_RELEVANT,
-              # Le pays est rempli par la passe MÉTADONNÉES, pas par l'extraction :
-              # c'est elle qu'il faut relancer, et le dire juste évite d'envoyer un
-              # relecteur appuyer sur le mauvais bouton.
-              "metadata", ONE_PASS,
-              "Country of each study", "Pays de chaque étude",
-              "POST /metadata/extract", "evidence"),
+    # LE LIEU TEL QUE LE PANNEAU GÉOGRAPHIE LE LIT, c'est-à-dire celui que l'extraction a
+    # noté (`extraction_json.ref.location`), résolu ensuite en pays et en région NUTS.
+    # Cette ligne mesurait `literature_document.country`, une colonne de métadonnées dont
+    # le résolveur ne se sert que comme indice : elle annonçait « 0 sur 881 » sur les
+    # quatre revues des partenaires pendant que la carte en plaçait 630 sur 879. Un
+    # panneau de complétude qui déclare absent ce qui est là envoie dépenser 881 appels de
+    # modèle pour remplir une colonne que personne ne lit, et c'est exactement la panne
+    # qu'il existe pour empêcher. Mesurer ce que l'écran affiche, toujours.
+    _coverage("place", "COALESCE(TRIM(d.extraction_json->'ref'->>'location'), '') <> ''",
+              OF_RELEVANT, "extraction", ONE_PASS,
+              "Place of each study", "Lieu de chaque étude",
+              "POST /user-scenarios/{id}/extraction/run", "evidence"),
 )
 
 OUTPUT_KEYS = tuple(o["key"] for o in OUTPUTS)
@@ -371,3 +381,207 @@ def get_scenario_outputs(scenario_id: str, lang: str = Query("en", max_length=8)
     reason lands in `errors`, and `complete` is then false. A panel built to end a silence
     must not be able to become one."""
     return scenario_outputs(scenario_id, lang=lang, threshold=threshold)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rebuilding what is missing, and only that
+# ─────────────────────────────────────────────────────────────────────────────
+# Reading the list was half the answer. The other half is being able to act on it: a
+# reviewer who sees "Themes and clusters: missing" had exactly one button, "recompute
+# everything", which re-searches ten databases for a corpus of eighty thousand papers
+# before touching the clustering. Nobody presses that in front of partners, so the
+# visualisations stayed missing and looked like a product that does not work.
+#
+# This rebuilds the artefacts the contract reports as missing or stale, one by one, and
+# NEVER re-searches. Two rules keep it honest:
+#
+#   - it spends only what it was authorised to spend. `spend=free` is the default and
+#     refuses anything with a model call, naming what it refused and what it costs. The
+#     ladder is cumulative: `one_call` also allows the free ones, `one_pass` allows all.
+#   - it is the same code the pipeline runs. Each artefact is rebuilt by the function the
+#     pipeline step calls, so a figure rebuilt here cannot differ from the same figure
+#     rebuilt by a full run.
+#
+# Coverages (the PICO, the extraction, the places) are deliberately NOT rebuilt here:
+# each has its own endpoint, its own progress and its own invoice, and the strip links to
+# them. An "update everything" that quietly starts eighty thousand model calls is the
+# opposite of what this panel is for.
+_SPEND_LADDER = {FREE: (FREE,), ONE_CALL: (FREE, ONE_CALL), ONE_PASS: (FREE, ONE_CALL, ONE_PASS)}
+
+#: L'état du dernier rebuild par scénario, en mémoire : le panneau interroge, comme pour
+#: le pipeline. Rien n'est persisté, parce que l'état DURABLE est le résultat lui-même,
+#: que `GET /outputs` lit en base.
+_REBUILD_JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _rebuild_steps(scenario_id: str, lang: str) -> dict[str, Any]:
+    """Pour chaque artefact, la fonction qui le refait, fermée sur son scénario et sa
+    langue. Importées tard : ce module est chargé avant la plupart d'entre elles, et
+    fermées sur leurs arguments plutôt que sur un état partagé, parce que deux rebuilds
+    de deux scénarios tournent dans deux fils."""
+    def _portrait() -> None:
+        from .evidence import _build_evidence_brief, store_evidence_brief
+        store_evidence_brief(scenario_id, _build_evidence_brief(scenario_id))
+
+    def _report() -> None:
+        from .evidence import _generate_evidence_brief_llm
+        _generate_evidence_brief_llm(scenario_id, lang=lang)
+
+    def _clustering() -> None:
+        from .clustering import _run_clustering_background
+        _run_clustering_background(scenario_id, True, lang)
+
+    def _kg() -> None:
+        from .knowledge_graph import _precompute_user_kg
+        _precompute_user_kg(scenario_id)
+
+    def _concepts() -> None:
+        from .knowledge_graph import _precompute_concept_graph
+        _precompute_concept_graph(scenario_id, extract=True)
+
+    def _actions() -> None:
+        from .actions import _generate_recommended_actions
+        _generate_recommended_actions(scenario_id, lang=lang)
+
+    def _variables() -> None:
+        from .variables import _generate_variables_from_pico
+        _generate_variables_from_pico(scenario_id, lang=lang)
+
+    def _seir() -> None:
+        from .seir import _precompute_seir_projection
+        _precompute_seir_projection(scenario_id)
+
+    return {"brief_portrait": _portrait, "brief_report": _report, "clustering": _clustering,
+            "knowledge_graph": _kg, "concept_graph": _concepts, "actions": _actions,
+            "variables": _variables, "seir": _seir}
+
+
+#: Les clés que ce bouton sait refaire. Une couverture n'y est pas : elle a son endpoint,
+#: sa progression et sa facture, et le panneau y renvoie.
+REBUILDABLE = tuple(_rebuild_steps("", "en").keys())
+
+#: Un seul rebuild à la fois par scénario, et jamais pendant un pipeline complet : les
+#: deux écrivent les mêmes colonnes.
+_REBUILD_LOCK = threading.Lock()
+
+#: Au-delà de quoi un travail « en cours » est tenu pour mort. Un verrou en mémoire qui
+#: ne se relâche jamais interdirait de refaire ce scénario jusqu'au prochain redémarrage,
+#: et c'est le genre de blocage qu'on ne découvre que devant quelqu'un.
+_REBUILD_STALE_S = 3600.0
+
+
+def _rebuild_in_flight(scenario_id: str) -> dict[str, Any] | None:
+    """Le travail VRAIMENT en cours, ou None. Un fil peut mourir sans écrire sa fin."""
+    job = _REBUILD_JOBS.get(scenario_id)
+    if not job or job.get("status") != "running":
+        return None
+    if time.monotonic() - float(job.get("started_at") or 0) > _REBUILD_STALE_S:
+        job["status"] = "abandoned"
+        return None
+    return job
+
+
+def _run_rebuild(scenario_id: str, keys: list[str], lang: str) -> None:
+    """Refait les artefacts demandés, dans l'ordre de la déclaration. Ne lève jamais : un
+    artefact qui échoue est rangé en erreur avec sa raison, et les suivants passent."""
+    steps = _rebuild_steps(scenario_id, lang)
+    job = _REBUILD_JOBS[scenario_id]
+    try:
+        for key in keys:
+            job["current"] = key
+            job["steps"][key] = {"status": "running"}
+            try:
+                steps[key]()
+                job["steps"][key] = {"status": "done"}
+            except Exception as e:                           # noqa: BLE001
+                logger.warning(f"rebuild {key} {scenario_id}: {e}")
+                job["steps"][key] = {"status": "error", "error": str(e)[:300]}
+    finally:
+        # TOUJOURS : un travail qui reste « en cours » après la mort de son fil interdit
+        # de refaire ce scénario, et rien ne dirait pourquoi.
+        job["current"] = None
+        job["status"] = "done"
+
+
+@app.post("/user-scenarios/{scenario_id}/outputs/rebuild")
+def rebuild_scenario_outputs(scenario_id: str, lang: str = Query("en", max_length=8),
+                             spend: str = Query(FREE, pattern="^(free|one_call|one_pass)$"),
+                             keys: str | None = Query(None, max_length=300),
+                             _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Rebuild the outputs this scenario is missing, and nothing else.
+
+    No search, ever: this touches the artefacts computed FROM the corpus, never the corpus
+    itself. `spend` is the authorisation, and it is the point of the endpoint: `free` (the
+    default) refuses anything that calls a model and says what it refused and what that
+    would cost, `one_call` allows the per-scenario calls, `one_pass` allows the ones that
+    read every paper. `keys` names outputs explicitly; without it, everything the contract
+    reports as missing or stale is rebuilt.
+
+    Returns at once with what it started; `GET .../outputs/rebuild/status` follows it, and
+    `GET .../outputs` says, from the database, what is actually there now."""
+    _get_user_scenario_or_404(scenario_id)
+    state = scenario_outputs(scenario_id, lang=lang)
+    by_key = {r["key"]: r for r in state["outputs"]}
+    allowed = _SPEND_LADDER[spend]
+
+    asked = [k.strip() for k in keys.split(",") if k.strip()] if keys else list(state["todo"])
+    unknown = [k for k in asked if k not in OUTPUT_KEYS]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Résultats inconnus : {unknown}")
+
+    # Ce qui ne se refait PAS d'ici, chacun avec sa raison : la réponse le dit plutôt que
+    # de laisser croire qu'un bouton a tout couvert.
+    refused: list[dict[str, Any]] = []
+    run: list[str] = []
+    for key in asked:
+        row, declared = by_key.get(key) or {}, next(o for o in OUTPUTS if o["key"] == key)
+        if key not in REBUILDABLE:
+            refused.append({"key": key, "why": "has its own endpoint",
+                            "rebuild": row.get("rebuild"), "cost": declared["cost"]})
+        elif row.get("state") == NOT_APPLICABLE:
+            refused.append({"key": key, "why": "not for this scenario", "cost": declared["cost"]})
+        elif declared["cost"] not in allowed:
+            refused.append({"key": key, "why": "costs more than authorised",
+                            "cost": declared["cost"], "spend_needed": declared["cost"]})
+        else:
+            run.append(key)
+
+    with _REBUILD_LOCK:
+        running = _rebuild_in_flight(scenario_id)
+        if running:
+            return {"scenario_id": scenario_id, "status": "already_running",
+                    "current": running.get("current"), "started": list(running["steps"])}
+        # Un pipeline complet écrit les mêmes colonnes : les laisser courir ensemble, c'est
+        # deux versions du même artefact selon qui finit en dernier.
+        from .scenarios import _user_scenario_pipeline_jobs
+        pipe = _user_scenario_pipeline_jobs.get(scenario_id) or {}
+        if pipe.get("overall_status") in ("running", "starting"):
+            return {"scenario_id": scenario_id, "status": "pipeline_running",
+                    "current": pipe.get("current_step"),
+                    "message": "Un pipeline complet écrit les mêmes résultats : attendez qu'il finisse."}
+        if not run:
+            return {"scenario_id": scenario_id, "status": "nothing_to_do",
+                    "refused": refused, "spend": spend,
+                    "n_relevant": state["n_relevant"], "todo": state["todo"]}
+        _REBUILD_JOBS[scenario_id] = {"status": "running", "current": None, "lang": lang,
+                                      "spend": spend, "started_at": time.monotonic(),
+                                      "steps": {k: {"status": "pending"} for k in run}}
+    try:
+        threading.Thread(target=_run_rebuild, args=(scenario_id, run, lang), daemon=True).start()
+    except Exception as e:                                   # noqa: BLE001
+        # Le fil n'a pas démarré : le travail ne doit pas rester « en cours » pour autant.
+        _REBUILD_JOBS[scenario_id]["status"] = "error"
+        _REBUILD_JOBS[scenario_id]["error"] = str(e)[:300]
+        raise HTTPException(status_code=503, detail=f"Rebuild non démarré : {e}")
+    return {"scenario_id": scenario_id, "status": "started", "started": run,
+            "refused": refused, "spend": spend, "n_relevant": state["n_relevant"]}
+
+
+@app.get("/user-scenarios/{scenario_id}/outputs/rebuild/status")
+def get_rebuild_status(scenario_id: str) -> dict[str, Any]:
+    """Where the rebuild is. `GET .../outputs` remains the truth about what exists."""
+    _get_user_scenario_or_404(scenario_id)
+    job = _REBUILD_JOBS.get(scenario_id)
+    if not job:
+        return {"scenario_id": scenario_id, "status": "not_started", "steps": {}}
+    return {"scenario_id": scenario_id, **job}

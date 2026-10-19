@@ -136,12 +136,17 @@ def test_the_costly_outputs_are_the_ones_that_read_every_paper():
     """The classes have to mean something: `one_pass` is a call per paper and is the only
     class a reviewer must be shown a price for before pressing anything."""
     per_paper = {o["key"] for o in OUTPUTS if o["cost"] == ONE_PASS}
-    # `place` is in here, which surprises until you look: the country is filled by the
-    # metadata pass, one model call per paper, not read out of the extraction for free.
+    # `place` is in here, which surprises until you look: a study's place is read FROM the
+    # paper by the extraction pass, one model call each, not sitting in a column.
     assert {"extraction", "pico", "concepts", "epi_params", "place"} <= per_paper
     # And what is pure SQL or a plain download is never priced as if it were a call.
     free = {o["key"] for o in OUTPUTS if o["cost"] == FREE}
-    assert {"brief_portrait", "scores", "clustering", "fulltext"} <= free
+    assert {"brief_portrait", "scores", "fulltext"} <= free
+    # The clustering is NOT free, which surprises until you look: the maths costs nothing
+    # (cached embeddings, UMAP, HDBSCAN) but every group gets a written summary, one call
+    # each, a dozen or so. A button announced as free that spends a dozen calls is exactly
+    # what this classification exists to prevent.
+    assert {o["key"]: o for o in OUTPUTS}["clustering"]["cost"] == ONE_CALL
 
 
 # ── Over the database ───────────────────────────────────────────────────────
@@ -191,10 +196,15 @@ def seeded(db_conn):
                                              project_context, country, extraction_json)
             VALUES (9951, 'Read', 'A cross-sectional study of exposure among poultry cullers, with counts by sex.', 'pubmed', FALSE, 'literev',
                     'Italy', %s::jsonb),
+                   -- `country` SANS extraction : la colonne de métadonnées est remplie,
+                   -- mais personne n'a lu le lieu dans l'article. Le panneau Géographie
+                   -- ne place pas celui-là, donc le registre ne doit pas le compter : si
+                   -- cette ligne revenait à lire `d.country`, le lieu dirait 2 sur 2.
                    (9952, 'Not read', 'A cohort study of exposure at live bird markets, with seropositivity by stall.', 'pubmed', FALSE, 'literev',
-                    NULL, NULL),
+                    'China', NULL),
                    (9953, 'Below', 'An unrelated paper about something else entirely, long enough to be scored.', 'pubmed', FALSE, 'literev', NULL, NULL)
-        """, (json.dumps({"source": "abstract", "observations": []}),))
+        """, (json.dumps({"source": "abstract", "ref": {"location": "Lombardy, Italy"},
+                          "observations": []}),))
         cur.execute("""
             INSERT INTO article_scenarios (scenario_id, document_id, similarity_score,
                                            rerank_score, assigned_at)
@@ -235,7 +245,12 @@ def test_a_scenario_with_nothing_built_says_so_output_by_output(seeded):
     assert (o["extraction"]["n"], o["extraction"]["of"]) == (1, 2), "of the relevant"
     assert o["extraction"]["state"] == PARTIAL
     assert o["pico"]["state"] == MISSING and o["pico"]["n"] == 0
+    # Le lieu est celui que l'EXTRACTION a noté, celui que la carte lit. 9952 porte un
+    # `country` de métadonnées et aucune extraction : il n'est pas placé. Cette ligne a
+    # compté `d.country` pendant un jour et annonçait « 0 sur 881 » sur les quatre revues
+    # des partenaires pendant que la carte en plaçait 630 sur 879.
     assert (o["place"]["n"], o["place"]["of"]) == (1, 2)
+    assert o["place"]["stage"] == "extraction", "c'est la lecture qui le remplit"
     # And the summary agrees with the rows.
     assert out["complete"] is False
     assert set(out["todo"]) == {k for k, v in o.items()
@@ -408,3 +423,166 @@ def test_an_unknown_scenario_is_a_404():
 
     r = TestClient(main.app).get("/user-scenarios/usr-no-such-thing/outputs")
     assert r.status_code == 404
+
+
+# ── Rebuilding what is missing ──────────────────────────────────────────────
+HDR = {"X-API-Key": "test-write-key"}
+
+
+@pytest.fixture(autouse=True)
+def _no_job_left_behind():
+    """Les travaux de rebuild vivent en mémoire : un test qui en laisse un « en cours »
+    ferait répondre « déjà en cours » au suivant."""
+    import api.outputs as outputs
+
+    outputs._REBUILD_JOBS.pop(SID, None)
+    yield
+    outputs._REBUILD_JOBS.pop(SID, None)
+
+
+def test_every_rebuildable_output_is_an_artefact_with_a_declared_cost():
+    """The button can only rebuild what is built once and stored. A coverage has its own
+    endpoint, its own progress and its own invoice, and an "update everything" that
+    quietly starts one model call per paper is the opposite of what the panel is for."""
+    from api.outputs import REBUILDABLE
+
+    by_key = {o["key"]: o for o in OUTPUTS}
+    for key in REBUILDABLE:
+        assert key in by_key, f"{key} is rebuildable but not declared"
+        assert by_key[key]["shape"] == ARTEFACT, f"{key} is a coverage: it has its own route"
+    # And every artefact is rebuildable: one that is not would be declared missing with
+    # no way to act on it, which is the silence this whole module exists to end.
+    assert {o["key"] for o in OUTPUTS if o["shape"] == ARTEFACT} == set(REBUILDABLE)
+
+
+def test_a_free_rebuild_refuses_what_costs_a_model_call_and_says_so(seeded, monkeypatch):
+    """`spend=free` is the default, and it is the point: a reviewer pressing "update" must
+    not discover afterwards that it spent. What it refuses it names, with the class that
+    would be needed."""
+    import api.outputs as outputs
+
+    started: list[list[str]] = []
+    monkeypatch.setattr(outputs.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda s: started.append(list(args[1]))})())
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    costly = {x["key"]: x for x in body["refused"]}
+    assert "brief_report" in costly and costly["brief_report"]["cost"] == ONE_CALL
+    assert "concept_graph" in costly and costly["concept_graph"]["cost"] == ONE_PASS
+    assert all(x["why"] for x in body["refused"]), "a refusal with no reason teaches nothing"
+    # The free ones did start, and nothing else.
+    assert started and set(started[0]) <= {"brief_portrait", "knowledge_graph"}
+
+
+def test_a_rebuild_never_touches_a_coverage(seeded, monkeypatch):
+    """Asking for the extraction by name is refused with its own route, rather than
+    silently starting a reading pass over every paper."""
+    import api.outputs as outputs
+
+    monkeypatch.setattr(outputs.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda s: None})())
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).post(f"/user-scenarios/{SID}/outputs/rebuild",
+                                  params={"keys": "extraction", "spend": "one_pass"}, headers=HDR)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "nothing_to_do"
+    assert body["refused"][0]["key"] == "extraction"
+    assert "own endpoint" in body["refused"][0]["why"]
+    assert body["refused"][0]["rebuild"], "and it says where to press instead"
+
+
+def test_a_rebuild_of_an_unknown_output_is_refused_by_name(seeded):
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).post(f"/user-scenarios/{SID}/outputs/rebuild",
+                                  params={"keys": "nonsense"}, headers=HDR)
+    assert r.status_code == 422 and "nonsense" in r.text
+
+
+def test_a_rebuild_needs_the_key(seeded):
+    """It writes, so it is keyed like every other write."""
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).post(f"/user-scenarios/{SID}/outputs/rebuild")
+    assert r.status_code == 401, r.text
+
+
+def test_a_rebuild_waits_for_a_full_pipeline_instead_of_racing_it(seeded, monkeypatch):
+    """Both write the same columns. Letting them run together is how an artefact ends up
+    describing whichever corpus finished last, which is the bug this module was born of."""
+    from api.scenarios import _user_scenario_pipeline_jobs
+    from fastapi.testclient import TestClient
+
+    _user_scenario_pipeline_jobs[SID] = {"overall_status": "running", "current_step": "pico"}
+    try:
+        r = TestClient(main.app).post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "pipeline_running"
+    finally:
+        _user_scenario_pipeline_jobs.pop(SID, None)
+
+
+def test_the_rebuild_status_is_readable_before_anything_ran(seeded):
+    from fastapi.testclient import TestClient
+
+    r = TestClient(main.app).get(f"/user-scenarios/{SID}/outputs/rebuild/status")
+    assert r.status_code == 200 and r.json()["status"] == "not_started"
+
+
+def test_a_rebuild_whose_thread_died_does_not_block_the_next_one(seeded, monkeypatch):
+    """The lock lives in memory, so a thread that dies without writing its end would
+    forbid rebuilding this scenario until the next restart: a block nobody discovers until
+    they need it. Past the deadline the stuck job is abandoned and the next one starts."""
+    import api.outputs as outputs
+
+    monkeypatch.setattr(outputs.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda s: None})())
+    from fastapi.testclient import TestClient
+
+    c = TestClient(main.app)
+    first = c.post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR)
+    assert first.json()["status"] == "started"
+    assert c.post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR).json()["status"] \
+        == "already_running", "two rebuilds at once write the same columns"
+
+    outputs._REBUILD_JOBS[SID]["started_at"] -= outputs._REBUILD_STALE_S + 1
+    again = c.post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR)
+    assert again.json()["status"] == "started"
+
+
+def test_every_name_the_rebuild_calls_actually_exists():
+    """A lazy import inside a background thread is invisible until it runs, and then only
+    in a log. Three such names were undefined in the pipeline for weeks: the cross-encoder
+    step, the PICO step and the metadata step each raised NameError on every full run,
+    caught by the step's own try and filed as "error", so a quarter of the corpus carried
+    metadata and nobody knew why. The list is repeated here on purpose: it is the contract
+    that a rename has to break the suite rather than a production run."""
+    import importlib
+
+    for mod, name in (("api.evidence", "_build_evidence_brief"),
+                      ("api.evidence", "store_evidence_brief"),
+                      ("api.evidence", "_generate_evidence_brief_llm"),
+                      ("api.clustering", "_run_clustering_background"),
+                      ("api.knowledge_graph", "_precompute_user_kg"),
+                      ("api.knowledge_graph", "_precompute_concept_graph"),
+                      ("api.actions", "_generate_recommended_actions"),
+                      ("api.variables", "_generate_variables_from_pico"),
+                      ("api.seir", "_precompute_seir_projection")):
+        got = getattr(importlib.import_module(mod), name, None)
+        assert callable(got), f"{mod}.{name} is called by the rebuild and does not exist"
+
+
+def test_the_rebuild_calls_one_function_per_artefact():
+    """And the map covers them: a new artefact added to the declaration without a way to
+    rebuild it would be reported missing with nothing to press."""
+    from api.outputs import _rebuild_steps
+
+    steps = _rebuild_steps("usr-none", "en")
+    for o in OUTPUTS:
+        if o["shape"] == ARTEFACT:
+            assert callable(steps.get(o["key"])), f"{o['key']} has no rebuild"

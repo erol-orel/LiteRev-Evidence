@@ -220,6 +220,46 @@ def plan_subset(
     }
 
 
+def selection_phrase(clusters: list[int] | None, cluster_names: dict[int, str] | None,
+                     concepts: list[str] | None, combine: str, *,
+                     designs: list[str] | None = None,
+                     levels: list[str] | None = None,
+                     countries: list[str] | None = None,
+                     conditions: list[str] | None = None) -> str:
+    """CE QUE LA SÉLECTION GARDE, en une phrase, sans verbe. PURE.
+
+    Extraite de `describe_selection` parce que les deux sens de la même sélection sont
+    lus à deux endroits : le motif stocké parle de ce qui SORT (« hors de pays Chine »,
+    posé sur les articles exclus, relu par la PRISMA), et l'export parle de ce qu'il
+    CONTIENT. Réutiliser le premier pour le second faisait dire à un fichier de 465
+    articles chinois qu'il était « hors de pays Chine », soit l'inverse de son contenu,
+    et un fichier qui se décrit de travers est pire qu'un fichier sans description."""
+    parts: list[str] = []
+    if clusters:
+        names = [f"{(cluster_names or {}).get(c) or f'cluster {c}'}" for c in clusters]
+        parts.append("clusters " + ", ".join(names))
+    if concepts:
+        parts.append("concepts " + ", ".join(concepts))
+    # Les devis et les niveaux sont nommés en toutes lettres, comme les clusters : une
+    # section Méthodes doit pouvoir dire « restreint aux essais randomisés » sans renvoyer
+    # à un code interne.
+    if designs:
+        parts.append("devis " + ", ".join(designs))
+    if levels:
+        parts.append("niveaux de preuve " + ", ".join(levels))
+    # Les pays sont nommés, eux aussi : « pays Italie, France » se lit dans une section
+    # Méthodes, « IT, FR » non.
+    if countries:
+        parts.append("pays " + ", ".join(countries))
+    # Les conditions génériques arrivent déjà rédigées (« année à partir de 2015 »,
+    # « langue en, fr ») : elles nomment leur variable et leurs valeurs en clair, pour la
+    # même raison que les clusters sont nommés plutôt que numérotés.
+    parts.extend(conditions or [])
+    if len(parts) > 1:
+        return (" et " if combine == "all" else " ou ").join(parts)
+    return parts[0] if parts else ""
+
+
 def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str] | None,
                        concepts: list[str] | None, combine: str, unassigned: str,
                        threshold: float | None = None,
@@ -235,28 +275,8 @@ def describe_selection(clusters: list[int] | None, cluster_names: dict[int, str]
     découpage ne juge que les articles pertinents à ce seuil-là. Abaisser le seuil ensuite
     fait entrer des articles que la sélection n'a jamais vus, et sans cette mention rien
     ne le rappelle : ni la PRISMA, ni la courbe du seuil, ni la personne qui relit."""
-    parts: list[str] = []
-    if clusters:
-        names = [f"{(cluster_names or {}).get(c) or f'cluster {c}'}" for c in clusters]
-        parts.append("clusters " + ", ".join(names))
-    if concepts:
-        parts.append("concepts " + ", ".join(concepts))
-    # Les devis et les niveaux sont nommés en toutes lettres, comme les clusters : une
-    # section Méthodes doit pouvoir dire « restreint aux essais randomisés » sans renvoyer
-    # à un code interne.
-    if designs:
-        parts.append("devis " + ", ".join(designs))
-    if levels:
-        parts.append("niveaux de preuve " + ", ".join(levels))
-    # Les pays sont nommés, eux aussi : « hors de pays Italie, France » se lit dans une
-    # section Méthodes, « hors de IT, FR » non.
-    if countries:
-        parts.append("pays " + ", ".join(countries))
-    # Les conditions génériques arrivent déjà rédigées (« année à partir de 2015 »,
-    # « langue en, fr ») : elles nomment leur variable et leurs valeurs en clair, pour la
-    # même raison que les clusters sont nommés plutôt que numérotés.
-    parts.extend(conditions or [])
-    joined = (" et " if combine == "all" else " ou ").join(parts) if len(parts) > 1 else (parts[0] if parts else "")
+    joined = selection_phrase(clusters, cluster_names, concepts, combine, designs=designs,
+                              levels=levels, countries=countries, conditions=conditions)
     tail = "" if unassigned == "keep" else " ; articles hors projection exclus aussi"
     # Le seuil EN TÊTE : le motif est coupé à 480 caractères, et une longue sélection
     # (vingt concepts, dix clusters) emportait le « (seuil X) » final avec elle. La
@@ -752,6 +772,12 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(e))
 
     plan["meta"] = meta
+    plan["kept_phrase"] = selection_phrase(
+        sorted(wanted_clusters) if wanted_clusters else None, cluster_names,
+        concept_labels or None, combine,
+        designs=sorted(wanted_designs) if wanted_designs else None,
+        levels=sorted(wanted_levels) if wanted_levels else None,
+        countries=country_labels or None, conditions=condition_phrases or None)
     plan["reason"] = describe_selection(sorted(wanted_clusters) if wanted_clusters else None,
                                         cluster_names, concept_labels or None, combine, unassigned,
                                         threshold=threshold,
@@ -820,8 +846,8 @@ def export_scenario_subset(scenario_id: str, payload: dict[str, Any],
     ids = [int(i) for i in plan["keep_ids"]]
     articles = articles_by_ids(scenario_id, ids) if ids else []
     undecided = int(plan.get("undecided") or 0)
-    coverage = (f"Sélection : {plan['reason']} "
-                f"{len(articles)} article(s) gardés sur les {plan['relevant']} pertinents"
+    coverage = (f"Articles gardés par la sélection : {plan['kept_phrase'] or 'tous'}. "
+                f"{len(articles)} article(s) sur les {plan['relevant']} pertinents"
                 + (f", dont {undecided} que la sélection ne sait pas juger (gardés)."
                    if undecided else ".")
                 + " Aucun découpage n'a été appliqué au scénario.")
@@ -829,7 +855,8 @@ def export_scenario_subset(scenario_id: str, payload: dict[str, Any],
         scenario_id, format, articles, include_abstract,
         subset="selection", subset_label="selection",
         coverage=coverage,
-        extra_meta={"selection": plan["reason"], "kept": len(articles),
+        extra_meta={"selection": plan["kept_phrase"], "exclusion_reason": plan["reason"],
+                    "kept": len(articles),
                     "relevant": plan["relevant"], "undecided": undecided,
                     "combine": str(payload.get("combine") or "all"),
                     "applied": False})

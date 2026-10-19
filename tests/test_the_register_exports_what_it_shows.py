@@ -196,6 +196,13 @@ def test_an_exported_selection_says_which_selection_it_is(seeded):
     assert meta["kept"] == 2 and meta["relevant"] == 2
     assert meta["selection"] and "coverage" in meta
     assert "Aucun découpage n'a été appliqué" in meta["coverage"]
+    # ET DANS LE BON SENS. Le motif stocké parle de ce qui SORT (« hors de pays Chine »,
+    # posé sur les articles exclus, relu par la PRISMA) ; un fichier de 465 articles
+    # chinois annoncé « hors de pays Chine » dit l'inverse de son contenu. Le fichier
+    # décrit ce qu'il CONTIENT, et garde le motif d'exclusion sous son propre nom.
+    assert "hors de" not in meta["coverage"], meta["coverage"]
+    assert "pays" in meta["selection"], meta["selection"]
+    assert "hors de" in meta["exclusion_reason"], "le motif stocké, lui, est inchangé"
 
 
 def test_exporting_a_selection_writes_nothing(seeded):
