@@ -5611,3 +5611,38 @@ export async function fetchScenarioOutputs(
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
+
+/** Ce qu'un rebuild a lancé, et ce qu'il a REFUSÉ de lancer faute d'autorisation. */
+export interface RebuildStarted {
+  status: "started" | "already_running" | "pipeline_running" | "nothing_to_do";
+  started?: string[];
+  refused?: { key: string; why: string; cost?: string; rebuild?: string | null }[];
+  spend: string;
+  current?: string | null;
+  message?: string;
+}
+
+export interface RebuildStatus {
+  status: "not_started" | "running" | "done" | "error" | "abandoned";
+  current?: string | null;
+  steps: Record<string, { status: string; error?: string }>;
+}
+
+/** Refaire ce qui manque, et seulement ce que `spend` autorise à dépenser. */
+export async function rebuildScenarioOutputs(
+  scenarioId: string, spend: "free" | "one_call" | "one_pass", lang: string, keys?: string[],
+): Promise<RebuildStarted> {
+  const qs = new URLSearchParams({ spend, lang });
+  if (keys?.length) qs.set("keys", keys.join(","));
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/outputs/rebuild?${qs}`,
+    { method: "POST", headers: authHeaders() });
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  return r.json();
+}
+
+export async function fetchRebuildStatus(scenarioId: string): Promise<RebuildStatus> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/outputs/rebuild/status`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}

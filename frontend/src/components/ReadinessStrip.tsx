@@ -1,7 +1,9 @@
 import React from "react";
-import { AlertTriangle, Check, Clock, HelpCircle, Minus } from "lucide-react";
+import { AlertTriangle, Check, Clock, HelpCircle, Loader2, Minus, RefreshCw } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
-import { fetchScenarioOutputs } from "../lib/api";
+import {
+  fetchRebuildStatus, fetchScenarioOutputs, hasApiKey, rebuildScenarioOutputs,
+} from "../lib/api";
 import type { ScenarioOutput, ScenarioOutputs } from "../lib/api";
 
 /** Ce que ce scénario devrait contenir, et ce qu'il contient.
@@ -25,6 +27,12 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
   const T = (k: string) => t(`scenarioDetail.readiness.${k}`);
   const [data, setData] = React.useState<ScenarioOutputs | null>(null);
   const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [note, setNote] = React.useState<string | null>(null);
+
+  const load = React.useCallback(() => (
+    fetchScenarioOutputs(scenarioId, currentLang()).then(setData).catch(() => {})
+  ), [scenarioId]);
 
   React.useEffect(() => {
     let alive = true;
@@ -35,12 +43,55 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
     return () => { alive = false; };
   }, [scenarioId, lang]);
 
+  /** Refaire ce qui manque, en ne dépensant que ce que le bouton pressé autorise. Le
+   *  libellé porte le prix : presser EST l'autorisation, et rien d'autre ne la donne. */
+  const update = async (spend: "free" | "one_call") => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const out = await rebuildScenarioOutputs(scenarioId, spend, currentLang());
+      if (out.status !== "started") {
+        setNote(out.message || T(`rebuild.${out.status}`));
+        setBusy(false);
+        return;
+      }
+      setNote(T("rebuild.started").replace("{n}", String((out.started || []).length)));
+      // On suit le travail, puis on relit l'état DEPUIS LA BASE : c'est elle qui dit ce
+      // qui existe, et non le message de celui qui vient de le lancer.
+      for (let i = 0; i < 120; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const st = await fetchRebuildStatus(scenarioId).catch(() => null);
+        if (!st || st.status !== "running") {
+          const failed = Object.entries(st?.steps || {})
+            .filter(([, v]) => v.status === "error").map(([k]) => k);
+          setNote(failed.length ? T("rebuild.partly").replace("{what}", failed.join(", "))
+            : T("rebuild.done"));
+          break;
+        }
+        if (st.current) setNote(T("rebuild.running").replace("{what}", st.current));
+      }
+      await load();
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!data) return null;
 
   // Les états « sans objet » et « hors nature » ne sont pas des manques : les montrer
   // comme tels apprendrait à ignorer le panneau. Ils restent lisibles dans le détail.
   const shown = data.outputs.filter((o) => o.state !== "not_applicable");
   const priced = data.cost_of_todo.one_pass || 0;
+  // Ce que chaque bouton refera, et ce qu'il coûtera. Seuls les ARTEFACTS se refont d'ici
+  // (une couverture a son onglet), donc on compte sur eux : annoncer « refaire 11 » puis
+  // n'en refaire que 5 serait pire que de ne rien annoncer.
+  const todoArtefacts = data.outputs.filter(
+    (o) => data.todo.includes(o.key) && o.shape === "artefact");
+  const free = todoArtefacts.filter((o) => o.cost === "free").length;
+  const calls = todoArtefacts.filter((o) => o.cost === "one_call").length;
+  const keyed = hasApiKey();
   // Une lecture qui échoue se dit : le panneau existe pour supprimer un silence, il ne
   // peut pas en créer un. Le message brut du serveur reste dans l'infobulle, où il sert
   // à qui diagnostique sans encombrer qui relit.
@@ -119,6 +170,38 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
               </tbody>
             </table>
           </div>
+          {/* Refaire ce qui manque, d'ici. Le seul bouton d'avant était « tout
+              recalculer », qui refait AUSSI la recherche sur dix bases pour un corpus de
+              quatre-vingt mille articles : personne ne le presse, et les visualisations
+              restaient donc absentes. Ici rien n'est recherché, et chaque bouton dit ce
+              qu'il dépense avant qu'on le presse. */}
+          {!data.complete && (free > 0 || calls > 0) && (
+            <div className="flex flex-wrap items-center gap-2 border-t border-white/5 pt-2">
+              {free > 0 && (
+                <button onClick={() => update("free")} disabled={busy || !keyed}
+                  title={keyed ? undefined : T("rebuild.needsKey")}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-brand-400/30 bg-brand-400/[0.07] px-2.5 py-1 text-[11px] text-brand-200 hover:border-brand-400/60 disabled:opacity-40">
+                  {busy ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  {T("rebuild.free").replace("{n}", String(free))}
+                </button>
+              )}
+              {calls > 0 && (
+                <button onClick={() => update("one_call")} disabled={busy || !keyed}
+                  title={keyed ? undefined : T("rebuild.needsKey")}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-gold-400/30 bg-gold-400/[0.07] px-2.5 py-1 text-[11px] text-gold-200 hover:border-gold-400/60 disabled:opacity-40">
+                  {busy ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  {T("rebuild.calls").replace("{n}", String(free + calls))
+                    .replace("{calls}", String(calls))}
+                </button>
+              )}
+              {priced > 0 && (
+                <span className="text-[10px] text-white/40">
+                  {T("rebuild.perPaper").replace("{n}", String(priced))}
+                </span>
+              )}
+            </div>
+          )}
+          {note && <p className="text-[10.5px] leading-4 text-gold-300/90">{note}</p>}
           <p className="text-[10px] leading-4 text-white/35">{T("footer")}</p>
         </div>
       )}
