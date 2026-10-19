@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query, Response
 from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
@@ -799,6 +799,40 @@ def preview_scenario_subset(scenario_id: str, payload: dict[str, Any]) -> dict[s
     Ils sont gardés, sauf `unassigned: "exclude"`."""
     _get_user_scenario_or_404(scenario_id)
     return _public(_build_plan(scenario_id, payload))
+
+
+@app.post("/user-scenarios/{scenario_id}/subset/export")
+def export_scenario_subset(scenario_id: str, payload: dict[str, Any],
+                           format: str = Query("csv"),
+                           include_abstract: bool = True) -> Response:
+    """Les articles que cette sélection GARDE, dans un fichier. Rien n'est écrit.
+
+    Un relecteur qui a composé « Europe ET étude de cohorte ET volailles » veut d'abord
+    cette liste, et non l'appliquer au scénario : appliquer exclut le reste du corpus et
+    se cumule, alors qu'un export ne touche à rien. Les deux chemins partent du MÊME plan
+    (`_build_plan`), donc le fichier contient exactement ce que l'aperçu annonce, et le
+    fichier porte sa propre définition dans `coverage` : une liste d'articles qui circule
+    sans dire de quelle sélection elle vient n'est pas une donnée, c'est une rumeur."""
+    from .exports import articles_by_ids, articles_export_response
+
+    _get_user_scenario_or_404(scenario_id)
+    plan = _build_plan(scenario_id, payload)
+    ids = [int(i) for i in plan["keep_ids"]]
+    articles = articles_by_ids(scenario_id, ids) if ids else []
+    undecided = int(plan.get("undecided") or 0)
+    coverage = (f"Sélection : {plan['reason']} "
+                f"{len(articles)} article(s) gardés sur les {plan['relevant']} pertinents"
+                + (f", dont {undecided} que la sélection ne sait pas juger (gardés)."
+                   if undecided else ".")
+                + " Aucun découpage n'a été appliqué au scénario.")
+    return articles_export_response(
+        scenario_id, format, articles, include_abstract,
+        subset="selection", subset_label="selection",
+        coverage=coverage,
+        extra_meta={"selection": plan["reason"], "kept": len(articles),
+                    "relevant": plan["relevant"], "undecided": undecided,
+                    "combine": str(payload.get("combine") or "all"),
+                    "applied": False})
 
 
 @app.post("/user-scenarios/{scenario_id}/subset/apply")

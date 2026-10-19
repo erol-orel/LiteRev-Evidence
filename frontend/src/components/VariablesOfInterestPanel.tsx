@@ -11,6 +11,7 @@ import type {
 import { share } from "../lib/extraction";
 import { SelectionBar } from "./SelectionBar";
 import { CrosstabPanel } from "./CrosstabPanel";
+import { ExportButton } from "./ExportButton";
 
 /** Le registre des variables d'intérêt : ce que cette revue demande à CHAQUE article, en une
  *  seule liste, compté sur tout le sous-ensemble pertinent.
@@ -148,10 +149,8 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
           </p>
         </div>
         {/* La carte des manques dans la forme qu'un partenaire colle dans son tableur. */}
-        <a href={variablesOfInterestExportUrl(scenarioId, currentLang())}
-          className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-[10.5px] text-white/65 hover:text-white hover:border-white/25">
-          {T("exportCsv")}
-        </a>
+        <ExportButton href={variablesOfInterestExportUrl(scenarioId, currentLang())}
+          label={T("exportCsv")} title={T("exportHint")} />
       </div>
 
       <div className="flex flex-wrap gap-2">
