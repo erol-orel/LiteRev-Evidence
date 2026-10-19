@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertTriangle, Check, Clock, Minus } from "lucide-react";
+import { AlertTriangle, Check, Clock, HelpCircle, Minus } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
 import { fetchScenarioOutputs } from "../lib/api";
 import type { ScenarioOutput, ScenarioOutputs } from "../lib/api";
@@ -41,6 +41,10 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
   // comme tels apprendrait à ignorer le panneau. Ils restent lisibles dans le détail.
   const shown = data.outputs.filter((o) => o.state !== "not_applicable");
   const priced = data.cost_of_todo.one_pass || 0;
+  // Une lecture qui échoue se dit : le panneau existe pour supprimer un silence, il ne
+  // peut pas en créer un. Le message brut du serveur reste dans l'infobulle, où il sert
+  // à qui diagnostique sans encombrer qui relit.
+  const failed = Object.entries(data.errors ?? {});
 
   return (
     <div className="rounded-2xl border border-white/5 bg-white/[0.02] px-3 py-2">
@@ -53,10 +57,17 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
           <span className="flex items-center gap-1 text-[11px] text-brand-300">
             <Check size={11} />{T("complete")}
           </span>
-        ) : (
+        ) : data.todo.length > 0 ? (
           <span className="text-[11px] text-gold-300/90">
             {T("todo").replace("{n}", String(data.todo.length))}
             {priced > 0 && " " + T("priced").replace("{n}", String(priced))}
+          </span>
+        ) : (
+          // Rien à faire mais pas « complet » : c'est qu'une lecture a échoué. Afficher
+          // « 0 résultats manquent » ici se lirait comme un feu vert.
+          <span className="flex items-center gap-1 text-[11px] text-violet-300/90">
+            <HelpCircle size={11} />
+            {T("failed").replace("{what}", failed.map(([k]) => k).join(", "))}
           </span>
         )}
         <span className="ml-auto flex flex-wrap items-center gap-1">
@@ -70,6 +81,12 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
             {T("note").replace("{relevant}", data.n_relevant.toLocaleString())
               .replace("{corpus}", data.n_corpus.toLocaleString())}
           </p>
+          {failed.length > 0 && (
+            <p className="text-[10px] leading-4 text-violet-300/80"
+              title={failed.map(([k, v]) => `${k}: ${v}`).join("\n")}>
+              {T("failed").replace("{what}", failed.map(([k]) => k).join(", "))}
+            </p>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-[10px]">
               <tbody>
@@ -94,7 +111,7 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
                     </td>
                     <td className="px-1.5 py-1 text-white/40">
                       {T(`state.${o.state}`)}
-                      {o.stale_because && ` (${o.stale_because})`}
+                      {o.why && ` (${T(`why.${o.why}`)})`}
                     </td>
                     <td className="px-1.5 py-1 text-white/35">{T(`cost.${o.cost}`)}</td>
                   </tr>
@@ -126,6 +143,11 @@ function Dot({ o }: { o: ScenarioOutput }) {
   }
   if (o.state === "missing") {
     return <span title={label} className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-rose-500/15 text-rose-300"><AlertTriangle size={9} /></span>;
+  }
+  // Non mesuré : sa propre forme, et surtout pas le gris de « sans objet ». Les confondre
+  // ferait lire « rien à voir » là où il faut lire « personne ne sait ».
+  if (o.state === "unknown") {
+    return <span title={label} className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-violet-500/15 text-violet-300"><HelpCircle size={9} /></span>;
   }
   // « sans objet » et « hors nature » : gris, discrets, et nommés dans l'infobulle.
   return <span title={label} className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white/5 text-white/30"><Minus size={9} /></span>;

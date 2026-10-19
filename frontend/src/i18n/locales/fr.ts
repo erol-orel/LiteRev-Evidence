@@ -472,12 +472,20 @@ export const fr = {
         missing: "manquant",
         empty: "sans objet",
         not_applicable: "pas pour cette revue",
+        unknown: "non mesuré",
+      },
+      why: {
+        corpus_moved: "le corpus a bougé après sa construction",
+        no_date: "rien n'a noté quand il a été construit",
+        date_unreadable: "sa date n'a pas pu être lue",
+        not_measured: "cette lecture a échoué : rien n'est affirmé",
       },
       cost: {
         free: "ne coûte rien",
         one_call: "un appel de modèle",
         one_pass: "un appel par article",
       },
+      failed: "Une lecture a échoué : une partie de ce panneau dit « non mesuré » au lieu de deviner ({what}).",
     },
     common: {
       loading: "Chargement...",

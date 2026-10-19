@@ -63,6 +63,16 @@ FREE, ONE_CALL, ONE_PASS = "free", "one_call", "one_pass"
 READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE, UNKNOWN = (
     "ready", "partial", "stale", "missing", "empty", "not_applicable", "unknown")
 
+#: Pourquoi un artefact n'est pas simplement « prêt ». Un CODE, et non une phrase : la
+#: raison s'affiche sur une page qui a deux langues, et une phrase anglaise rendue telle
+#: quelle dans l'interface française est une chaîne d'interface qui a échappé aux
+#: fichiers de traduction. L'interface les traduit (`readiness.why.*`).
+WHY_CORPUS_MOVED = "corpus_moved"           # le corpus a bougé après sa construction
+WHY_NO_DATE = "no_date"                     # rien n'a noté quand il a été construit
+WHY_DATE_UNREADABLE = "date_unreadable"     # une date qu'on ne sait pas lire
+WHY_NOT_MEASURED = "not_measured"           # la lecture a échoué : on ne sait pas
+WHY_CODES = (WHY_CORPUS_MOVED, WHY_NO_DATE, WHY_DATE_UNREADABLE, WHY_NOT_MEASURED)
+
 
 def _artefact(key: str, column: str, stamp: str, stage: str, cost: str,
               name_en: str, name_fr: str, rebuild: str, tab: str,
@@ -243,11 +253,11 @@ def _state_of(o: dict[str, Any], settings: dict[str, Any], counts: dict[str, int
     out["needs"] = o["needs"]
     if o["needs"] and o["needs"] not in caps:
         return {**out, "state": NOT_APPLICABLE, "n": None, "of": None,
-                "generated_at": None, "stale_because": None, "rebuild": None}
+                "generated_at": None, "why": None, "rebuild": None}
     out["rebuild"] = o["rebuild"]
     if unread and o["shape"] in unread:
         return {**out, "state": UNKNOWN, "n": None, "of": None,
-                "generated_at": None, "stale_because": "it could not be measured"}
+                "generated_at": None, "why": WHY_NOT_MEASURED}
 
     if o["shape"] == ARTEFACT:
         at = settings.get(f"at_{o['key']}")
@@ -257,18 +267,17 @@ def _state_of(o: dict[str, Any], settings: dict[str, Any], counts: dict[str, int
         if not has:
             state = MISSING
         elif when and touched and when < touched:
-            state, because = STALE, "the corpus moved after it was built"
+            state, because = STALE, WHY_CORPUS_MOVED
         elif not when:
-            state, because = STALE, ("its date could not be read" if at
-                                     else "nothing recorded when it was built")
+            state, because = STALE, (WHY_DATE_UNREADABLE if at else WHY_NO_DATE)
         return {**out, "state": state, "n": None, "of": None,
-                "generated_at": when.isoformat() if when else None, "stale_because": because}
+                "generated_at": when.isoformat() if when else None, "why": because}
 
     n = int(counts.get(o["key"]) or 0)
     of = int(counts.get("n_relevant" if o["over"] == OF_RELEVANT else "n_corpus") or 0)
     state = EMPTY if of == 0 else READY if n >= of else MISSING if n == 0 else PARTIAL
     return {**out, "state": state, "n": n, "of": of, "over": o["over"],
-            "generated_at": None, "stale_because": None}
+            "generated_at": None, "why": None}
 
 
 def scenario_outputs(scenario_id: str, lang: str = "en",

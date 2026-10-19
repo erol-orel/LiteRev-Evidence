@@ -5528,13 +5528,15 @@ export interface ScenarioOutput {
   name: string;
   /** `artefact` est construit une fois et rangé ; `coverage` est un fait par article. */
   shape: "artefact" | "coverage";
-  state: "ready" | "partial" | "stale" | "missing" | "empty" | "not_applicable";
+  /** `unknown` = la mesure a échoué : ce n'est pas un manque, et surtout pas un « prêt ». */
+  state: "ready" | "partial" | "stale" | "missing" | "empty" | "not_applicable" | "unknown";
   /** Pour une couverture : n articles sur `of`. Null pour un artefact. */
   n: number | null;
   of: number | null;
   over?: "corpus" | "relevant";
   generated_at: string | null;
-  stale_because: string | null;
+  /** Un CODE, traduit par l'interface (`readiness.why.*`), jamais une phrase du serveur. */
+  why: "corpus_moved" | "no_date" | "date_unreadable" | "not_measured" | null;
   /** `free` ne dépense rien, `one_call` un appel, `one_pass` un appel PAR ARTICLE. */
   cost: "free" | "one_call" | "one_pass";
   stage: string;
@@ -5555,6 +5557,9 @@ export interface ScenarioOutputs {
   /** Les clés qu'une action changerait : ni « sans objet », ni hors nature du scénario. */
   todo: string[];
   complete: boolean;
+  /** Ce qui n'a pas pu être lu, par moitié (`coverage`, `artefact`, `threshold`). Non vide
+   *  interdit `complete` : un panneau de complétude ne peut pas se taire sur sa panne. */
+  errors?: Record<string, string>;
   cost_of_todo: Record<string, number>;
 }
 

@@ -24,6 +24,7 @@ shipping half wired:
      left that an action would change.
 """
 import json
+import pathlib
 from datetime import datetime, timezone
 
 import pytest
@@ -34,6 +35,7 @@ import main  # noqa: E402
 from api.outputs import (  # noqa: E402
     ARTEFACT,
     COVERAGE,
+    EMPTY,
     FREE,
     MISSING,
     NOT_AN_OUTPUT,
@@ -45,6 +47,10 @@ from api.outputs import (  # noqa: E402
     PARTIAL,
     READY,
     STALE,
+    UNKNOWN,
+    WHY_CODES,
+    WHY_CORPUS_MOVED,
+    WHY_NOT_MEASURED,
     scenario_outputs,
 )
 from api.scenario_store import CAP_MODEL  # noqa: E402
@@ -260,7 +266,7 @@ def test_an_artefact_built_before_the_corpus_moved_is_stale_not_ready(seeded):
                     "WHERE scenario_id = %s AND document_id = 9952", (SID,))
     o = _by_key(scenario_outputs(SID, lang="en"))
     assert o["clustering"]["state"] == STALE
-    assert "corpus moved" in o["clustering"]["stale_because"]
+    assert o["clustering"]["why"] == WHY_CORPUS_MOVED
     assert o["clustering"]["generated_at"], "and it says when it was built"
 
 
@@ -270,7 +276,7 @@ def test_an_artefact_built_after_the_last_change_is_ready(seeded):
                     "clustering_generated_at = NOW() WHERE scenario_id = %s",
                     (json.dumps({"clusters": [1]}), SID))
     o = _by_key(scenario_outputs(SID, lang="en"))
-    assert o["clustering"]["state"] == READY and o["clustering"]["stale_because"] is None
+    assert o["clustering"]["state"] == READY and o["clustering"]["why"] is None
 
 
 def test_what_is_missing_is_priced_by_class(seeded):
@@ -309,7 +315,7 @@ def test_a_measurement_that_fails_reads_unknown_and_never_missing(seeded, monkey
     out = outputs.scenario_outputs(SID, lang="en")
     o = _by_key(out)
     assert o["extraction"]["state"] == "unknown"
-    assert o["extraction"]["stale_because"] == "it could not be measured"
+    assert o["extraction"]["why"] == WHY_NOT_MEASURED
     assert o["brief_report"]["state"] == MISSING, "the artefacts were still read"
     assert out["complete"] is False
     assert "the_pipeline_forgot" in out["errors"]["coverage"]
@@ -328,7 +334,7 @@ def test_two_dates_that_disagree_about_the_timezone_do_not_fell_the_panel(seeded
     o = outputs._state_of(
         next(x for x in OUTPUTS if x["key"] == "clustering"),
         aware, {}, naive, frozenset(), None)
-    assert o["state"] == STALE and "corpus moved" in o["stale_because"]
+    assert o["state"] == STALE and o["why"] == WHY_CORPUS_MOVED
     assert o["generated_at"] == "2025-01-01T00:00:00", "and the date is still readable"
 
 
@@ -346,6 +352,30 @@ def test_a_threshold_that_cannot_be_read_falls_back_and_says_so(seeded, monkeypa
     assert out["n_corpus"] == 3, "the corpus was still counted"
     assert "being migrated" in out["errors"]["threshold"]
     assert out["complete"] is False
+
+
+def _readiness_block(lang: str) -> str:
+    """Le bloc `readiness` du fichier de traduction, par appariement d'accolades."""
+    src = pathlib.Path(f"frontend/src/i18n/locales/{lang}.ts").read_text(encoding="utf-8")
+    i = src.index("readiness: {")
+    depth, j = 0, src.index("{", i)
+    for k in range(j, len(src)):
+        depth += 1 if src[k] == "{" else -1 if src[k] == "}" else 0
+        if depth == 0:
+            return src[j:k]
+    raise AssertionError("unbalanced readiness block")
+
+
+@pytest.mark.parametrize("lang", ["en", "fr"])
+def test_every_state_and_reason_has_a_label_in_both_languages(lang):
+    """A state the interface cannot name renders as its own key, in both languages, which
+    is how `unknown` shipped with "scenarioDetail.readiness.state.unknown" in a cell. The
+    vocabulary lives in Python, so Python checks that the labels exist."""
+    block = _readiness_block(lang)
+    for code in (READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE, UNKNOWN):
+        assert f"{code}:" in block, f"{lang}: no label for the state '{code}'"
+    for code in WHY_CODES:
+        assert f"{code}:" in block, f"{lang}: no label for the reason '{code}'"
 
 
 def test_the_names_are_served_in_the_language_asked(seeded):
