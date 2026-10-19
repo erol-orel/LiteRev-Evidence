@@ -195,9 +195,15 @@ def _naive(t: Any) -> datetime | None:
     """Une date comparable, ou None si ce n'en est pas une.
 
     Deux colonnes de la même base peuvent être l'une avec fuseau et l'autre sans, et
-    Python refuse alors de les comparer. Les huit dates que ce module rapproche ont été
-    posées par huit migrations sur quatre ans : le panneau qui doit dire ce qui manque ne
-    peut pas tomber parce que deux d'entre elles ne s'accordent pas."""
+    Python refuse alors de les comparer. Les dix dates que ce module rapproche ont été
+    posées par autant de migrations sur quatre ans, et c'est arrivé : en production
+    `article_scenarios.assigned_at` est en TIMESTAMPTZ (la colonne y préexistait, et
+    `ADD COLUMN IF NOT EXISTS` ne l'a pas convertie) alors que
+    `scenario_settings.similarity_threshold_set_at` est naïve. Le `max()` des deux levait
+    TypeError, donc HTTP 500, sur tout scénario dont le seuil avait été réglé, et sur
+    ceux-là seulement : les deux seuls scénarios qui répondaient étaient ceux dont le
+    seuil n'avait jamais été touché. Le panneau qui doit dire ce qui manque ne peut pas
+    tomber parce que deux dates ne s'accordent pas."""
     if not isinstance(t, datetime):
         return None
     return t.replace(tzinfo=None) if t.tzinfo is not None else t

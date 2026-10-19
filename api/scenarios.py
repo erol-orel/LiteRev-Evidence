@@ -160,6 +160,16 @@ def _ensure_user_scenarios_table() -> None:
             # les alertes décident par elle de ce qui est nouveau (api/alerts.py). La
             # colonne existait sans que rien ne l'écrive, et un article déjà en
             # bibliothèque lié plus tard au scénario n'était jamais signalé.
+            #
+            # ATTENTION, LE TYPE DIFFÈRE EN PRODUCTION : la colonne y préexiste en
+            # TIMESTAMPTZ, et `ADD COLUMN IF NOT EXISTS` ne la convertit pas. Une base
+            # neuve (les tests, un poste local) l'obtient donc NAÏVE et la production
+            # AVEC FUSEAU, tandis que les dates de `scenario_settings` sont naïves
+            # partout. Comparer les deux en Python lève TypeError : c'est ce qui a mis
+            # `GET /user-scenarios/{id}/outputs` en 500 sur tous les scénarios dont le
+            # seuil avait été réglé, et seulement là. Toute comparaison côté Python
+            # normalise d'abord (cf. `_naive` dans api/outputs.py, et le même piège
+            # documenté dans `_process_alert_digests`).
             "ALTER TABLE article_scenarios ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP",
             "ALTER TABLE article_scenarios ALTER COLUMN assigned_at SET DEFAULT now()",
             # Même borne que `embedding_attempts` plus bas, mais pour le score sémantique
