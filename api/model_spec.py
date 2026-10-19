@@ -178,6 +178,24 @@ def _ensure_spec_proposal_columns():
         # corpus, donc il se calcule une fois (le pipeline le fait) et se sert tel quel.
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS evidence_brief_json JSONB"))
         conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS evidence_brief_at TIMESTAMP"))
+        # Le brief NARRATIF (écrit par un modèle) a sa propre colonne, parce qu'il n'est
+        # pas le portrait ci-dessus. Les deux partageaient `evidence_brief_json`, chacun
+        # avec son propre cachet de fraîcheur (`_stamp` pour le portrait,
+        # `_corpus_fingerprint` pour le récit), et chaque lecteur jugeait la charge de
+        # l'autre invalide : ouvrir l'onglet Preuves recalculait le portrait et ÉCRASAIT
+        # le rapport narratif, dont la lecture refuse ensuite de dépenser. Le rapport
+        # disparaissait donc à l'ouverture de l'onglet qui devait le montrer.
+        conn.execute(text("ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS evidence_brief_llm_json JSONB"))
+        # Les rapports déjà écrits sont déménagés une fois, AVANT que le premier portrait
+        # ne vienne écraser l'ancienne colonne. On les reconnaît à leur cachet
+        # (`_corpus_fingerprint`) : un portrait n'en a pas et ne bouge donc pas.
+        conn.execute(text("""
+            UPDATE scenario_settings
+            SET evidence_brief_llm_json = evidence_brief_json
+            WHERE evidence_brief_llm_json IS NULL
+              AND jsonb_typeof(evidence_brief_json) = 'object'
+              AND evidence_brief_json ? '_corpus_fingerprint'
+        """))
     logger.info("Colonnes de proposition de spec vérifiées/créées.")
 
 

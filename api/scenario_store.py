@@ -720,6 +720,11 @@ CORPUS_DERIVED_CACHE_RESET = """
     seir_projection_json = NULL, seir_projection_generated_at = NULL,
     evidence_brief_json = NULL, evidence_brief_at = NULL
 """
+# `evidence_brief_llm_json` n'y est PAS, et c'est délibéré : le portrait se recalcule en
+# SQL, le rapport narratif coûte un appel de modèle. Un corpus qui bouge d'un article le
+# rendait absent (et un GET ne dépense pas, donc rien ne le réécrivait) ; il est désormais
+# servi DATÉ, avec le nombre d'articles sur lesquels il a été écrit et celui d'aujourd'hui.
+# Un rapport doit pouvoir être vieux ; il ne doit jamais disparaître.
 
 
 def reset_corpus_derived_caches(conn, scenario_id: str) -> None:

@@ -315,12 +315,66 @@ def cached_evidence_brief(scenario_id: str) -> dict[str, Any] | None:
         return None
     if not row or not isinstance(row["j"], dict) or not row["j"]:
         return None
+    # Un rapport narratif qui traîne dans l'ancienne colonne partagée n'est pas un
+    # portrait : le relire comme tel le ferait recalculer puis écraser, ce qui est
+    # exactement ce qui faisait disparaître le rapport à l'ouverture de l'onglet.
+    if is_llm_brief(row["j"]):
+        return None
     if str(row["j"].get("_stamp") or "") != stamp:
         return None
     out = {k: v for k, v in row["j"].items() if k != "_stamp"}
     if not out:                           # une empreinte seule n'est pas un portrait
         return None
     return {**out, "cached_at": row["at"].isoformat() if row["at"] else None}
+
+
+#: Les clés que seul un rapport narratif porte. Le portrait a `_stamp` et des
+#: distributions (dont `evidence_level_distribution`, qui n'est pas `evidence_level`).
+_LLM_BRIEF_KEYS = ("executive_summary", "claims", "key_findings", "grade_recommendation",
+                   "recommendations", "evidence_level")
+
+
+def is_llm_brief(payload: Any) -> bool:
+    """Whether this stored payload is the narrative REPORT and not the corpus portrait. PURE.
+
+    By shape, not only by stamp: the two lived in one column for a long time, and a report
+    written before the fingerprint existed is still a report. A portrait is recognised by
+    its own stamp, and `evidence_level_distribution` is deliberately not read as
+    `evidence_level`."""
+    if not isinstance(payload, dict) or not payload:
+        return False
+    if payload.get("_stamp"):
+        return False
+    if payload.get("_corpus_fingerprint"):
+        return True
+    return any(payload.get(k) for k in _LLM_BRIEF_KEYS)
+
+
+def stored_llm_brief(scenario_id: str) -> dict[str, Any] | None:
+    """The narrative brief stored for this scenario, whatever its freshness, or None.
+
+    Its own column since the two briefs stopped sharing one. The fallback reads the old
+    shared column, but ONLY when what sits there has the shape of a report: a scenario
+    whose report was written before this change keeps it, and a portrait that happens to
+    be sitting there is never mistaken for a report."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT evidence_brief_llm_json AS fresh, evidence_brief_json AS legacy,
+                       brief_generated_at AS at
+                FROM scenario_settings WHERE scenario_id = :sid
+            """), {"sid": scenario_id}).mappings().first()
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"stored_llm_brief {scenario_id}: {_e}")
+        return None
+    if not row:
+        return None
+    for slot in ("fresh", "legacy"):
+        if is_llm_brief(row[slot]):
+            out = dict(row[slot])
+            out["_generated_at"] = row["at"].isoformat() if row["at"] else None
+            return out
+    return None
 
 
 def store_evidence_brief(scenario_id: str, brief: dict[str, Any]) -> bool:
@@ -779,14 +833,9 @@ def _generate_evidence_brief_llm(scenario_id: str, force: bool = False, lang: st
     # 30 articles reproduits). Le suffixe invalide une fois les briefs écrits sans lui.
     _brief_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, BRIEF_CONTEXT_VERSION)
     if not force:
-        with engine.connect() as conn:
-            row = conn.execute(text("""
-                SELECT evidence_brief_json FROM scenario_settings WHERE scenario_id = :sid
-            """), {"sid": scenario_id}).mappings().first()
-        if row and row["evidence_brief_json"]:
-            _cached = dict(row["evidence_brief_json"])
-            if _cached.get("_corpus_fingerprint") == _brief_fp:
-                return _cached
+        _cached = stored_llm_brief(scenario_id)
+        if _cached and _cached.get("_corpus_fingerprint") == _brief_fp:
+            return _cached
 
     scenario_name = _get_scenario_name(scenario_id)
 
@@ -1024,14 +1073,19 @@ Retourne UNIQUEMENT le JSON valide."""
         # Empreinte du corpus : sert de clé de cache « ne pas régénérer si inchangé »
         # (relue en tête de fonction). Stockée DANS le brief pour éviter une colonne.
         brief["_corpus_fingerprint"] = _brief_fp
+        # Ce SUR QUOI il a été écrit, pour pouvoir le servir daté quand le corpus a bougé
+        # plutôt que de le jeter : « écrit le 18 octobre sur 1 019 articles » se lit, une
+        # page vide ne se lit pas.
+        brief["_corpus_n"] = len(articles)
+        brief["_threshold"] = threshold
 
-        # Sauvegarder en DB
+        # Sauvegarder en DB, dans la colonne du RAPPORT (jamais celle du portrait).
         with engine.begin() as conn:
             conn.execute(text("""
-                INSERT INTO scenario_settings (scenario_id, evidence_brief_json, brief_generated_at, updated_at)
+                INSERT INTO scenario_settings (scenario_id, evidence_brief_llm_json, brief_generated_at, updated_at)
                 VALUES (:sid, CAST(:brief AS jsonb), NOW(), NOW())
                 ON CONFLICT (scenario_id) DO UPDATE
-                SET evidence_brief_json = CAST(:brief AS jsonb),
+                SET evidence_brief_llm_json = CAST(:brief AS jsonb),
                     brief_generated_at = NOW(),
                     updated_at = NOW()
             """), {"sid": scenario_id, "brief": _json.dumps(brief)})
@@ -1148,38 +1202,44 @@ def with_resolved_references(brief: dict, scenario_id: str) -> dict:
 @app.get("/scenarios/{scenario_id}/evidence-brief/llm")
 def get_llm_evidence_brief(scenario_id: str, lang: str | None = Query(None)) -> dict[str, Any]:
     """
-    Retourne le brief LLM généré (depuis le cache DB) DANS LA LANGUE demandée.
-    Le cache n'est servi que si son empreinte (corpus + seuil + langue) correspond ;
-    sinon (corpus modifié OU langue différente) on déclenche une régénération et on
-    retourne un statut pending. Sans `lang`, le brief reste en français (défaut).
+    Le rapport est TOUJOURS servi s'il existe. Quand le corpus a bougé depuis son
+    écriture, ou qu'il a été écrit dans une autre langue, il arrive DATÉ (`stale`, la date,
+    le nombre d'articles sur lesquels il a été écrit, le nombre d'aujourd'hui, sa langue) :
+    un rapport vieux se lit et se juge, une page vide ne se lit pas. Il n'était pas servi
+    du tout, et comme un GET ne dépense pas, il ne se régénérait pas non plus : le panneau
+    restait vide pour toujours, et c'est ce que les relecteurs signalaient comme « le
+    rapport disparaît ». La régénération reste derrière son POST, qui porte la clé.
     """
     threshold = _get_scenario_threshold(scenario_id)
     articles = _get_above_threshold_articles(scenario_id, threshold, full_rows=0)   # ids/statuts seulement
-    if not articles:
+    # Le rapport est cherché AVANT l'état du corpus : un seuil relevé, un screening en
+    # cours ou une recherche relancée peuvent rendre le sous-ensemble momentanément vide,
+    # et la page répondait alors « aucun article au-dessus du seuil » en passant sous
+    # silence un rapport qui existe. L'état du corpus est un fait à part, dit à côté.
+    brief = stored_llm_brief(scenario_id)
+    if not articles and not brief:
         return {"status": "empty", "message": _msg(lang,
                 "Aucun article au-dessus du seuil. Ajoutez des articles ou abaissez le seuil de similarité.",
                 "No article above the threshold. Add articles or lower the similarity threshold.")}
 
-    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang, BRIEF_CONTEXT_VERSION)
+    _want_fp = _evidence_fingerprint([a["id"] for a in articles], threshold, lang,
+                                     BRIEF_CONTEXT_VERSION) if articles else ""
 
-    with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT evidence_brief_json, brief_generated_at
-            FROM scenario_settings WHERE scenario_id = :sid
-        """), {"sid": scenario_id}).mappings().first()
-
-    if row and row["evidence_brief_json"]:
-        brief = dict(row["evidence_brief_json"])
-        # Ne servir le cache que s'il correspond au corpus ET à la langue demandés.
-        # Un brief français ne doit pas être resservi quand l'UI passe en anglais.
-        if brief.get("_corpus_fingerprint") == _want_fp:
-            brief["_cached"] = True
-            brief["_generated_at"] = row["brief_generated_at"].isoformat() if row["brief_generated_at"] else None
-            # À la lecture aussi : les briefs écrits avant la normalisation la reçoivent
-            # sans être régénérés (l'empreinte garantit que `lang` est celle du brief).
-            if brief.get("evidence_level"):
-                brief["evidence_level"] = brief_level(brief["evidence_level"], lang)
-            return with_resolved_references(brief, scenario_id)
+    if brief:
+        fresh = brief.get("_corpus_fingerprint") == _want_fp
+        brief["_cached"] = True
+        brief["stale"] = not fresh
+        if not fresh:
+            # Ce qui a changé, dit en chiffres : le relecteur décide de régénérer ou non.
+            brief["_corpus_now"] = len(articles)
+            brief["_lang_asked"] = (lang or "fr").lower()[:2]
+            brief["_lang_written"] = str(brief.get("lang") or "fr").lower()[:2]
+            brief["_lang_mismatch"] = brief["_lang_written"] != brief["_lang_asked"]
+        # À la lecture aussi : les briefs écrits avant la normalisation la reçoivent
+        # sans être régénérés.
+        if brief.get("evidence_level"):
+            brief["evidence_level"] = brief_level(brief["evidence_level"], lang)
+        return with_resolved_references(brief, scenario_id)
 
     # Si un job précédent a ÉCHOUÉ, renvoyer l'erreur au lieu de relancer la
     # génération à chaque appel : sinon un échec persistant (mauvaise sortie LLM,

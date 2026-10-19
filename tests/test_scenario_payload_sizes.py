@@ -88,7 +88,11 @@ def test_settings_default_when_no_row():
     # lecture de deux flottants rapatriait 208 ko sur le scénario HPAI (122 ko de
     # projection SEIR, 63 ko de carte des concepts, 38 ko de traductions).
     assert body["cached"] == {
-        "evidence_brief": False, "variables": False, "variables_proposal": False,
+        # `evidence_brief_llm` est le RAPPORT narratif, séparé du portrait depuis qu'on a
+        # vu que les deux se détruisaient dans une seule colonne. Il est annoncé comme les
+        # autres : quelques milliers de mots ne voyagent pas à chaque ouverture de page.
+        "evidence_brief": False, "evidence_brief_llm": False,
+        "variables": False, "variables_proposal": False,
         "variables_i18n": False, "clustering": False, "knowledge_graph": False,
         "concept_graph": False, "seir_projection": False, "seir_observed": False,
         "codebook": False, "recommended_actions": False}
