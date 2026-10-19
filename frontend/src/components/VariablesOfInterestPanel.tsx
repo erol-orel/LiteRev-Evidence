@@ -2,10 +2,12 @@ import React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
 import {
-  fetchVariableGap, fetchVariablesOfInterest, hasApiKey, runExtractionForNewVariables,
-  variablesOfInterestExportUrl,
+  fetchModelEvidence, fetchVariableGap, fetchVariablesOfInterest, hasApiKey,
+  runExtractionForNewVariables, variablesOfInterestExportUrl,
 } from "../lib/api";
-import type { SubsetCondition, VariableGap, VoiRegister, VoiVariable } from "../lib/api";
+import type {
+  ModelEvidence, SubsetCondition, VariableGap, VoiRegister, VoiVariable,
+} from "../lib/api";
 import { share } from "../lib/extraction";
 import { SelectionBar } from "./SelectionBar";
 import { CrosstabPanel } from "./CrosstabPanel";
@@ -43,6 +45,13 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
   const [gap, setGap] = React.useState<VariableGap | null>(null);
   const [asking, setAsking] = React.useState(false);
   const [askNote, setAskNote] = React.useState<string | null>(null);
+  // Les variables qu'un modèle demanderait, et ce que la littérature en rapporte. Elles
+  // vivaient dans l'onglet Variables & Modèle, que la nature « revue » retire : or la
+  // liste elle-même EST un produit de revue (quelles variables la littérature soutient),
+  // au même titre que les paramètres épidémiologiques mis en commun. Elle est donc ici,
+  // repliée, et ne demande rien : lecture du spec DÉJÀ enregistré, sans appel de modèle.
+  const [modelEv, setModelEv] = React.useState<ModelEvidence | null>(null);
+  const [showModel, setShowModel] = React.useState(false);
 
   React.useEffect(() => {
     let alive = true;
@@ -65,6 +74,15 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
       .catch(() => {});
     return () => { alive = false; };
   }, [scenarioId, reload]);
+
+  React.useEffect(() => {
+    let alive = true;
+    setModelEv(null);
+    fetchModelEvidence(scenarioId, currentLang())
+      .then((m) => { if (alive) setModelEv(m.status === "ok" && m.n_variables > 0 ? m : null); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [scenarioId, lang, reload]);
 
   const askNewVariables = async () => {
     setAsking(true);
@@ -258,6 +276,60 @@ export function VariablesOfInterestPanel({ scenarioId }: { scenarioId: string })
           </div>
         );
       })}
+
+      {/* Les variables qu'un modèle demanderait. Repliées : une revue de littérature n'a
+          pas de modèle, mais « quelles variables la littérature soutient, et combien
+          d'articles les rapportent vraiment » est une réponse de revue, et c'est la seule
+          qui survive à la lecture. Deux mesures distinctes, jamais additionnées : LU, ce
+          que l'extraction rapporte, et MENTIONNÉ, ce qu'un résumé nomme. */}
+      {modelEv && (
+        <div className="rounded-2xl border border-white/5 bg-white/[0.02]">
+          <button onClick={() => setShowModel((s) => !s)} aria-expanded={showModel}
+            className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left">
+            <span className="flex items-center gap-1.5 text-[11px] font-semibold text-white/80">
+              {showModel ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {T("modelTitle")}
+              <span className="font-mono text-[10px] font-normal text-white/35">{modelEv.n_variables}</span>
+            </span>
+            <span className="truncate text-[10px] text-white/35">
+              {T("modelHint").replace("{joined}", String(modelEv.matched))
+                .replace("{total}", String(modelEv.n_variables))}
+            </span>
+          </button>
+          {showModel && (
+            <div className="space-y-1.5 border-t border-white/5 px-3 py-2">
+              <p className="max-w-[760px] text-[10px] leading-4 text-white/40">
+                {T("modelNote").replace("{read}", modelEv.denominator.toLocaleString())
+                  .replace("{relevant}", String(modelEv.evidence_count_denominator ?? "?"))}
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-[10px]">
+                  <thead>
+                    <tr className="border-b border-white/5 text-white/40">
+                      <th className="px-2 py-1 text-left font-semibold uppercase tracking-wider">{T("modelColVariable")}</th>
+                      <th className="px-2 py-1 text-left font-semibold uppercase tracking-wider">{T("modelColQuestion")}</th>
+                      <th className="px-2 py-1 text-right font-semibold uppercase tracking-wider">{T("modelColRead")}</th>
+                      <th className="px-2 py-1 text-right font-semibold uppercase tracking-wider">{T("modelColMentioned")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {modelEv.variables.map((v) => (
+                      <tr key={v.index} className="border-b border-white/5">
+                        <td className="px-2 py-1 text-white/75">{v.name || "-"}</td>
+                        <td className="px-2 py-1 text-white/45">
+                          {v.register_name || v.register_variable || <span className="text-white/25">{T("modelNoQuestion")}</span>}
+                        </td>
+                        <td className="px-2 py-1 text-right font-mono text-brand-300">{v.register_level || "-"}</td>
+                        <td className="px-2 py-1 text-right font-mono text-white/45">{v.mentions_level || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <p className="max-w-[760px] text-[10px] leading-4 text-white/35">{T("footer")}</p>
     </div>
