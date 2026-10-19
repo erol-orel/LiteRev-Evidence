@@ -3840,6 +3840,16 @@ export interface LlmEvidenceBrief {
   evidence_level?: string;
   grade_recommendation?: string;
   future_research?: string;
+  /** Le rapport est servi même quand le corpus a bougé depuis son écriture, ou qu'il a
+   *  été écrit dans une autre langue : il arrive alors DATÉ plutôt qu'absent. Il n'était
+   *  pas servi du tout, et un GET ne dépense pas, donc le panneau restait vide. */
+  stale?: boolean;
+  /** Les articles sur lesquels il a été écrit, et ceux que le corpus porte aujourd'hui. */
+  _corpus_n?: number | null;
+  _corpus_now?: number | null;
+  _lang_written?: string;
+  _lang_asked?: string;
+  _lang_mismatch?: boolean;
   key_references?: Array<{ title: string; year: number | null; journal: string; key_contribution: string }>;
   /**
    * One row per claim, with the certainty it is allowed to assert. `strength` is NOT

@@ -8922,6 +8922,25 @@ ${llm.future_research ? `<h3>${t("scenarioDetail.evidences.pdf.futureResearch")}
       )}
       {llmData && hasLlmContent && (
         <div className="space-y-5">
+          {/* Un rapport DATÉ, et jamais absent. Il n'était pas servi du tout dès que le
+              corpus avait bougé d'un article ou que la langue de lecture différait de
+              celle de l'écriture, et comme un GET ne dépense pas, rien ne le réécrivait :
+              le panneau restait vide. Il arrive maintenant avec ce sur quoi il a été
+              écrit, ce que le corpus porte aujourd'hui, et le bouton pour le refaire. */}
+          {llmData.stale && (
+            <div className="rounded-2xl border border-gold-400/25 bg-gold-400/[0.05] px-4 py-2.5">
+              <p className="text-[11px] leading-5 text-gold-200/90">
+                {t("scenarioDetail.evidences.briefStale")
+                  .replace("{when}", llmData._generated_at
+                    ? new Date(llmData._generated_at).toLocaleDateString(lang === "fr" ? "fr-FR" : "en-US")
+                    : "?")
+                  .replace("{written}", llmData._corpus_n != null ? String(llmData._corpus_n) : "?")
+                  .replace("{now}", llmData._corpus_now != null ? String(llmData._corpus_now) : "?")}
+                {llmData._lang_mismatch && " " + t("scenarioDetail.evidences.briefOtherLanguage")}
+              </p>
+              <p className="mt-0.5 text-[10px] text-white/45">{t("scenarioDetail.evidences.briefStaleHow")}</p>
+            </div>
+          )}
           {/* Niveau de preuve + Grade */}
           {(llmData.evidence_level || llmData.grade_recommendation) && (
             <div className="flex flex-wrap gap-2">
