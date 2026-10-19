@@ -5521,3 +5521,50 @@ export async function fetchModelEvidence(scenarioId: string, lang: string): Prom
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
 }
+
+// ─── Ce qu'un scénario devrait contenir, et ce qu'il contient ─────────────────
+export interface ScenarioOutput {
+  key: string;
+  name: string;
+  /** `artefact` est construit une fois et rangé ; `coverage` est un fait par article. */
+  shape: "artefact" | "coverage";
+  state: "ready" | "partial" | "stale" | "missing" | "empty" | "not_applicable";
+  /** Pour une couverture : n articles sur `of`. Null pour un artefact. */
+  n: number | null;
+  of: number | null;
+  over?: "corpus" | "relevant";
+  generated_at: string | null;
+  stale_because: string | null;
+  /** `free` ne dépense rien, `one_call` un appel, `one_pass` un appel PAR ARTICLE. */
+  cost: "free" | "one_call" | "one_pass";
+  stage: string;
+  tab: string;
+  needs: string | null;
+  rebuild: string | null;
+}
+
+export interface ScenarioOutputs {
+  scenario_id: string;
+  kind: string;
+  n_corpus: number;
+  n_relevant: number;
+  /** Quand le corpus a bougé pour la dernière fois : c'est ce qui périme un artefact. */
+  corpus_touched_at: string | null;
+  outputs: ScenarioOutput[];
+  tally: Record<string, number>;
+  /** Les clés qu'une action changerait : ni « sans objet », ni hors nature du scénario. */
+  todo: string[];
+  complete: boolean;
+  cost_of_todo: Record<string, number>;
+}
+
+/** L'état de complétude d'un scénario. Lecture seule : deux requêtes SQL, aucun appel de
+ *  modèle, rien d'écrit. */
+export async function fetchScenarioOutputs(
+  scenarioId: string, lang: string,
+): Promise<ScenarioOutputs> {
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/outputs?lang=${encodeURIComponent(lang)}`);
+  if (!r.ok) throw new Error(httpMessage(r.status));
+  return r.json();
+}

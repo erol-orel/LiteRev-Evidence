@@ -57,4 +57,8 @@ MODULES = (
     "variables_of_interest",
     # La lecture d'une annexe de codebook : elle lit additions (PDF, xlsx) et codebook.
     "codebook_reader",
+    # Le contrat de complétude : ce qu'un scénario devrait contenir, et ce qu'il contient.
+    # Il ne lit que core, digest et scenario_store, mais il DÉCRIT tous les autres : en
+    # dernier, pour que la liste puisse nommer n'importe quelle étape du pipeline.
+    "outputs",
 )
