@@ -553,3 +553,36 @@ def test_a_rebuild_whose_thread_died_does_not_block_the_next_one(seeded, monkeyp
     outputs._REBUILD_JOBS[SID]["started_at"] -= outputs._REBUILD_STALE_S + 1
     again = c.post(f"/user-scenarios/{SID}/outputs/rebuild", headers=HDR)
     assert again.json()["status"] == "started"
+
+
+def test_every_name_the_rebuild_calls_actually_exists():
+    """A lazy import inside a background thread is invisible until it runs, and then only
+    in a log. Three such names were undefined in the pipeline for weeks: the cross-encoder
+    step, the PICO step and the metadata step each raised NameError on every full run,
+    caught by the step's own try and filed as "error", so a quarter of the corpus carried
+    metadata and nobody knew why. The list is repeated here on purpose: it is the contract
+    that a rename has to break the suite rather than a production run."""
+    import importlib
+
+    for mod, name in (("api.evidence", "_build_evidence_brief"),
+                      ("api.evidence", "store_evidence_brief"),
+                      ("api.evidence", "_generate_evidence_brief_llm"),
+                      ("api.clustering", "_run_clustering_background"),
+                      ("api.knowledge_graph", "_precompute_user_kg"),
+                      ("api.knowledge_graph", "_precompute_concept_graph"),
+                      ("api.actions", "_generate_recommended_actions"),
+                      ("api.variables", "_generate_variables_from_pico"),
+                      ("api.seir", "_precompute_seir_projection")):
+        got = getattr(importlib.import_module(mod), name, None)
+        assert callable(got), f"{mod}.{name} is called by the rebuild and does not exist"
+
+
+def test_the_rebuild_calls_one_function_per_artefact():
+    """And the map covers them: a new artefact added to the declaration without a way to
+    rebuild it would be reported missing with nothing to press."""
+    from api.outputs import _rebuild_steps
+
+    steps = _rebuild_steps("usr-none", "en")
+    for o in OUTPUTS:
+        if o["shape"] == ARTEFACT:
+            assert callable(steps.get(o["key"])), f"{o['key']} has no rebuild"
