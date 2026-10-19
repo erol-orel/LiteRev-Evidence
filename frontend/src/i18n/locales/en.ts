@@ -472,12 +472,20 @@ export const en: Translations = {
         missing: "missing",
         empty: "without object",
         not_applicable: "not for this review",
+        unknown: "not measured",
+      },
+      why: {
+        corpus_moved: "the corpus moved after it was built",
+        no_date: "nothing recorded when it was built",
+        date_unreadable: "its date could not be read",
+        not_measured: "this reading failed, so nothing is claimed",
       },
       cost: {
         free: "costs nothing",
         one_call: "one model call",
         one_pass: "one call per paper",
       },
+      failed: "One reading failed, so part of this panel says \"not measured\" rather than guessing: {what}.",
     },
     common: {
       loading: "Loading...",
