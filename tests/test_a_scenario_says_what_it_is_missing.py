@@ -136,8 +136,8 @@ def test_the_costly_outputs_are_the_ones_that_read_every_paper():
     """The classes have to mean something: `one_pass` is a call per paper and is the only
     class a reviewer must be shown a price for before pressing anything."""
     per_paper = {o["key"] for o in OUTPUTS if o["cost"] == ONE_PASS}
-    # `place` is in here, which surprises until you look: the country is filled by the
-    # metadata pass, one model call per paper, not read out of the extraction for free.
+    # `place` is in here, which surprises until you look: a study's place is read FROM the
+    # paper by the extraction pass, one model call each, not sitting in a column.
     assert {"extraction", "pico", "concepts", "epi_params", "place"} <= per_paper
     # And what is pure SQL or a plain download is never priced as if it were a call.
     free = {o["key"] for o in OUTPUTS if o["cost"] == FREE}
@@ -196,10 +196,15 @@ def seeded(db_conn):
                                              project_context, country, extraction_json)
             VALUES (9951, 'Read', 'A cross-sectional study of exposure among poultry cullers, with counts by sex.', 'pubmed', FALSE, 'literev',
                     'Italy', %s::jsonb),
+                   -- `country` SANS extraction : la colonne de métadonnées est remplie,
+                   -- mais personne n'a lu le lieu dans l'article. Le panneau Géographie
+                   -- ne place pas celui-là, donc le registre ne doit pas le compter : si
+                   -- cette ligne revenait à lire `d.country`, le lieu dirait 2 sur 2.
                    (9952, 'Not read', 'A cohort study of exposure at live bird markets, with seropositivity by stall.', 'pubmed', FALSE, 'literev',
-                    NULL, NULL),
+                    'China', NULL),
                    (9953, 'Below', 'An unrelated paper about something else entirely, long enough to be scored.', 'pubmed', FALSE, 'literev', NULL, NULL)
-        """, (json.dumps({"source": "abstract", "observations": []}),))
+        """, (json.dumps({"source": "abstract", "ref": {"location": "Lombardy, Italy"},
+                          "observations": []}),))
         cur.execute("""
             INSERT INTO article_scenarios (scenario_id, document_id, similarity_score,
                                            rerank_score, assigned_at)
@@ -240,7 +245,12 @@ def test_a_scenario_with_nothing_built_says_so_output_by_output(seeded):
     assert (o["extraction"]["n"], o["extraction"]["of"]) == (1, 2), "of the relevant"
     assert o["extraction"]["state"] == PARTIAL
     assert o["pico"]["state"] == MISSING and o["pico"]["n"] == 0
+    # Le lieu est celui que l'EXTRACTION a noté, celui que la carte lit. 9952 porte un
+    # `country` de métadonnées et aucune extraction : il n'est pas placé. Cette ligne a
+    # compté `d.country` pendant un jour et annonçait « 0 sur 881 » sur les quatre revues
+    # des partenaires pendant que la carte en plaçait 630 sur 879.
     assert (o["place"]["n"], o["place"]["of"]) == (1, 2)
+    assert o["place"]["stage"] == "extraction", "c'est la lecture qui le remplit"
     # And the summary agrees with the rows.
     assert out["complete"] is False
     assert set(out["todo"]) == {k for k, v in o.items()

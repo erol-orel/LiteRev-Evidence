@@ -170,13 +170,18 @@ OUTPUTS: tuple[dict[str, Any], ...] = (
               "extraction", ONE_PASS,
               "Epidemiological parameters", "Paramètres épidémiologiques",
               "POST /scenarios/{id}/epidemic-parameters/extract", "evidence"),
-    _coverage("place", "COALESCE(TRIM(d.country), '') <> ''", OF_RELEVANT,
-              # Le pays est rempli par la passe MÉTADONNÉES, pas par l'extraction :
-              # c'est elle qu'il faut relancer, et le dire juste évite d'envoyer un
-              # relecteur appuyer sur le mauvais bouton.
-              "metadata", ONE_PASS,
-              "Country of each study", "Pays de chaque étude",
-              "POST /metadata/extract", "evidence"),
+    # LE LIEU TEL QUE LE PANNEAU GÉOGRAPHIE LE LIT, c'est-à-dire celui que l'extraction a
+    # noté (`extraction_json.ref.location`), résolu ensuite en pays et en région NUTS.
+    # Cette ligne mesurait `literature_document.country`, une colonne de métadonnées dont
+    # le résolveur ne se sert que comme indice : elle annonçait « 0 sur 881 » sur les
+    # quatre revues des partenaires pendant que la carte en plaçait 630 sur 879. Un
+    # panneau de complétude qui déclare absent ce qui est là envoie dépenser 881 appels de
+    # modèle pour remplir une colonne que personne ne lit, et c'est exactement la panne
+    # qu'il existe pour empêcher. Mesurer ce que l'écran affiche, toujours.
+    _coverage("place", "COALESCE(TRIM(d.extraction_json->'ref'->>'location'), '') <> ''",
+              OF_RELEVANT, "extraction", ONE_PASS,
+              "Place of each study", "Lieu de chaque étude",
+              "POST /user-scenarios/{id}/extraction/run", "evidence"),
 )
 
 OUTPUT_KEYS = tuple(o["key"] for o in OUTPUTS)
