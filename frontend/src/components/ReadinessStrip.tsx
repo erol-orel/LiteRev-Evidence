@@ -92,6 +92,13 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
   const free = todoArtefacts.filter((o) => o.cost === "free").length;
   const calls = todoArtefacts.filter((o) => o.cost === "one_call").length;
   const keyed = hasApiKey();
+  // Le PRIX d'une passe par article est son MANQUE, pas la taille du corpus : un article
+  // déjà lu ne l'est pas deux fois. Dire « lit chaque article » d'une carte des concepts
+  // à laquelle il manque neuf articles sur 881 dissuade de presser un bouton qui coûte
+  // neuf appels, ce qui laisse la carte absente pour rien.
+  const perPaperCalls = data.outputs
+    .filter((o) => data.todo.includes(o.key) && o.cost === "one_pass" && o.shape === "coverage")
+    .reduce((n, o) => n + Math.max((o.of ?? 0) - (o.n ?? 0), 0), 0);
   // Une lecture qui échoue se dit : le panneau existe pour supprimer un silence, il ne
   // peut pas en créer un. Le message brut du serveur reste dans l'infobulle, où il sert
   // à qui diagnostique sans encombrer qui relit.
@@ -196,7 +203,8 @@ export function ReadinessStrip({ scenarioId, onGoTo }: {
               )}
               {priced > 0 && (
                 <span className="text-[10px] text-white/40">
-                  {T("rebuild.perPaper").replace("{n}", String(priced))}
+                  {T("rebuild.perPaper").replace("{n}", String(priced))
+                    .replace("{calls}", perPaperCalls.toLocaleString())}
                 </span>
               )}
             </div>

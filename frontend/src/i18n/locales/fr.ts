@@ -477,7 +477,7 @@ export const fr = {
       rebuild: {
         free: "Refaire les {n} qui ne coûtent rien",
         calls: "Refaire les {n}, dont {calls} appel(s) de modèle",
-        perPaper: "{n} autres lisent chaque article : ils se refont depuis leur onglet, où le prix est affiché.",
+        perPaper: "{n} autres lisent les articles qui leur manquent, soit environ {calls} appel(s) de modèle en tout : ils se refont depuis leur onglet.",
         needsKey: "Renseignez la clé d'administration pour refaire quoi que ce soit.",
         started: "Lancé : {n} résultat(s). Rien n'est recherché à nouveau.",
         running: "Reconstruction de {what}...",

@@ -477,7 +477,7 @@ export const en: Translations = {
       rebuild: {
         free: "Rebuild the {n} that cost nothing",
         calls: "Rebuild all {n}, including {calls} model call(s)",
-        perPaper: "{n} more read every paper: they are rebuilt from their own tab, where the price is shown.",
+        perPaper: "{n} more read the papers that lack them, about {calls} model call(s) in all: they are rebuilt from their own tab.",
         needsKey: "Set the admin key to rebuild anything.",
         started: "Started: {n} output(s). Nothing is searched again.",
         running: "Rebuilding {what}...",
