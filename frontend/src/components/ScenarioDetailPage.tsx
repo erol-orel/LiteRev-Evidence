@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMe
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
 import { VariablesOfInterestPanel } from "./VariablesOfInterestPanel";
+import { ReadinessStrip } from "./ReadinessStrip";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
@@ -10467,6 +10468,13 @@ export function ScenarioDetailPage({ scenarioId, onBack, initialTab }: ScenarioD
           <button onClick={() => setJustFinished(false)} className="text-white/40 hover:text-white/80" aria-label="close">×</button>
         </div>
       )}
+
+      {/* Ce que ce scénario devrait contenir, et ce qu'il contient. Au-dessus des
+          onglets, parce que c'est la question qu'on se posait en les ouvrant un par un
+          pour voir si quelque chose manquait. */}
+      <ReadinessStrip scenarioId={scenarioId} onGoTo={(tab) => {
+        if (visibleSections.some((s) => s.key === tab)) setActiveSection(tab as SectionKey);
+      }} />
 
       {/* Navigation par onglets - filtrée par la nature de la question. Un onglet
           qu'un scénario n'utilise jamais ne s'affiche pas grisé : il n'est pas là. */}

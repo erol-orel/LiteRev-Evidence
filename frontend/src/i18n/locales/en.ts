@@ -458,6 +458,27 @@ export const en: Translations = {
     metaChunks: "Chunks",
   },
   scenarioDetail: {
+    readiness: {
+      title: "What this review holds",
+      complete: "Everything this scenario should hold is there and current.",
+      todo: "{n} outputs are missing, partial or older than the corpus.",
+      priced: "{n} of them read every paper, so they cost one model call per paper.",
+      note: "Measured over the {relevant} relevant articles of the {corpus} in the corpus. Read only: nothing is started from here.",
+      footer: "An output may be old. It must never be absent: a stale one is still served, with the date it was built. \"Without object\" means there is nothing yet for it to read, and \"not for this review\" means a literature review has no model.",
+      state: {
+        ready: "current",
+        partial: "partial",
+        stale: "older than the corpus",
+        missing: "missing",
+        empty: "without object",
+        not_applicable: "not for this review",
+      },
+      cost: {
+        free: "costs nothing",
+        one_call: "one model call",
+        one_pass: "one call per paper",
+      },
+    },
     common: {
       loading: "Loading...",
       errorCorpus: "Corpus error",

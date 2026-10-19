@@ -458,6 +458,27 @@ export const fr = {
     metaChunks: "Fragments",
   },
   scenarioDetail: {
+    readiness: {
+      title: "Ce que cette revue porte",
+      complete: "Tout ce que ce scénario devrait porter est là, et à jour.",
+      todo: "{n} résultats manquent, sont partiels, ou sont plus vieux que le corpus.",
+      priced: "{n} d'entre eux lisent chaque article : ils coûtent un appel de modèle par article.",
+      note: "Mesuré sur les {relevant} articles pertinents des {corpus} du corpus. Lecture seule : rien n'est lancé d'ici.",
+      footer: "Un résultat peut être vieux. Il ne doit jamais être absent : un résultat périmé est quand même servi, avec la date à laquelle il a été construit. « Sans objet » veut dire qu'il n'a encore rien à lire, et « pas pour cette revue » qu'une revue de littérature n'a pas de modèle.",
+      state: {
+        ready: "à jour",
+        partial: "partiel",
+        stale: "plus vieux que le corpus",
+        missing: "manquant",
+        empty: "sans objet",
+        not_applicable: "pas pour cette revue",
+      },
+      cost: {
+        free: "ne coûte rien",
+        one_call: "un appel de modèle",
+        one_pass: "un appel par article",
+      },
+    },
     common: {
       loading: "Chargement...",
       errorCorpus: "Erreur corpus",
