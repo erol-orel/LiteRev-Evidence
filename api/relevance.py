@@ -1637,7 +1637,8 @@ def _maybe_autorerank(scenario_id: str) -> bool:
 #: 122 863 de projection SEIR, 63 672 de carte des concepts et 38 924 de traductions.
 #: Toute colonne JSON de cette table y appartient : si une nouvelle est ajoutée sans
 #: être listée, elle repart dans chaque ouverture de page (cf. test_scenario_payload_sizes).
-_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "variables_json", "variables_proposal_json",
+_SETTINGS_BLOB_COLUMNS = ("evidence_brief_json", "evidence_brief_llm_json",
+                          "variables_json", "variables_proposal_json",
                           "variables_i18n", "clustering_json", "knowledge_graph_json",
                           "concept_graph_json", "seir_projection_json", "seir_observed_json",
                           "codebook_json", "recommended_actions_json")

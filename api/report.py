@@ -356,17 +356,18 @@ def _cached_brief(scenario_id: str) -> dict | None:
     wrong for this one: a report is a read, and a GET that quietly spends a minute of
     model time and a few thousand tokens is not. A stale brief is still reported, and says
     when it was generated, so the reader can judge."""
+    # Le RAPPORT narratif, par le lecteur qui sait où il est. Lu ici en SQL sur
+    # `evidence_brief_json`, il attrapait le portrait du corpus dès que celui-ci avait
+    # gagné la course pour cette colonne : un rapport citable sans une seule affirmation,
+    # sans rien pour dire pourquoi.
     try:
-        with engine.connect() as conn:
-            row = conn.execute(text(
-                "SELECT evidence_brief_json FROM scenario_settings WHERE scenario_id = :sid"
-            ), {"sid": scenario_id}).mappings().first()
+        from .evidence import stored_llm_brief
     except Exception as e:                                   # noqa: BLE001
         logger.warning(f"_cached_brief {scenario_id}: {e}")
         return None
-    if not row or not row["evidence_brief_json"]:
+    brief = stored_llm_brief(scenario_id)
+    if not brief:
         return None
-    brief = dict(row["evidence_brief_json"])
     return brief if brief.get("error") is None else None
 
 
