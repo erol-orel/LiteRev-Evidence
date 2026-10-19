@@ -60,6 +60,8 @@ unchecked reading.
 | Codebook (label normalisation at read time, never rewrites stored labels), four starter vocabularies, `mode: add` to fold one codebook into another | `api/codebook.py` | `CodebookPanel.tsx` |
 | Reading a partner's codebook document (docx, xlsx, pdf, csv) into the strict table: one model call per upload, stores nothing, the reviewer approves | `api/codebook_reader.py` | `CodebookPanel.tsx` |
 | Register of variables of interest: one list of what the review asks of every paper, with its denominators, a selection on any variable, a crosstab of any two, and the bill of a variable added after the reading | `api/variables_of_interest.py` | `VariablesOfInterestPanel.tsx`, `SelectionBar.tsx`, `CrosstabPanel.tsx` |
+| What a scenario should hold and whether it does: one declaration of every output, read over SQL (no model call, nothing written), each one ready, partial, stale, missing, without object, outside this scenario's nature or unmeasured, with what it costs to rebuild. A reading that fails loses its own rows, not the panel. The same list rebuilds what is missing without searching, spending only what the pressed button authorises | `api/outputs.py` | `ReadinessStrip.tsx` (above the tabs) |
+| Exports of what the register shows: its map, the crossed grid as the matrix with its axis totals, and the papers a selection keeps (six formats, no key, writes nothing) | `api/variables_of_interest.py`, `api/subsets.py` | `ExportButton.tsx` |
 | Disease names (one key per disease at read time: A(H5N1) for HPAI H5N1, influenza A(H5N1), H5N1...; other diseases as written) | `api/diseases.py` | `PooledPanel.tsx` (Disease column, with the spellings each pool merged) |
 | Reviewer decisions (accept, edit, reject, clear; Cohen's kappa) in table `extraction_review` | `api/extraction_review.py` | `ObservationPanel.tsx`, `ReviewSummaryCard.tsx` |
 | Pooled estimates (logit, DerSimonian-Laird, Hartung-Knapp CI, prediction interval, min 3 studies; rows that split one sample, 142 men and 81 women among 225 of one disease, are marked in the proportions and left out of the odds ratios) | `api/pooling.py` | `PooledPanel.tsx` (forest plots) |
@@ -107,7 +109,10 @@ Reads, no key needed:
     GET  /user-scenarios/{sid}/variables-of-interest
     GET  /user-scenarios/{sid}/variables-of-interest/crosstab
     GET  /user-scenarios/{sid}/variables-of-interest/export
+    GET  /user-scenarios/{sid}/variables-of-interest/crosstab/export
     GET  /user-scenarios/{sid}/variables-of-interest/model-evidence
+    GET  /user-scenarios/{sid}/outputs                    (what it should hold, and what it holds)
+    GET  /user-scenarios/{sid}/outputs/rebuild/status
     GET  /user-scenarios/{sid}/extraction/variable-gap
     GET  /geo/nuts/status
     GET  /geo/resolve
@@ -115,6 +120,7 @@ Reads, no key needed:
 Writes, `X-API-Key` required:
 
     POST   /user-scenarios/{sid}/extraction/run
+    POST   /user-scenarios/{sid}/outputs/rebuild     (?spend=free|one_call|one_pass, never searches)
     POST   /user-scenarios/{sid}/articles/{aid}/extraction/review
     POST   /user-scenarios/{sid}/articles/{aid}/extraction/review/bulk
     PUT    /user-scenarios/{sid}/codebook            ("mode": "add" folds into what is there)
