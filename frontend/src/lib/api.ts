@@ -4524,6 +4524,36 @@ export async function applyScenarioSubset(
   return r.json();
 }
 
+/** Un corps de réponse rendu à l'utilisateur comme fichier, sous le nom que le serveur
+ *  donne : lui seul sait combien d'articles il a mis dedans et sous quel format. */
+async function downloadResponse(r: Response, fallback: string): Promise<void> {
+  if (!r.ok) throw new Error((await _detail(r)) || httpMessage(r.status));
+  const name = (r.headers.get("Content-Disposition") || "")
+    .match(/filename="?([^"]+)"?/)?.[1] || fallback;
+  const url = URL.createObjectURL(await r.blob());
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** Les articles que la sélection GARDE, en fichier. N'applique rien : les conditions
+ *  partent en POST, donc le téléchargement passe par un blob et non par un lien. */
+export async function downloadScenarioSubset(
+  scenarioId: string, selection: SubsetSelection, format = "csv", includeAbstract = true,
+): Promise<void> {
+  const qs = `format=${encodeURIComponent(format)}&include_abstract=${includeAbstract}`;
+  const r = await safeFetch(
+    `${API_BASE_URL}/user-scenarios/${scenarioId}/subset/export?${qs}`,
+    { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(selection) });
+  await downloadResponse(r, `selection-${scenarioId}.${format === "xlsx" ? "xlsx" : "csv"}`);
+}
+
 export async function fetchScenarioSubsetState(scenarioId: string): Promise<SubsetState> {
   const r = await safeFetch(`${API_BASE_URL}/user-scenarios/${scenarioId}/subset`);
   if (!r.ok) throw new Error(httpMessage(r.status));
@@ -5358,6 +5388,14 @@ export async function fetchVariablesCrosstab(
 /** Le registre en CSV : la carte des manques, une ligne par variable. */
 export function variablesOfInterestExportUrl(scenarioId: string, lang: string): string {
   return `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/export?lang=${encodeURIComponent(lang)}`;
+}
+
+/** La grille croisée en CSV : la matrice de l'écran, et ses totaux. */
+export function variablesCrosstabExportUrl(
+  scenarioId: string, rows: string, cols: string, lang: string,
+): string {
+  const qs = `rows=${encodeURIComponent(rows)}&cols=${encodeURIComponent(cols)}&lang=${encodeURIComponent(lang)}`;
+  return `${scenarioBase(scenarioId)}/${scenarioId}/variables-of-interest/crosstab/export?${qs}`;
 }
 
 export interface CodebookTemplate {

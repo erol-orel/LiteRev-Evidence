@@ -985,6 +985,52 @@ def get_variables_crosstab(scenario_id: str, rows: str = Query(..., max_length=8
     return crosstab(scenario_id, rows, cols, lang)
 
 
+def _csv_response(buf, filename: str) -> Response:
+    """Le BOM : sans lui Excel lit l'UTF-8 comme du latin-1 et affiche « Ã© »."""
+    return Response(content="\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/user-scenarios/{scenario_id}/variables-of-interest/crosstab/export")
+def export_variables_crosstab(scenario_id: str, rows: str = Query(..., max_length=80),
+                              cols: str = Query(..., max_length=80),
+                              lang: str = Query("en", max_length=8)):
+    """La grille croisée en CSV : la matrice telle qu'elle est à l'écran, plus ses totaux.
+
+    La grille est la figure qu'un partenaire recopie à la main dans son rapport, et la
+    recopier à la main est exactement le travail que cet outil doit lui épargner. Les
+    totaux d'un axe sont des articles DISTINCTS et non la somme des cellules (cf.
+    `cross_counts`), donc la dernière ligne et la dernière colonne ne s'additionnent pas :
+    le CSV le dit en clair plutôt que de laisser quelqu'un chercher l'erreur."""
+    import csv as _csv
+    import io as _io
+
+    _get_user_scenario_or_404(scenario_id)
+    grid = crosstab(scenario_id, rows, cols, lang)
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    if not grid.get("complete"):
+        w.writerow([grid.get("note") or grid.get("error") or "the grid could not be built"])
+        return _csv_response(buf, f"crosstab-{rows}-x-{cols}-{scenario_id}.csv")
+    n_of = {(c["row"], c["col"]): c["n"] for c in grid["cells"]}
+    head = [f"{rows} \\ {cols}"] + [c["label"] for c in grid["cols"]] + [f"all ({cols})"]
+    w.writerow(head)
+    for r in grid["rows"]:
+        w.writerow([r["label"]] + [n_of.get((r["value"], c["value"]), 0) for c in grid["cols"]]
+                   + [r["n"]])
+    w.writerow([f"all ({rows})"] + [c["n"] for c in grid["cols"]] + [grid["n_both"]])
+    w.writerow([])
+    # Ce que la grille n'a pas pu placer, sans quoi une case vide se lit comme un manque.
+    w.writerow(["papers both variables can judge", grid["n_both"]])
+    w.writerow([f"judged by {rows} only", grid["n_rows_only"]])
+    w.writerow([f"judged by {cols} only", grid["n_cols_only"]])
+    w.writerow(["pairs observed", grid["pairs_observed"], "of", grid["cells_shown"]])
+    w.writerow(["threshold", grid["threshold"]])
+    w.writerow(["note", "an axis total counts distinct papers, so it is not the sum of its "
+                        "cells: one paper carrying two values counts once for each"])
+    return _csv_response(buf, f"crosstab-{rows}-x-{cols}-{scenario_id}.csv")
+
+
 @app.get("/user-scenarios/{scenario_id}/variables-of-interest/export")
 def export_variables_of_interest(scenario_id: str, lang: str = Query("en", max_length=8)):
     """Le registre en CSV: une ligne par variable, sa couverture et son dénominateur.
@@ -1007,9 +1053,7 @@ def export_variables_of_interest(scenario_id: str, lang: str = Query("en", max_l
                     v["denominator"], v["denominator_of"], v["n_values"],
                     " | ".join(f"{x['label']}={x['n']}" for x in v["values"]),
                     "yes" if v.get("unmapped") else ""])
-    return Response(content="﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition":
-                             f'attachment; filename="variables-{scenario_id}.csv"'})
+    return _csv_response(buf, f"variables-{scenario_id}.csv")
 
 
 @app.get("/user-scenarios/{scenario_id}/variables-of-interest")

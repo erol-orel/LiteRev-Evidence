@@ -2,10 +2,11 @@ import React from "react";
 import { AlertTriangle, Loader2, X } from "lucide-react";
 import { useI18n } from "../i18n/LanguageProvider";
 import {
-  applyScenarioSubset, fetchScenarioSubsetState, hasApiKey, previewScenarioSubset,
-  undoScenarioSubset,
+  applyScenarioSubset, downloadScenarioSubset, fetchScenarioSubsetState, hasApiKey,
+  previewScenarioSubset, undoScenarioSubset,
 } from "../lib/api";
 import type { SubsetCondition, SubsetPlan, SubsetState } from "../lib/api";
+import { ExportButton } from "./ExportButton";
 
 /** La sélection partagée : une liste de conditions sur les variables du registre, ce
  *  qu'elles feraient, et le bouton qui le fait.
@@ -147,6 +148,17 @@ export function SelectionBar({ scenarioId, conditions, combine, onCombine, onRem
       )}
 
       <div className="flex flex-wrap items-center gap-2">
+        {/* L'export vient AVANT appliquer, et ne demande pas de clé : c'est ce qu'un
+            relecteur veut d'abord, la liste des articles que sa sélection garde. Appliquer
+            exclut le reste du corpus et se cumule ; télécharger ne touche à rien. */}
+        {plan && plan.keep > 0 && (
+          <ExportButton
+            onClick={() => downloadScenarioSubset(scenarioId, {
+              conditions: ready, combine, unassigned: dropUnjudged ? "exclude" : "keep",
+            })}
+            label={T("export").replace("{n}", plan.keep.toLocaleString())}
+            title={T("exportHint")} />
+        )}
         {plan && plan.exclude > 0 && (
           <button onClick={apply} disabled={busy || !keyed}
             title={keyed ? undefined : T("needsKey")}

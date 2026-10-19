@@ -1,8 +1,9 @@
 import React from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useI18n, currentLang } from "../i18n/LanguageProvider";
-import { fetchVariablesCrosstab } from "../lib/api";
+import { fetchVariablesCrosstab, variablesCrosstabExportUrl } from "../lib/api";
 import type { VoiCrosstab } from "../lib/api";
+import { ExportButton } from "./ExportButton";
 
 /** Deux variables du registre croisées : qui rapporte quoi, et où.
  *
@@ -53,8 +54,14 @@ export function CrosstabPanel({ scenarioId, rows, cols, nameOf, onClear }: {
           </p>
         )}
       </div>
-      <button onClick={onClear} aria-label={T("clear")}
-        className="shrink-0 text-white/35 hover:text-white/80"><X size={12} /></button>
+      <div className="flex shrink-0 items-center gap-2">
+        {/* La grille est la figure qu'un partenaire recopie dans son rapport : la recopier
+            à la main est précisément le travail que cet outil doit lui épargner. */}
+        <ExportButton href={variablesCrosstabExportUrl(scenarioId, rows, cols, currentLang())}
+          label={T("exportCsv")} title={T("exportHint")} disabled={!grid?.complete} />
+        <button onClick={onClear} aria-label={T("clear")}
+          className="text-white/35 hover:text-white/80"><X size={12} /></button>
+      </div>
     </div>
   );
 
