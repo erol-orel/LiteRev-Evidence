@@ -24,6 +24,7 @@ shipping half wired:
      left that an action would change.
 """
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -292,6 +293,59 @@ def test_an_empty_scenario_reports_no_object_rather_than_a_gap(seeded):
     assert out["n_relevant"] == 0
     assert o["extraction"]["state"] == "empty" and o["extraction"]["of"] == 0
     assert "extraction" not in out["todo"]
+
+
+def test_a_measurement_that_fails_reads_unknown_and_never_missing(seeded, monkeypatch):
+    """The panel exists to end a silence, so it must not become one. When a read fails,
+    its rows say `unknown` with the reason, the other half is still measured, and
+    `complete` cannot be true: "missing" would send someone to redo work already done,
+    which is worse than saying nothing."""
+    import api.outputs as outputs
+
+    def _boom(*a, **kw):                                     # noqa: ANN002, ANN003
+        raise RuntimeError("column the_pipeline_forgot does not exist")
+
+    monkeypatch.setattr(outputs, "_counts", _boom)
+    out = outputs.scenario_outputs(SID, lang="en")
+    o = _by_key(out)
+    assert o["extraction"]["state"] == "unknown"
+    assert o["extraction"]["stale_because"] == "it could not be measured"
+    assert o["brief_report"]["state"] == MISSING, "the artefacts were still read"
+    assert out["complete"] is False
+    assert "the_pipeline_forgot" in out["errors"]["coverage"]
+    assert "extraction" not in out["todo"], "unknown is not work: we do not know yet"
+
+
+def test_two_dates_that_disagree_about_the_timezone_do_not_fell_the_panel(seeded):
+    """The eight dates this module compares were added by eight migrations over four
+    years, and one of them carrying a timezone is enough for Python to refuse the
+    comparison. The panel loses that staleness, never the page."""
+    import api.outputs as outputs
+
+    aware = {"at_clustering": datetime(2025, 1, 1, tzinfo=timezone.utc),
+             "has_clustering": True}
+    naive = datetime(2025, 6, 1)                              # the corpus moved later
+    o = outputs._state_of(
+        next(x for x in OUTPUTS if x["key"] == "clustering"),
+        aware, {}, naive, frozenset(), None)
+    assert o["state"] == STALE and "corpus moved" in o["stale_because"]
+    assert o["generated_at"] == "2025-01-01T00:00:00", "and the date is still readable"
+
+
+def test_a_threshold_that_cannot_be_read_falls_back_and_says_so(seeded, monkeypatch):
+    """The threshold decides what counts as relevant, so every coverage denominator hangs
+    on it. When it cannot be read the page still renders, on the default, and names the
+    failure rather than quietly reporting figures from a threshold nobody chose."""
+    import api.outputs as outputs
+
+    def _boom(*a, **kw):                                      # noqa: ANN002, ANN003
+        raise RuntimeError("scenario_settings is being migrated")
+
+    monkeypatch.setattr(outputs, "_get_scenario_threshold", _boom)
+    out = outputs.scenario_outputs(SID, lang="en")
+    assert out["n_corpus"] == 3, "the corpus was still counted"
+    assert "being migrated" in out["errors"]["threshold"]
+    assert out["complete"] is False
 
 
 def test_the_names_are_served_in_the_language_asked(seeded):

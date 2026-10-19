@@ -32,6 +32,7 @@ because the suite fails.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import Query
@@ -39,9 +40,9 @@ from sqlalchemy import text
 
 from .core import _norm_lang, app, engine, logger
 from .digest import _rows
-from .scenario_store import (CAP_MODEL, _get_scenario_threshold,
-                             _get_user_scenario_or_404, capabilities_for, normalise_kind,
-                             relevant_gate_sql)
+from .scenario_store import (CAP_MODEL, DEFAULT_SIMILARITY_THRESHOLD,
+                             _get_scenario_threshold, _get_user_scenario_or_404,
+                             capabilities_for, normalise_kind, relevant_gate_sql)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The vocabulary of the contract
@@ -57,9 +58,10 @@ ARTEFACT, COVERAGE = "artefact", "coverage"
 FREE, ONE_CALL, ONE_PASS = "free", "one_call", "one_pass"
 
 #: Les états. `not_applicable` n'est pas un manque : une revue de littérature n'a pas de
-#: modèle, et le dire est plus utile que de laisser une case vide.
-READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE = (
-    "ready", "partial", "stale", "missing", "empty", "not_applicable")
+#: modèle, et le dire est plus utile que de laisser une case vide. `unknown` non plus n'est
+#: pas un manque : c'est la mesure qui a échoué, et la page le dit au lieu de tomber.
+READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE, UNKNOWN = (
+    "ready", "partial", "stale", "missing", "empty", "not_applicable", "unknown")
 
 
 def _artefact(key: str, column: str, stamp: str, stage: str, cost: str,
@@ -179,6 +181,18 @@ NOT_AN_OUTPUT = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Reading the state
 # ─────────────────────────────────────────────────────────────────────────────
+def _naive(t: Any) -> datetime | None:
+    """Une date comparable, ou None si ce n'en est pas une.
+
+    Deux colonnes de la même base peuvent être l'une avec fuseau et l'autre sans, et
+    Python refuse alors de les comparer. Les huit dates que ce module rapproche ont été
+    posées par huit migrations sur quatre ans : le panneau qui doit dire ce qui manque ne
+    peut pas tomber parce que deux d'entre elles ne s'accordent pas."""
+    if not isinstance(t, datetime):
+        return None
+    return t.replace(tzinfo=None) if t.tzinfo is not None else t
+
+
 def _counts(conn, scenario_id: str, thr: float) -> dict[str, int]:
     """Un seul passage pour toutes les couvertures, sur les deux dénominateurs."""
     gate = relevant_gate_sql("d", "ars", ":thr")
@@ -219,27 +233,36 @@ def _settings(conn, scenario_id: str) -> dict[str, Any]:
 
 
 def _state_of(o: dict[str, Any], settings: dict[str, Any], counts: dict[str, int],
-              touched, caps: frozenset) -> dict[str, Any]:
-    """L'état d'UN résultat. PUR (les deux lectures sont déjà faites)."""
+              touched, caps: frozenset, unread: set[str] | None = None) -> dict[str, Any]:
+    """L'état d'UN résultat. PUR (les deux lectures sont déjà faites).
+
+    `unread` nomme les formes dont la lecture a échoué : leurs lignes valent `unknown`,
+    jamais « manquant ». Un panneau qui annonce un résultat absent parce qu'il n'a pas su
+    le mesurer envoie refaire un travail déjà fait, ce qui est pire que de se taire."""
     out: dict[str, Any] = {k: o[k] for k in ("key", "shape", "stage", "cost", "tab")}
     out["needs"] = o["needs"]
     if o["needs"] and o["needs"] not in caps:
         return {**out, "state": NOT_APPLICABLE, "n": None, "of": None,
                 "generated_at": None, "stale_because": None, "rebuild": None}
     out["rebuild"] = o["rebuild"]
+    if unread and o["shape"] in unread:
+        return {**out, "state": UNKNOWN, "n": None, "of": None,
+                "generated_at": None, "stale_because": "it could not be measured"}
 
     if o["shape"] == ARTEFACT:
         at = settings.get(f"at_{o['key']}")
+        when = _naive(at)
         has = bool(settings.get(f"has_{o['key']}"))
         state, because = READY, None
         if not has:
             state = MISSING
-        elif at and touched and at < touched:
+        elif when and touched and when < touched:
             state, because = STALE, "the corpus moved after it was built"
-        elif not at:
-            state, because = STALE, "nothing recorded when it was built"
+        elif not when:
+            state, because = STALE, ("its date could not be read" if at
+                                     else "nothing recorded when it was built")
         return {**out, "state": state, "n": None, "of": None,
-                "generated_at": at.isoformat() if at else None, "stale_because": because}
+                "generated_at": when.isoformat() if when else None, "stale_because": because}
 
     n = int(counts.get(o["key"]) or 0)
     of = int(counts.get("n_relevant" if o["over"] == OF_RELEVANT else "n_corpus") or 0)
@@ -257,30 +280,52 @@ def scenario_outputs(scenario_id: str, lang: str = "en",
     row = _get_user_scenario_or_404(scenario_id)
     kind = normalise_kind(row.get("kind") if isinstance(row, dict) else None)
     caps = capabilities_for(kind)
-    thr = _get_scenario_threshold(scenario_id) if threshold is None else float(threshold)
     english = _norm_lang(lang).startswith("en")
 
-    with engine.connect() as conn:
-        counts = _counts(conn, scenario_id, thr)
-        try:
-            settings = _settings(conn, scenario_id)
-        except Exception as e:                               # noqa: BLE001
-            # Un scénario sans ligne de réglages n'a aucun artefact : c'est un état, pas
-            # une erreur, et la page doit quand même afficher les couvertures.
-            logger.warning(f"scenario_outputs settings {scenario_id}: {e}")
-            settings = {}
+    # Chaque lecture peut échouer sans emporter les autres : un panneau de complétude qui
+    # tombe est précisément le silence qu'il doit supprimer.
+    counts: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    unread: set[str] = set()
 
-    touched = max([t for t in (counts.get("last_arrival"), counts.get("last_decision"),
-                               settings.get("similarity_threshold_set_at")) if t],
+    if threshold is not None:
+        thr = float(threshold)
+    else:
+        try:
+            thr = _get_scenario_threshold(scenario_id)
+        except Exception as e:                               # noqa: BLE001
+            logger.warning(f"scenario_outputs threshold {scenario_id}: {e}")
+            errors["threshold"] = str(e)[:300]
+            thr = DEFAULT_SIMILARITY_THRESHOLD
+
+    with engine.connect() as conn:
+        for shape, name, read in ((COVERAGE, "coverage", _counts),
+                                  (ARTEFACT, "artefact", _settings)):
+            try:
+                got = read(conn, scenario_id, thr) if read is _counts else read(conn, scenario_id)
+            except Exception as e:                           # noqa: BLE001
+                logger.warning(f"scenario_outputs {name} {scenario_id}: {e}")
+                errors[name] = str(e)[:300]
+                unread.add(shape)
+            else:
+                if shape == COVERAGE:
+                    counts = got
+                else:
+                    settings = got
+
+    touched = max([t for t in (_naive(counts.get("last_arrival")),
+                               _naive(counts.get("last_decision")),
+                               _naive(settings.get("similarity_threshold_set_at"))) if t],
                   default=None)
     rows = []
     for o in OUTPUTS:
-        state = _state_of(o, settings, counts, touched, caps)
+        state = _state_of(o, settings, counts, touched, caps, unread)
         state["name"] = o["name_en"] if english else o["name_fr"]
         rows.append(state)
 
     tally = {s: sum(1 for r in rows if r["state"] == s)
-             for s in (READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE)}
+             for s in (READY, PARTIAL, STALE, MISSING, EMPTY, NOT_APPLICABLE, UNKNOWN)}
     # « À faire » ne compte que ce qu'une action changerait : un résultat sans objet
     # (corpus vide) ou hors de la nature du scénario n'est pas un manque.
     todo = [r["key"] for r in rows if r["state"] in (PARTIAL, STALE, MISSING)]
@@ -289,7 +334,9 @@ def scenario_outputs(scenario_id: str, lang: str = "en",
             "n_relevant": int(counts.get("n_relevant") or 0),
             "corpus_touched_at": touched.isoformat() if touched else None,
             "outputs": rows, "tally": tally, "todo": todo,
-            "complete": not todo,
+            # `complete` ne peut pas être vrai quand une mesure a échoué : on ne sait pas.
+            "complete": not todo and not errors,
+            "errors": errors,
             # Ce qu'une mise à jour coûterait, par classe : un relecteur décide avec ça.
             "cost_of_todo": {c: sum(1 for r in rows if r["key"] in todo and r["cost"] == c)
                              for c in (FREE, ONE_CALL, ONE_PASS)}}
@@ -303,5 +350,9 @@ def get_scenario_outputs(scenario_id: str, lang: str = Query("en", max_length=8)
     One list, two SQL queries, no model call, nothing written. Each output says whether it
     is ready, partial, stale, missing, without object or outside this scenario's nature,
     when it was built, out of how many papers, what it costs to rebuild and where it is
-    read. `todo` is the subset an action would change."""
+    read. `todo` is the subset an action would change.
+
+    A read that fails costs its own rows, not the answer: they come back `unknown`, the
+    reason lands in `errors`, and `complete` is then false. A panel built to end a silence
+    must not be able to become one."""
     return scenario_outputs(scenario_id, lang=lang, threshold=threshold)
