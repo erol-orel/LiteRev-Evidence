@@ -18,6 +18,7 @@ pytest.importorskip("fastapi")
 
 import lexical_search as lex  # noqa: E402
 import main  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 
 def _ast(q):
@@ -50,6 +51,41 @@ def test_trailing_star_is_a_prefix_query():
     assert "to_tsquery('english', quote_literal(CAST(:tq_0 AS text)) || ':*')" in sql
     assert params["tq_0"] == "influenz"             # the star is syntax, not text
     assert params["tq_1"] == "wastewater"
+
+
+def _stopword_case(key: str) -> str:
+    """La forme qu'une troncature d'au moins STOPWORD_PREFIX_MIN lettres prend depuis le
+    repli mot vide : le préfixe anglais, et le préfixe non stemmé quand il est vide."""
+    english = f"to_tsquery('english', quote_literal(CAST(:{key} AS text)) || ':*')"
+    simple = f"to_tsquery('simple', quote_literal(CAST(:{key} AS text)) || ':*')"
+    return f"(CASE WHEN numnode({english}) = 0 THEN {simple} ELSE {english} END)"
+
+
+def test_a_truncation_inside_a_suffix_is_completed():
+    """`seropositiv*` stops inside -ive, and the vectors write seropositive and
+    seropositivity as 'seroposit', shorter than the prefix. The completions are what
+    PostgreSQL stems to find that shorter form (TRUNCATION in lexical_search)."""
+    assert lex.truncation_completions("seropositiv") == ["seropositive", "seropositivity"]
+    assert lex.truncation_completions("infectiv") == ["infective", "infectivity"]
+    assert "vaccination" in lex.truncation_completions("vaccinat")
+    assert "pandemic" in lex.truncation_completions("pandemi")
+    # No suffix started, a whole word's final e or m, or not a plain ASCII word: nothing.
+    for stem in ("influenz", "veterinar", "forecast", "refugee", "perform", "h5n", "sars-cov", "cathéter"):
+        assert lex.truncation_completions(stem) == [], stem
+    params: dict = {}
+    sql = lex.ast_to_tsquery_sql(_ast('"seropositiv*"[tiab]'), params)
+    assert params == {"tq_0": "seropositiv", "tq_0_c": "seropositive seropositivity"}
+    assert "seroposit" not in sql and " like " not in sql.lower()    # bound; full text only
+    # Les complétions élargissent la branche « mot connu » du repli mot vide, qui
+    # enveloppe toute troncature d'au moins STOPWORD_PREFIX_MIN lettres (`over*`). Les
+    # deux élargissements se composent : le test du mot vide porte sur le préfixe NU,
+    # sinon une complétion le rendrait non vide et masquerait le mot vide.
+    assert sql.startswith("(CASE WHEN numnode(") and "to_tsquery('simple'" in sql
+    assert ":tq_0_c" in sql, "la complétion n'est pas dans la branche du mot connu"
+    # Sans complétion, la troncature compile exactement comme sans ce changement.
+    params = {}
+    assert lex.ast_to_tsquery_sql(_ast("influenz*"), params) == _stopword_case("tq_0")
+    assert params == {"tq_0": "influenz"}, "aucune complétion hors d'un suffixe"
 
 
 def test_a_stop_word_truncation_falls_back_to_the_unstemmed_prefix_from_4_letters():
@@ -396,3 +432,78 @@ def test_each_database_gets_a_form_it_matches():
     # aussi : ils ne restent pas accrochés au mot.
     assert main._tokenize_boolean("“avian influenza” AND «h5n1»") == [
         ("TERM", "avian"), ("TERM", "influenza"), ("AND", None), ("TERM", "h5n1")]
+
+
+# ── a truncation meets the stems of the words it begins ──────────────────────
+# `"seropositiv*"[tiab]` compiled to 'seropositiv':*, while the vectors write seropositive
+# and seropositivity as 'seroposit': the prefix met nothing, so a strategy truncated the
+# PubMed way lost that branch on the full-text path, and only there.
+
+TRUNC = {
+    11: ("Serology in poultry workers", "H5N1 seropositivity among cullers in 2024."),
+    12: ("Ferret studies", "Infectivity of the H5N1 virus in ferrets."),
+    13: ("Exposure at work", "Occupational exposure of veterinarians to avian influenza."),
+}
+
+
+def _insert(conn, docs):
+    with conn.cursor() as cur:
+        for i, (title, abstract) in docs.items():
+            cur.execute("INSERT INTO literature_document (id, title, abstract, year) VALUES (%s, %s, %s, 2024)",
+                        (i, title, abstract))
+
+
+def _tsquery(q):
+    params: dict = {}
+    sql = lex.ast_to_tsquery_sql(_ast(q), params)
+    with main.engine.connect() as c:
+        return c.execute(text(f"SELECT CAST(({sql}) AS text)"), params).scalar()
+
+
+def test_a_truncation_compiles_to_the_stems_its_words_are_stored_as(corpus):
+    assert _tsquery('"seropositiv*"[tiab]') == "'seropositiv':* | 'seroposit'"
+    assert _tsquery('"infectiv*"[tiab]') == "'infectiv':* | 'infect'"
+    # A truncation inside no suffix keeps its single prefix, as before.
+    assert _tsquery('"occupational*"[tiab]') == "'occup':*"
+    assert _tsquery('"veterinar*"[tiab]') == "'veterinar':*"
+
+
+@pytest.mark.parametrize("engine", ["like", "fts"])
+def test_a_truncation_finds_the_words_it_begins_on_both_engines(corpus, monkeypatch, engine):
+    _insert(corpus, TRUNC)
+    if engine == "like":
+        monkeypatch.setenv("LEXICAL_SEARCH_ENGINE", "like")
+    else:
+        lex.refresh_once()
+        _reset_state()
+    assert lex.use_fts() is (engine == "fts")
+    assert _search('"seropositiv*"[tiab]') == {11}
+    assert _search('"infectiv*"[tiab]') == {12}
+    assert _search('"occupational*"[tiab]') == {13} == _search('"veterinar*"[tiab]')
+    # A leaf like any other: per document, inside AND, OR and NOT.
+    assert _search('"seropositiv*"[tiab] AND cullers') == {11}
+    assert _search('("seropositiv*"[tiab] OR "infectiv*"[tiab]) NOT ferrets') == {11}
+
+
+def test_a_truncation_meets_what_its_completions_meet(corpus):
+    """The stems are all the vectors hold, so a truncation meets at least what its
+    completions meet as words. That includes the stemmer's price, pinned here so that it
+    stays a choice: "infectivity" is stored as 'infect', like "infection"."""
+    _insert(corpus, {**TRUNC, 14: ("Infection control", "Hospital infection control in 2023.")})
+    lex.refresh_once()
+    _reset_state()
+    assert _search("seropositivity") <= _search('"seropositiv*"[tiab]')
+    assert _search("infectivity") == {12, 14} == _search('"infectiv*"[tiab]')
+
+
+def test_a_truncation_stays_one_index_condition(corpus):
+    """The completions are stemmed once per search, not once per row: the GIN index
+    still evaluates the whole boolean, the completed truncation included."""
+    lex.refresh_once()
+    params: dict = {}
+    where = lex.match_sql(_ast('"seropositiv*"[tiab] AND cullers NOT ferrets'), params)
+    with main.engine.begin() as c:
+        c.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join(r[0] for r in c.execute(
+            text(f"EXPLAIN SELECT s.document_id FROM document_search s WHERE {where}"), params))
+    assert "Index Scan on ix_document_search_tsv" in plan, plan
