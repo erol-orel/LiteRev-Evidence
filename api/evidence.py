@@ -410,7 +410,7 @@ def get_user_scenario_evidence_brief(scenario_id: str, refresh: bool = False) ->
     Preuves les relançait à chaque ouverture, d'où « Chargement des statistiques du
     corpus… » à chaque visite. Ils ne dépendent que du corpus, donc ils se calculent une
     fois : le pipeline les écrit après un changement de seuil, et toute modification du
-    corpus périme le cache (CORPUS_DERIVED_CACHE_RESET). `refresh=1` force le recalcul."""
+    corpus efface le cache (FREE_CACHE_RESET : le portrait est du SQL, le refaire ne coûte rien). `refresh=1` force le recalcul."""
     _get_user_scenario_or_404(scenario_id)
     if not refresh:
         hit = cached_evidence_brief(scenario_id)

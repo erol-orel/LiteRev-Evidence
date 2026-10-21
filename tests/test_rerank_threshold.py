@@ -247,10 +247,14 @@ def test_moving_the_rerank_threshold_invalidates_the_derived_caches(seeded):
             " DO UPDATE SET clustering_json = '{\"stale\": true}'::jsonb"), {"sid": SID})
     main.update_scenario_settings(SID, {"rerank_threshold": 0.4}, None)
     with main.engine.connect() as conn:
-        left = conn.execute(text(
-            "SELECT clustering_json FROM scenario_settings WHERE scenario_id = :sid"),
-            {"sid": SID}).scalar()
-    assert left is None, "le clustering d'avant la coupe était encore servi"
+        left, moved = conn.execute(text(
+            "SELECT clustering_json, corpus_moved_at FROM scenario_settings "
+            "WHERE scenario_id = :sid"), {"sid": SID}).first()
+    # Il n'est plus détruit (ses résumés coûtent un appel par groupe), mais il ne peut
+    # plus passer pour celui du corpus actuel : le mouvement est daté, et tout ce qui le
+    # sert compare les deux dates.
+    assert left is not None, "un clustering payé a été détruit par un curseur"
+    assert moved is not None, "le clustering d'avant la coupe passerait pour l'actuel"
 
 
 # ─── La courbe ───────────────────────────────────────────────────────────────

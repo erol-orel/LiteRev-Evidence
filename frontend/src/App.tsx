@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScenarioDetailPage, EnrichmentSection } from "./components/ScenarioDetailPage";
+import { StaleNote } from "./components/StaleNote";
 import { fetchActivity } from "./lib/api";
 import type { ActivityItem } from "./lib/api";
 import { useI18n } from "./i18n/LanguageProvider";
@@ -1259,6 +1260,10 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
   const { t, lang } = useI18n();
   const [fetchedActions, setFetchedActions] = React.useState<string[] | null>(null);
   const [actionsGenerating, setActionsGenerating] = React.useState(false);
+  // Les actions ne sont plus effacées quand le corpus bouge (elles coûtent un appel) :
+  // la carte dit alors de quel corpus elles sont tirées.
+  const [actionsAge, setActionsAge] = React.useState<
+    { built?: string | null; moved?: string | null } | null>(null);
   // La génération tournait quand le suivi a perdu le serveur : on le dit, au lieu de
   // faire disparaître le bloc comme le faisait l'ancienne boucle au bout de 20 essais.
   const [lostWhileGenerating, setLostWhileGenerating] = React.useState(false);
@@ -1281,7 +1286,11 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
     job.promise.then((out) => {
       if (out.kind === "cancelled") return;
       setActionsGenerating(false);
-      if (out.kind === "done") setFetchedActions(out.status.status === "ready" ? (out.status.actions ?? []) : []);
+      if (out.kind === "done") {
+        setFetchedActions(out.status.status === "ready" ? (out.status.actions ?? []) : []);
+        setActionsAge(out.status.stale
+          ? { built: out.status.generated_at, moved: out.status.corpus_moved_at } : null);
+      }
       else { setFetchedActions([]); setLostWhileGenerating(generating); }
     });
     // Au démontage / changement de langue : plus de lecture planifiée.
@@ -1295,6 +1304,9 @@ function RecommendedActions({ scenario, isUser }: { scenario: GesicaScenario; is
   return (
     <div>
       <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-forest-400">{t("common.recommendedActions")}</h4>
+      {actionsAge && (
+        <StaleNote builtAt={actionsAge.built} movedAt={actionsAge.moved} className="mb-2" />
+      )}
       {actions.length > 0 ? (
         <ul className="space-y-1.5">
           {actions.map((action, i) => (

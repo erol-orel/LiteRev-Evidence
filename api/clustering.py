@@ -35,7 +35,7 @@ _clustering_jobs: dict[str, dict] = {}  # scenario_id -> {"status": "running"|"d
 
 def _forget_clustering_result(scenario_id: str) -> None:
     """Oublie le dernier clustering gardé en mémoire pour ce scénario, sauf un calcul en
-    cours. Appelé quand le sous-ensemble pertinent change (reset_corpus_derived_caches) :
+    cours. Appelé quand le sous-ensemble pertinent change (mark_corpus_moved) :
     sans cela, `/clustering` resservait de mémoire ce que la base venait de périmer."""
     job = _clustering_jobs.get(scenario_id)
     if job is not None and job.get("status") != "running":
@@ -284,7 +284,8 @@ def _load_viz_cache(scenario_id: str, col: str, ttl: int = VIZ_CACHE_TTL_S) -> d
     try:
         with engine.connect() as _c:
             row = _c.execute(text(
-                f"SELECT {_jc} AS j, {_at} AS at FROM scenario_settings WHERE scenario_id = :sid"
+                f"SELECT {_jc} AS j, {_at} AS at, corpus_moved_at AS moved "
+                f"FROM scenario_settings WHERE scenario_id = :sid"
             ), {"sid": scenario_id}).mappings().first()
         if row and row["j"]:
             fresh = True
@@ -297,6 +298,15 @@ def _load_viz_cache(scenario_id: str, col: str, ttl: int = VIZ_CACHE_TTL_S) -> d
             if fresh:
                 data = dict(row["j"])
                 data["from_cache"] = True
+                # QUAND il a été construit, et si le corpus a bougé depuis. Un résultat
+                # payé n'est plus effacé par un mouvement du corpus (cf.
+                # `mark_corpus_moved`) : il est servi, et il doit donc DIRE qu'il décrit
+                # l'ensemble d'avant. Servir l'ancien corpus en le présentant comme
+                # l'actuel serait pire que de l'avoir effacé.
+                from .scenario_store import is_stale
+                data["built_at"] = row["at"].isoformat() if row["at"] else None
+                data["stale"] = is_stale(row["at"], row["moved"])
+                data["corpus_moved_at"] = row["moved"].isoformat() if row["moved"] else None
                 return data
     except Exception as _e:
         logger.warning(f"_load_viz_cache {col} {scenario_id}: {_e}")

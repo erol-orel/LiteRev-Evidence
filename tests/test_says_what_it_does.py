@@ -141,35 +141,52 @@ def test_search_is_not_on_the_expensive_rate_limit():
 
 
 # ── Moving the threshold invalidates everything computed from the old corpus ─
-def test_moving_the_threshold_drops_every_artefact_computed_from_the_old_corpus():
-    """Each cached artefact is a function of the relevant subset, so changing the
-    threshold must drop it. The three visualisations were nulled and the brief and the
-    variables self-invalidate (their fingerprint carries the threshold), but the
-    recommended actions were keyed only by (scenario, language): moving the slider from
-    0.45 to 0.60 went on serving, indefinitely, actions drawn from the previous corpus
-    while the tab presented them as the current one's."""
+def test_a_corpus_that_moves_drops_what_is_free_and_dates_what_was_paid_for():
+    """Each cached artefact is a function of the relevant subset, so a corpus that moves
+    makes every one of them describe the subset of before. There are two honest answers
+    and one dishonest one, and the rule picks by price.
+
+    DROP what costs nothing (the portrait, the similarity graph, the SEIR projection):
+    their own tab recomputes them on finding them absent, so dropping them IS refreshing
+    them.
+
+    DATE what was paid for (the clustering's written summaries, the concept map's
+    annotation pass, the recommended actions): measured in production, one article
+    receiving its similarity score destroyed a dozen model calls' worth of them, twice in
+    four days, on two of the partners' reviews.
+
+    What must never happen is the third thing, and it is the bug this test was written
+    for: serving the previous corpus's answer while the tab presents it as the current
+    one's. So a kept artefact is served with its date AND with the date the corpus last
+    moved, everywhere it is served."""
     import inspect
 
-    from api import relevance
+    from api import actions, clustering, relevance
+    from api.scenario_store import FREE_CACHE_RESET, mark_corpus_moved
 
-    from api.scenario_store import CORPUS_DERIVED_CACHE_RESET
+    for column in ("knowledge_graph_json", "seir_projection_json", "evidence_brief_json"):
+        assert f"{column} = NULL" in FREE_CACHE_RESET, f"{column} costs nothing: drop it"
+    for column in ("clustering_json", "concept_graph_json", "recommended_actions_json"):
+        assert column not in FREE_CACHE_RESET, f"{column} is paid for: date it, never drop it"
 
-    for column in ("clustering_json", "knowledge_graph_json", "concept_graph_json",
-                   "recommended_actions_json"):
-        assert f"{column} = NULL" in CORPUS_DERIVED_CACHE_RESET, f"{column} is not reset"
-    # The language marker goes too, or a stale cache is served as if it were fresh.
-    assert "recommended_actions_lang = NULL" in CORPUS_DERIVED_CACHE_RESET
-
-    # Both places that invalidate must use that ONE list, not their own copy: the two
-    # SQL statements had already drifted apart over the recommended actions.
+    # The date is written by the ONE function every path goes through: the two SQL
+    # statements had already drifted apart over the recommended actions.
+    src = inspect.getsource(mark_corpus_moved)
+    assert "corpus_moved_at = NOW()" in src, "the move is not dated"
+    assert "FREE_CACHE_RESET" in src, "the free artefacts are not dropped"
     threshold_path = inspect.getsource(relevance.update_scenario_settings)
-    assert "CORPUS_DERIVED_CACHE_RESET" in threshold_path
+    assert "mark_corpus_moved" in threshold_path
 
     # The living review invalidates where it creates the links, in the scheduler, so that
     # a run started by cron invalidates too; the API trigger only launches it.
     import living_review_scheduler
 
-    assert "CORPUS_DERIVED_CACHE_RESET" in inspect.getsource(living_review_scheduler._corpus_changed)
+    assert "mark_corpus_moved" in inspect.getsource(living_review_scheduler._corpus_changed)
+
+    # And both serving paths of a kept artefact carry the two dates.
+    for served in (inspect.getsource(clustering._load_viz_cache),
+                   inspect.getsource(actions.get_recommended_actions)):
+        assert "is_stale" in served and "corpus_moved_at" in served, served[:200]
 
 
 # ── data_connectors: the module docstring lists the connectors that exist ────

@@ -34,7 +34,7 @@ from .scenario_store import (
     has_abstract_sql,
     relevance_order_sql,
     relevant_gate_sql,
-    reset_corpus_derived_caches,
+    mark_corpus_moved,
     scenario_rerank_threshold_sql,
     scenario_threshold_info,
     scenario_threshold_sql,
@@ -563,7 +563,7 @@ def _close_scoring_report(scenario_id: str, rep: dict) -> None:
     if rep.get("newly_scored") or rep.get("changed") or rep.get("cleared"):
         try:
             with engine.begin() as _c:
-                reset_corpus_derived_caches(_c, scenario_id)
+                mark_corpus_moved(_c, scenario_id)
         except Exception as _e:
             logger.warning(f"Rerank {scenario_id}: caches dérivés non invalidés ({_e}).")
     try:
@@ -1000,6 +1000,12 @@ def _ensure_scenario_settings_table():
             "ALTER TABLE scenario_settings ALTER COLUMN similarity_threshold DROP DEFAULT"))
         conn.execute(text(
             "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS similarity_threshold_set_at TIMESTAMP"))
+        # La date du dernier mouvement du sous-ensemble pertinent. Aucune autre date ne
+        # bouge quand une passe de scoring écrit un score, si bien qu'un résultat payé
+        # (clustering, carte des concepts, actions) serait servi comme neuf après un
+        # mouvement que personne n'a vu passer. Cf. `mark_corpus_moved`.
+        conn.execute(text(
+            "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS corpus_moved_at TIMESTAMP"))
         # La taille de l'échantillon d'audit du double aveugle, pris sous le seuil (0 = éteint).
         conn.execute(text(
             "ALTER TABLE scenario_settings ADD COLUMN IF NOT EXISTS double_blind_below_sample INTEGER DEFAULT 0"))
@@ -1261,12 +1267,12 @@ def trigger_rerank(scenario_id: str, missing_only: bool = False,
 def _maps_follow_rerank(scenario_id: str, ce: dict | None) -> None:
     """Des scores de rerank viennent d'être écrits : ils déplacent la porte quand un seuil
     de rerank est posé, et l'ordre des cartes plafonnées dans tous les cas. Ce qui avait
-    été calculé sur l'état d'avant est périmé (reset_corpus_derived_caches)."""
+    été calculé sur l'état d'avant est périmé (mark_corpus_moved)."""
     if not (ce or {}).get("scored"):
         return
     try:
         with engine.begin() as _c:
-            reset_corpus_derived_caches(_c, scenario_id)
+            mark_corpus_moved(_c, scenario_id)
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"Rerank {scenario_id}: caches dérivés non invalidés ({_e}).")
 
@@ -1403,7 +1409,7 @@ def rebuild_corpus(scenario_id: str, _: None = Depends(require_api_key)) -> dict
             # le scoring qui suit ne voit pas les articles RETIRÉS. Elles restaient servies
             # jusqu'à 30 jours. (Le scoring périme de nouveau ce qu'il change lui-même.)
             with engine.begin() as _c:
-                reset_corpus_derived_caches(_c, scenario_id)
+                mark_corpus_moved(_c, scenario_id)
             # PRISMA : une reconstruction n'interroge AUCUNE source. Elle rejoue la
             # requête booléenne sur la bibliothèque locale, et ses doublons sont les
             # lignes fusionnées par la dédup.
@@ -1783,10 +1789,10 @@ def update_scenario_settings(scenario_id: str, payload: dict[str, Any],
             # n'est indexé que par (scénario, langue). Déplacer le seuil de 0.45 à 0.60
             # continuait donc de servir, indéfiniment, des actions tirées du corpus
             # PRÉCÉDENT, présentées comme celles du corpus actuel. La liste est partagée
-            # avec la living review (CORPUS_DERIVED_CACHE_RESET) pour qu'un artefact
-            # ajouté demain ne soit pas oublié d'un côté ; reset_corpus_derived_caches
+            # avec la living review (`mark_corpus_moved`) pour qu'un résultat
+            # ajouté demain ne soit pas oublié d'un côté ; mark_corpus_moved
             # l'applique, et oublie aussi le clustering gardé en mémoire.
-            reset_corpus_derived_caches(conn, scenario_id)
+            mark_corpus_moved(conn, scenario_id)
         if "variables_json" in updates:
             conn.execute(text("""
                 UPDATE scenario_settings

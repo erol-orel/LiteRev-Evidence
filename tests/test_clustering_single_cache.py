@@ -6,7 +6,7 @@
 la réinstallait en base avec un horodatage frais.
 
 Déroulé observé en production : bouger le seuil vide `clustering_json` par
-CORPUS_DERIVED_CACHE_RESET, la copie /tmp du pool PRÉCÉDENT est encore dans son TTL, elle
+mark_corpus_moved, la copie /tmp du pool PRÉCÉDENT est encore dans son TTL, elle
 est servie, puis réécrite en base. Le scénario HPAI annonçait « 602 articles, 5 clusters »
 pendant que son corpus pertinent en comptait 201, avec clustering_generated_at égal à
 updated_at à la microseconde près, APRÈS le PATCH du seuil. Trois scénarios sur les dix-neuf
@@ -72,6 +72,10 @@ def test_the_database_cache_is_still_the_one_that_remains():
 
 def test_the_reset_list_reaches_the_cache_that_is_left():
     """`clustering_json` est bien la colonne que l'invalidation vide."""
-    from api.scenario_store import CORPUS_DERIVED_CACHE_RESET
-    assert "clustering_json" in CORPUS_DERIVED_CACHE_RESET
-    assert "clustering_generated_at" in CORPUS_DERIVED_CACHE_RESET
+    from api.scenario_store import FREE_CACHE_RESET
+    # Le clustering n'est PLUS effacé quand le corpus bouge : chacun de ses groupes porte
+    # un résumé écrit par le modèle, et un seul article recevant son score détruisait la
+    # douzaine d'appels d'un coup. Il est gardé et daté ; ce qui suit vérifie qu'il ne
+    # peut pas pour autant ressusciter de la mémoire du processus.
+    assert "clustering_json" not in FREE_CACHE_RESET
+    assert "clustering_generated_at" not in FREE_CACHE_RESET

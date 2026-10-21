@@ -458,6 +458,10 @@ export const fr = {
     metaChunks: "Fragments",
   },
   scenarioDetail: {
+    staleNote: {
+      text: "Construit le {built}, et le corpus a bougé depuis le {moved}. Ceci décrit l'ensemble d'articles d'alors, pas celui d'aujourd'hui.",
+      how: "Il est gardé plutôt qu'effacé parce que le refaire coûte des appels de modèle. Refaites-le depuis « Ce que cette revue porte », au-dessus des onglets.",
+    },
     readiness: {
       title: "Ce que cette revue porte",
       complete: "Tout ce que ce scénario devrait porter est là, et à jour.",

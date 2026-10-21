@@ -635,11 +635,17 @@ def test_the_links_are_written_with_their_date_and_only_once(monkeypatch, scenar
     with main.engine.connect() as c:
         rows = c.execute(text("SELECT document_id, similarity_score, assigned_at FROM article_scenarios "
                               "WHERE scenario_id = :s"), {"s": scenario_row}).all()
-        cache = c.execute(text("SELECT clustering_json FROM scenario_settings WHERE scenario_id = :s"),
-                          {"s": scenario_row}).scalar()
+        cache, moved = c.execute(text("SELECT clustering_json, corpus_moved_at FROM "
+                                      "scenario_settings WHERE scenario_id = :s"),
+                                 {"s": scenario_row}).first()
     assert [(r[0], r[1]) for r in rows] == [(990_001, None)]
     assert rows[0][2] is not None, "the link carries the date it was made"
-    assert cache is None, "the views computed on the old corpus are dropped"
+    # The watch brought in new papers, so every view computed on the previous corpus
+    # describes the previous corpus. The clustering is not destroyed for it (its summaries
+    # cost a model call each) but the move is dated, which is what stops it passing for
+    # the current one.
+    assert cache is not None, "a paid view was destroyed by a watch run"
+    assert moved is not None, "the views computed on the old corpus would pass for current"
 
     # The same paper again: the ingest finds it, the link exists, nothing changes.
     monkeypatch.setattr(S, "_ingest_doc_direct", lambda **kw: (990_001, False))

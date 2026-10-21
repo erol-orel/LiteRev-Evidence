@@ -3,6 +3,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ExtractionSection } from "./ExtractionSection";
 import { VariablesOfInterestPanel } from "./VariablesOfInterestPanel";
 import { ReadinessStrip } from "./ReadinessStrip";
+import { StaleNote } from "./StaleNote";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { SourcePlanPanel } from "./SourcePlanPanel";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
@@ -3719,6 +3720,10 @@ function ClusteringSection({ scenarioId }: { scenarioId: string }) {
 
       {data && !loading && (
         <>
+          {/* Ce clustering n'est plus effacé quand le corpus bouge : ses résumés coûtent
+              un appel de modèle par groupe. Il est donc servi, et il doit dire qu'il
+              décrit l'ensemble d'avant. */}
+          {data.stale && <StaleNote builtAt={data.built_at} movedAt={data.corpus_moved_at} />}
           {data.message && (
             <div className="rounded-xl border border-gold-500/20 bg-gold-500/5 px-3 py-2.5 text-xs text-gold-300">
               <Info size={12} className="inline mr-1.5 shrink-0" />
@@ -6011,6 +6016,9 @@ function ConceptMapView({ scenarioId }: { scenarioId: string }) {
       <SectionHeader icon={<Network size={14} className="text-brand-400" />}
         title={t("scenarioDetail.knowledgeGraph.conceptTitle")} subtitle={subtitle} />
 
+      {/* La carte n'est plus effacée quand le corpus bouge : son annotation coûte un
+          appel par article. Elle est servie, et elle dit de quel corpus elle parle. */}
+      {data.stale && <StaleNote builtAt={data.built_at} movedAt={data.corpus_moved_at} />}
       {data.enriching && (
         <div className="flex items-center gap-2 rounded-xl border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-200">
           <Loader2 size={12} className="animate-spin shrink-0" />{t("scenarioDetail.knowledgeGraph.enriching")}

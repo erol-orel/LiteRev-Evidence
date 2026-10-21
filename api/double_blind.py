@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404,
-                             relevant_gate_sql, reset_corpus_derived_caches,
+                             relevant_gate_sql, mark_corpus_moved,
                              screening_status_sql)
 
 def _learning():
@@ -162,7 +162,7 @@ def _write_ars_screening(
     Toutes les décisions de screening passent par ici (le bouton d'un article, l'accord
     de deux relecteurs, un arbitrage). Quand le statut CHANGE, le sous-ensemble pertinent
     a bougé : les cartes calculées dessus sont périmées dans la même transaction
-    (reset_corpus_derived_caches). Elles ne l'étaient pas, et une inclusion à la main
+    (mark_corpus_moved). Elles ne l'étaient pas, et une inclusion à la main
     restait absente des thèmes, du graphe et de la carte des concepts pendant 30 jours."""
     before = conn.execute(text("""
         SELECT screening_status FROM article_scenarios
@@ -184,7 +184,7 @@ def _write_ars_screening(
         return s if s in ("included", "excluded") else None
 
     if before is not None and _side(before[0]) != _side(status):
-        reset_corpus_derived_caches(conn, scenario_id)
+        mark_corpus_moved(conn, scenario_id)
 
 
 # ── L'échantillon d'audit : ce que la machine a écarté, jugé lui aussi ───────
@@ -730,7 +730,7 @@ def change_user_scenario_double_blind_decision(
         # Dans la MÊME transaction : ce que le sous-ensemble pertinent avait produit sur
         # l'ancienne décision est périmé (une inclusion à la main entre et sort du corpus
         # pertinent, donc les cartes et le clustering avec).
-        reset_corpus_derived_caches(conn, scenario_id)
+        mark_corpus_moved(conn, scenario_id)
     return {
         "scenario_id": scenario_id, "article_id": payload.article_id, "reviewer": reviewer,
         "was": before["my_status"], "now": row["reviewer_1_status"] if reviewer == 1 else row["reviewer_2_status"],
