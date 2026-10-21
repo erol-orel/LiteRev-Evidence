@@ -25,12 +25,41 @@ saved queries answer in milliseconds instead of minutes (scripts/compare_fts.py)
 What changes for the person searching: stemming (forecast = forecasting = forecasts),
 no more substrings (`ai` no longer matches "chain"), stop words ignored ("the", "it",
 "of" - PostgreSQL drops them from the query, and `stopword_terms` lets the caller say
-so), `word*` is a real prefix, accents are kept. The truncation of a stop word is an
-unstemmed prefix from 4 letters, PubMed's floor (`over*` reaches overweight and
-overall); below it, `out*` included, PubMed refuses the wildcard and the term is
-dropped like `out`. Punctuation inside a word separates it the same way in the query
-and in the text (SEPARATOR_PATTERN): A(H5N1), A/H5N1 and "A H5N1" are one phrase, and
-2.3.4.4b is found where it is written.
+so), `word*` meets the stems of the words it begins (TRUNCATION below), accents are
+kept. The truncation of a stop word is an unstemmed prefix from 4 letters, PubMed's
+floor (`over*` reaches overweight and overall); below it, `out*` included, PubMed
+refuses the wildcard and the term is dropped like `out`. Punctuation inside a word
+separates it the same way in the query and in the text (SEPARATOR_PATTERN): A(H5N1),
+A/H5N1 and "A H5N1" are one phrase, and 2.3.4.4b is found where it is written.
+TRUNCATION
+----------
+The vectors hold stems, so `word*` has to meet stems. PostgreSQL stems the truncation
+before marking it a prefix, which is enough when the truncation stops between two
+suffixes: `occupational*` is stemmed as the word is, to 'occup':*, and meets every
+occupation word. It is not enough when the truncation stops INSIDE a suffix the
+stemmer removes: `seropositiv` stays 'seropositiv':*, while the vectors write
+seropositive and seropositivity as 'seroposit', shorter than the prefix, so nothing
+matches. Likewise vaccinat* (vaccination is 'vaccin'), effectiv*, resistan*, estimat*,
+prevalen*, immuni*, pandemi*. Measured on 230 truncations typical of review strategies,
+against an English vocabulary of 288 000 words weighted by frequency, the prefix alone
+missed 9.7 % of the words they are written for, and most of them for 50 of the
+truncations. The LIKE path, a substring, never had the problem.
+
+So a truncation that has started such a suffix is completed (`truncation_completions`:
+seropositiv → seropositive, seropositivity), PostgreSQL stems the completions with the
+configuration that wrote the vectors, and each stem the prefix does not already cover
+joins it as an EXACT lexeme: 'seropositiv':* | 'seroposit'. Exact rather than a prefix:
+'immun' meets immunity and immunization, where 'immun':* would add immunology and every
+immunoglobulin. The query grows by one to three lexemes, computed once per search, and
+stays one index condition. A truncation that has started no suffix (influenz*,
+forecast*) compiles exactly as before. On the same 230 truncations: 99.99 % of the
+words, by frequency.
+
+The price is the stemmer's, and the bare words already pay it: a truncation now meets
+what its completions meet, so effectiv* meets "effect" as "effectiveness" does, and
+hospitali* meets "hospital" as "hospitalization" does. Only an unstemmed vector could
+tell them apart. One case is the completion's own: systemat* also meets 'system', the
+stem a word "systemate" would have, since nothing here knows it is not a word.
 
 HOW IT STAYS CURRENT
 --------------------
@@ -292,6 +321,64 @@ TRIGGER_NAMES = (
 
 # ── boolean AST → one tsquery ────────────────────────────────────────────────
 
+#: The suffixes the english stemmer removes, or rewrites and then removes, that a
+#: truncation stops inside of: seropositiv* in -ive, vaccinat* in -ate, pandemi* in -ic,
+#: resistan* in -ance, mortalit* in -ity (TRUNCATION in the module docstring). Left
+#: out after measuring them against an English vocabulary: -ness, -ful, -ism, -ly, a
+#: bare -y and the inflections, whose completions met unrelated words (lawn* would
+#: have met "law", through "lawness") for little the suffixes here do not already find.
+TRUNCATION_SUFFIXES = (
+    "ive", "ivity", "ate", "ation", "ic", "ical", "ity", "al", "ality",
+    "ence", "ency", "ent", "ance", "ancy", "ant", "able", "ability", "ible", "ibility",
+    "ize", "ization", "ion", "ious", "ment",
+)
+
+
+def truncation_completions(stem: str) -> list[str]:
+    """The words a truncation would be if it finished a suffix it has started.
+
+    seropositiv → seropositive, seropositivity. A suffix is started when the truncation
+    ends with two of its letters, or with the i or a that opens it (pandemi* → pandemic,
+    vaccina* → vaccination). A lone final e or m does not count: it ends too many whole
+    words (refugee*, perform*), whose completions "refugeence" and "performent" would
+    stem to 'refug' and 'perfor'. Nonsense completions (pandemity, pandemize) are
+    expected: most stem as a real one does ('pandem', as pandemic) or to a lexeme no
+    word carries; systemat* is the exception the module docstring names. Plain ASCII
+    words only, the ones the stemmer's suffix rules are about: h5n*, sars-cov* or
+    cathéter* get none. PURE.
+    """
+    word = (stem or "").lower()
+    if not (word.isascii() and word.isalpha()):
+        return []
+    out: list[str] = []
+    for suffix in TRUNCATION_SUFFIXES:
+        for j in range(1, len(suffix)):
+            if (j >= 2 or suffix[0] in "ia") and word.endswith(suffix[:j]):
+                completion = word + suffix[j:]
+                if completion not in out:
+                    out.append(completion)
+    return out
+
+
+def _truncation_sql(prefix: str, key: str) -> str:
+    """`prefix` OR the stems of the completions bound as `<key>_c` that it does not
+    already cover, as exact lexemes.
+
+    The stems come from to_tsvector, the function that wrote the stored vectors. A stem
+    that starts with the truncation's own is already met by the prefix and is left out,
+    so seropositiv* gains 'seroposit' alone. The subquery reads no column of the row:
+    PostgreSQL computes it once per search (an InitPlan) and the whole tsquery stays an
+    index condition. No stem left over → `prefix` alone, through the coalesce. A stop
+    word (out*) has no stem of its own: nothing joins, and the leaf stays the empty
+    query it was."""
+    own = f"(tsvector_to_array(to_tsvector('{TS_CONFIG}', CAST(:{key} AS text))))[1]"
+    cut = (f"SELECT string_agg(quote_literal(l), ' | ' ORDER BY l) "
+           f"FROM unnest(tsvector_to_array(to_tsvector('{TS_CONFIG}', CAST(:{key}_c AS text)))) AS l "
+           f"WHERE NOT starts_with(l, {own})")
+    return (f"(SELECT coalesce(t.q || CAST(t.cut AS tsquery), t.q) "
+            f"FROM (SELECT {prefix} AS q, ({cut}) AS cut) AS t)")
+
+
 def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None:
     """Compile main._parse_boolean_ast output into a SQL expression yielding ONE tsquery.
 
@@ -299,10 +386,13 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
       word / "a phrase"   phraseto_tsquery - same stemming as the stored vectors, stop
                           words dropped, a hyphenated word ("sars-cov-2") becoming the
                           same phrase of parts that to_tsvector produced when indexing;
-      word*               to_tsquery(quote_literal(word) || ':*') - a prefix match, the
-                          PubMed truncation the tokenizer preserves; for a stop word of
-                          STOPWORD_PREFIX_MIN letters or more (`over*`), which the
-                          english configuration would drop, the unstemmed 'simple' prefix.
+      word*               to_tsquery(quote_literal(word) || ':*') - a prefix of the
+                          word's stem, the PubMed truncation the tokenizer preserves.
+                          When the word stops inside a suffix the stemmer removes, OR
+                          the stems of its completions, exact (`_truncation_sql`).
+                          For a stop word of STOPWORD_PREFIX_MIN letters or more
+                          (`over*`), which the english configuration would drop, the
+                          unstemmed 'simple' prefix instead.
     AND / OR / NOT become the tsquery operators && / || / !!, parenthesised, so the
     whole boolean is one index condition regardless of term count.
 
@@ -330,12 +420,23 @@ def ast_to_tsquery_sql(ast, params: dict, idx: list | None = None) -> str | None
                 return None
             params[key] = stem
             english = f"to_tsquery('{TS_CONFIG}', quote_literal(CAST(:{key} AS text)) || ':*')"
+            # Les deux élargissements du même préfixe, et ils se composent : les
+            # complétions rattrapent une troncature arrêtée DANS un suffixe (seropositiv*),
+            # le repli « simple » rattrape un mot VIDE (over*). Le test du mot vide porte
+            # sur le préfixe NU, jamais sur la forme élargie : une complétion rendrait le
+            # numnode non nul et masquerait le mot vide.
+            completions = truncation_completions(stem)
+            if completions:
+                params[f"{key}_c"] = " ".join(completions)
+                widened = _truncation_sql(english, key)
+            else:
+                widened = english
             if len(stem) < STOPWORD_PREFIX_MIN:
-                return english
-            # Empty only for a stop word, as the database's own dictionary says. The CASE
-            # holds no column, so it stays one GIN index condition.
+                return widened
+            # Vide seulement pour un mot vide, d'après le dictionnaire de la base. Le CASE
+            # ne porte aucune colonne : la condition reste un seul parcours d'index GIN.
             simple = f"to_tsquery('simple', quote_literal(CAST(:{key} AS text)) || ':*')"
-            return f"(CASE WHEN numnode({english}) = 0 THEN {simple} ELSE {english} END)"
+            return f"(CASE WHEN numnode({english}) = 0 THEN {simple} ELSE {widened} END)"
         params[key] = term.replace("*", "")
         return f"phraseto_tsquery('{TS_CONFIG}', CAST(:{key} AS text))"
     if typ == "not":
