@@ -5,6 +5,7 @@ tools and tests.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any, Optional
 
 from fastapi import HTTPException
@@ -711,41 +712,87 @@ def corpus_search_terms(query: str, max_terms: int = 8) -> list[str]:
 # articles pertinents, depuis ctx-v9 : elle ne couvrait que les 25 premiers), et la
 # génération suivante ne le réutilise tel quel que si elle n'a pas bougé ; c'est ce qu'on
 # veut : ne pas détruire.
-CORPUS_DERIVED_CACHE_RESET = """
-    clustering_json = NULL, clustering_generated_at = NULL,
+# CE QUI EST EFFACÉ, ET CE QUI EST DATÉ. La règle tient en une phrase : on efface ce qui
+# se refait pour rien, on DATE ce qui se paie.
+#
+# Tout ce qui précède était effacé, et c'était détruire. Mesuré en production : le
+# dernier article d'une revue des partenaires a reçu son score de similarité (15 033 sur
+# 15 034 → 15 034), la passe de scoring a invalidé « le corpus a bougé », et le
+# clustering, le graphe, la carte des concepts et les actions recommandées ont disparu
+# ensemble. Une douzaine d'appels de modèle détruits par UN article, deux fois en quatre
+# jours, sur deux revues ; l'onglet Visualisation restait vide et rien ne disait pourquoi.
+#
+# C'est la même règle que le rapport narratif a déjà obtenue : un résultat peut être
+# vieux, il ne doit jamais disparaître. Elle s'applique ici à tout ce qui coûte un appel,
+# et la classe de coût est déjà déclarée, résultat par résultat, dans `api/outputs.py`.
+FREE_CACHE_RESET = """
     knowledge_graph_json = NULL, kg_generated_at = NULL,
-    concept_graph_json = NULL, concept_graph_generated_at = NULL,
-    recommended_actions_json = NULL, recommended_actions_lang = NULL,
-    actions_generated_at = NULL,
     seir_projection_json = NULL, seir_projection_generated_at = NULL,
     evidence_brief_json = NULL, evidence_brief_at = NULL
 """
-# `evidence_brief_llm_json` n'y est PAS, et c'est délibéré : le portrait se recalcule en
-# SQL, le rapport narratif coûte un appel de modèle. Un corpus qui bouge d'un article le
-# rendait absent (et un GET ne dépense pas, donc rien ne le réécrivait) ; il est désormais
-# servi DATÉ, avec le nombre d'articles sur lesquels il a été écrit et celui d'aujourd'hui.
-# Un rapport doit pouvoir être vieux ; il ne doit jamais disparaître.
+# Ces trois-là ne coûtent rien à refaire (pgvector et du SQL), et leur onglet les
+# recalcule tout seul en les trouvant absents : les effacer, c'est les rafraîchir.
+#
+# Le CLUSTERING (un résumé écrit par groupe), la CARTE DES CONCEPTS (une annotation par
+# article) et les ACTIONS RECOMMANDÉES (un appel) sont gardés et datés : `corpus_moved_at`
+# ci-dessous porte la date du dernier mouvement, le panneau de complétude les dit « plus
+# vieux que le corpus », et leur propre onglet le dit aussi, sans quoi on servirait
+# l'ancien corpus en le présentant comme l'actuel - ce qui serait pire que de l'effacer.
+#
+# `evidence_brief_llm_json` (le rapport narratif) et `variables_json` (la spec) ne sont
+# dans aucune des deux listes : ils portent leur propre empreinte et se datent eux-mêmes.
 
 
-def reset_corpus_derived_caches(conn, scenario_id: str) -> None:
-    """Périme, dans la transaction de l'appelant, tout ce qui a été calculé sur le
-    sous-ensemble pertinent de CE scénario : la liste partagée ci-dessus, plus le
-    clustering que le processus garde en mémoire.
+def mark_corpus_moved(conn, scenario_id: str) -> None:
+    """LE SOUS-ENSEMBLE PERTINENT A BOUGÉ. Dans la transaction de l'appelant : la date du
+    mouvement est écrite, ce qui se refait pour rien est effacé, ce qui se paie est gardé.
 
-    Le seuil, les découpages et la living review le faisaient ; une décision de screening
-    article par article et une reconstruction du corpus, non. Or une inclusion à la main
-    change le sous-ensemble autant qu'un seuil : elle restait absente des cartes pendant
-    les 30 jours du cache, sans que rien ne le signale.
+    Appelée par les six chemins qui déplacent la porte : le seuil, le scoring sémantique,
+    le cross-encoder, la reconstruction du corpus, un découpage et une décision de
+    relecture. Un seul article qui change de côté suffit, et c'est juste : une carte
+    calculée sur l'ensemble d'avant décrit l'ensemble d'avant.
 
-    La copie EN MÉMOIRE du dernier clustering est oubliée aussi : `/clustering` la sert
-    quand la base n'a plus rien, si bien qu'un cache vidé en base renaissait de là (la
-    même résurrection que l'ancienne copie /tmp, cf. _persist_clustering_result). Sans
-    ligne de réglages, il n'y a rien à vider : pas d'INSERT."""
+    `corpus_moved_at` est la seule chose qui reste de l'ancien effacement total. Elle est
+    nécessaire parce qu'aucune des dates que le panneau de complétude regardait ne bouge
+    quand un score est écrit : ni la date du lien, ni celle de la décision, ni celle du
+    seuil. Sans elle, un résultat payé serait servi comme neuf après un mouvement que
+    personne n'a vu passer.
+
+    La copie EN MÉMOIRE du dernier clustering est oubliée : `/clustering` la sert quand la
+    base n'a rien, si bien qu'un cache vidé renaissait de là (la même résurrection que
+    l'ancienne copie /tmp, cf. _persist_clustering_result). Sans ligne de réglages, il n'y
+    a rien à dater : l'INSERT en crée une, sinon le mouvement serait perdu."""
     conn.execute(text(f"""
-        UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET} WHERE scenario_id = :sid
+        INSERT INTO scenario_settings (scenario_id, corpus_moved_at, updated_at)
+        VALUES (:sid, NOW(), NOW())
+        ON CONFLICT (scenario_id) DO UPDATE
+        SET corpus_moved_at = NOW(), {FREE_CACHE_RESET}
     """), {"sid": scenario_id})
     try:
         from .clustering import _forget_clustering_result   # lazy: clustering se charge après
         _forget_clustering_result(scenario_id)
     except Exception as e:                                   # noqa: BLE001 - jamais bloquant
-        logger.warning(f"reset_corpus_derived_caches {scenario_id}: {e}")
+        logger.warning(f"mark_corpus_moved {scenario_id}: {e}")
+
+
+def corpus_moved_at(conn, scenario_id: str):
+    """La date du dernier mouvement du sous-ensemble pertinent, ou None. Ce qu'un onglet
+    compare à la date de son propre résultat pour savoir s'il sert du vieux."""
+    row = conn.execute(text(
+        "SELECT corpus_moved_at FROM scenario_settings WHERE scenario_id = :sid"
+    ), {"sid": scenario_id}).mappings().first()
+    return row["corpus_moved_at"] if row else None
+
+
+def is_stale(built_at, moved_at) -> bool:
+    """Un résultat construit AVANT le dernier mouvement du corpus. PURE, et tolérante aux
+    deux fuseaux : les dates de cette base ont été posées par une dizaine de migrations
+    sur quatre ans, et deux d'entre elles ne s'accordent pas (cf. `_naive` dans
+    api/outputs.py, et le HTTP 500 que leur comparaison a coûté)."""
+    def _n(t):
+        if not isinstance(t, _dt.datetime):
+            return None
+        return t.replace(tzinfo=None) if t.tzinfo is not None else t
+
+    b, m = _n(built_at), _n(moved_at)
+    return bool(b and m and b < m)

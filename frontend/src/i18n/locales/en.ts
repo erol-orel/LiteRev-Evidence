@@ -458,6 +458,10 @@ export const en: Translations = {
     metaChunks: "Chunks",
   },
   scenarioDetail: {
+    staleNote: {
+      text: "Built on {built}, and the corpus has moved since {moved}. This describes the set of papers as it was, not as it is now.",
+      how: "It is kept rather than deleted because rebuilding it costs model calls. Rebuild it from \"What this review holds\", above the tabs.",
+    },
     readiness: {
       title: "What this review holds",
       complete: "Everything this scenario should hold is there and current.",

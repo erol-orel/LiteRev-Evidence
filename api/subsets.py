@@ -32,7 +32,7 @@ from sqlalchemy import text
 
 from .core import app, engine, logger, require_api_key
 from .scenario_store import (
-    CORPUS_DERIVED_CACHE_RESET,
+    mark_corpus_moved,
     _get_scenario_threshold,
     _get_user_scenario_or_404,
     relevant_gate_sql,
@@ -383,6 +383,20 @@ def _cluster_membership(scenario_id: str) -> tuple[dict[int, int], dict[int, str
         raise HTTPException(status_code=404,
                             detail="Aucun clustering en cache pour ce scénario : ouvrez "
                                    "l'onglet Clusters pour le calculer, puis réessayez.")
+    # UN CLUSTERING PÉRIMÉ NE SÉLECTIONNE RIEN. Le numéro d'un groupe n'a de sens que
+    # dans la projection qui l'a produit : le « groupe 0 » d'un corpus d'avant n'est pas
+    # celui d'aujourd'hui, et découper dessus exclurait les mauvais articles. Le cache
+    # était effacé à chaque mouvement du corpus, ce qui l'interdisait par accident ; il
+    # est désormais gardé (ses résumés coûtent un appel par groupe), donc le refus est
+    # écrit. C'est la même réponse qu'une absence, et elle est plus juste qu'elle : le
+    # clustering est là, il décrit simplement autre chose.
+    if cache.get("stale"):
+        raise HTTPException(status_code=404,
+                            detail="Le clustering en cache décrit le corpus d'avant "
+                                   f"(construit le {str(cache.get('built_at'))[:10]}, le corpus a "
+                                   f"bougé le {str(cache.get('corpus_moved_at'))[:10]}) : les numéros "
+                                   "de groupe ne correspondent plus. Recalculez le clustering, "
+                                   "puis refaites la sélection sur les nouveaux groupes.")
     of: dict[int, int] = {}
     names: dict[int, str] = {}
     for c in cache["clusters"]:
@@ -789,18 +803,12 @@ def _build_plan(scenario_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reset_corpus_caches(conn, scenario_id: str) -> None:
-    """Les artefacts calculés sur le corpus pertinent (clustering, graphe, carte des
-    concepts, actions recommandées) décrivent un corpus qui vient de changer : les servir
-    ensuite présenterait le corpus PRÉCÉDENT comme l'actuel, ce qu'a déjà fait le curseur
-    de seuil. Même liste que lui, pour qu'un artefact ajouté demain ne soit pas oublié
-    d'un côté."""
-    conn.execute(text("""
-        INSERT INTO scenario_settings (scenario_id, updated_at) VALUES (:sid, NOW())
-        ON CONFLICT (scenario_id) DO NOTHING
-    """), {"sid": scenario_id})
-    conn.execute(text(f"""
-        UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET} WHERE scenario_id = :sid
-    """), {"sid": scenario_id})
+    """Un découpage vient de changer le corpus pertinent : les vues qui en dérivent
+    décrivent celui d'avant. MÊME chemin que le curseur de seuil et que les passes de
+    scoring (`mark_corpus_moved`), pour qu'un résultat ajouté demain ne soit pas traité
+    d'une façon ici et d'une autre là : ce qui se refait pour rien est effacé, ce qui se
+    paie est gardé et daté."""
+    mark_corpus_moved(conn, scenario_id)
 
 
 def _public(plan: dict[str, Any], sample: int = 20) -> dict[str, Any]:

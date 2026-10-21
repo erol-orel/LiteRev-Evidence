@@ -687,16 +687,16 @@ def _link_documents(scenario_id: str, doc_ids) -> int:
 
 
 def _corpus_changed(scenario_id: str) -> None:
-    """Le corpus du scénario a gagné des liens : la copie de son compte d'articles et ses
-    vues dérivées (clustering, graphe, carte des concepts, actions, projection SEIR) sont
-    périmées. Fait ICI, là où les liens se créent, pour qu'une veille lancée par cron les
-    invalide aussi : seul le déclencheur de l'API le faisait, d'après le rapport."""
-    from api.scenario_store import CORPUS_DERIVED_CACHE_RESET
+    """Le corpus du scénario a gagné des liens : la copie de son compte d'articles est à
+    refaire, et ses vues dérivées décrivent le corpus d'avant. Fait ICI, là où les liens
+    se créent, pour qu'une veille lancée par cron le fasse aussi : seul le déclencheur de
+    l'API le faisait, d'après le rapport. `mark_corpus_moved` décide quoi effacer et quoi
+    dater, une fois pour les six chemins."""
+    from api.scenario_store import mark_corpus_moved
     core, _ = _api()
     try:
         with core.engine.begin() as c:
-            c.execute(text(f"UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET} "
-                           "WHERE scenario_id = :sid"), {"sid": scenario_id})
+            mark_corpus_moved(c, scenario_id)
     except Exception as e:
         logger.warning(f"[{scenario_id}] invalidation des vues dérivées : {e}")
     try:

@@ -679,7 +679,8 @@ export async function fetchGesicaScenarios(): Promise<GesicaScenario[]> {
 // Actions recommandées (génération LLM paresseuse + cache côté serveur).
 export async function getRecommendedActions(
   scenarioId: string,
-): Promise<{ status: string; actions: string[]; generated_at?: string }> {
+): Promise<{ status: string; actions: string[]; generated_at?: string;
+            stale?: boolean; corpus_moved_at?: string | null }> {
   const r = await safeFetch(`${API_BASE_URL}/scenarios/${scenarioId}/recommended-actions?lang=${currentLang()}`);
   if (!r.ok) throw new Error(httpMessage(r.status));
   return r.json();
@@ -1103,6 +1104,12 @@ export interface ScenarioClustering {
   status?: "running" | "done" | "error" | "not_started" | string;
   lang?: string;          // language of the served summaries
   from_cache?: boolean;
+  /** Quand ce résultat a été construit, et si le corpus a bougé depuis. Un résultat payé
+   *  n'est plus effacé par un mouvement du corpus : il est servi, daté, et l'écran dit
+   *  qu'il décrit l'ensemble d'avant. */
+  built_at?: string | null;
+  stale?: boolean;
+  corpus_moved_at?: string | null;
   // UMAP points are capped per response (sampled evenly per cluster); the cache
   // keeps them all. points_shown < points_total ⇒ the plot is a sample.
   points_total?: number;
@@ -2477,6 +2484,12 @@ export interface KGCluster {
 }
 
 export interface KnowledgeGraphData {
+  /** Quand ce résultat a été construit, et si le corpus a bougé depuis. Un résultat payé
+   *  n'est plus effacé par un mouvement du corpus : il est servi, daté, et l'écran dit
+   *  qu'il décrit l'ensemble d'avant. */
+  built_at?: string | null;
+  stale?: boolean;
+  corpus_moved_at?: string | null;
   scenario_id: string;
   n_nodes: number;
   n_edges: number;
@@ -2529,6 +2542,12 @@ export interface ConceptArticle {
 }
 
 export interface ConceptGraphData {
+  /** Quand ce résultat a été construit, et si le corpus a bougé depuis. Un résultat payé
+   *  n'est plus effacé par un mouvement du corpus : il est servi, daté, et l'écran dit
+   *  qu'il décrit l'ensemble d'avant. */
+  built_at?: string | null;
+  stale?: boolean;
+  corpus_moved_at?: string | null;
   kind: "concepts";
   version: number;
   scenario_id: string;

@@ -1,4 +1,4 @@
-"""The maps are computed on the relevant set, so they go stale when it moves.
+"""The maps are computed on the relevant set, so none may outlive it unmarked.
 
 The visualisation cache (themes, similarity graph, concept map) lives 30 days. It was
 reset when the threshold moved, on a narrowing and on a living review, but not when a
@@ -92,10 +92,38 @@ def _fill_caches() -> None:
 
 
 def _caches(conn) -> tuple:
+    """CE QUE CHAQUE CARTE DIT D'ELLE-MÊME après l'événement, dans l'ordre : thèmes,
+    graphe de similarité, carte des concepts.
+
+      - "fresh" : construite après le dernier mouvement du corpus ;
+      - "stale" : gardée, mais plus vieille que lui, et servie comme telle (les deux
+        dates partent avec le payload, cf. `_load_viz_cache`) ;
+      - "gone"  : effacée, parce qu'elle ne coûte rien à refaire.
+
+    Suivre le corpus ne veut plus dire disparaître : le clustering porte un résumé écrit
+    par groupe et la carte des concepts une annotation par article, et un seul article
+    changeant de côté les détruisait tous les deux. Ce qui compte, et que ce fichier
+    vérifie, est qu'AUCUNE ne continue de passer pour celle du corpus actuel."""
     with conn.cursor() as cur:
-        cur.execute("SELECT clustering_json IS NOT NULL, knowledge_graph_json IS NOT NULL,"
-                    " concept_graph_json IS NOT NULL FROM scenario_settings WHERE scenario_id = %s", (SID,))
-        return cur.fetchone()
+        cur.execute("""
+            SELECT clustering_json, clustering_generated_at,
+                   knowledge_graph_json, kg_generated_at,
+                   concept_graph_json, concept_graph_generated_at, corpus_moved_at
+            FROM scenario_settings WHERE scenario_id = %s
+        """, (SID,))
+        row = cur.fetchone()
+    if not row:
+        return ("gone", "gone", "gone")
+    moved = row[6]
+
+    def _state(payload, built):
+        if payload is None:
+            return "gone"
+        if moved and built and built < moved:
+            return "stale"
+        return "fresh"
+
+    return (_state(row[0], row[1]), _state(row[2], row[3]), _state(row[4], row[5]))
 
 
 def _client():
@@ -103,37 +131,37 @@ def _client():
     return TestClient(main.app)
 
 
-def test_a_hand_inclusion_drops_the_three_maps(corpus):
-    assert _caches(corpus) == (True, True, True)
+def test_a_hand_inclusion_moves_the_three_maps(corpus):
+    assert _caches(corpus) == ("fresh", "fresh", "fresh")
     r = _client().post(f"/user-scenarios/{SID}/articles/3/screen?status=included", headers=KEY)
     assert r.status_code == 200, r.text
-    assert _caches(corpus) == (False, False, False), "the maps still describe the corpus before the inclusion"
+    assert _caches(corpus) == ("stale", "gone", "stale"), "a map still passes for the current corpus"
     assert SID not in main._clustering_jobs, "the clustering held in memory would be served again"
 
 
 def test_a_decision_that_moves_no_article_keeps_them(corpus):
     """`pending` on an article never judged changes no side of the gate."""
     _client().post(f"/user-scenarios/{SID}/articles/4/screen?status=pending", headers=KEY)
-    assert _caches(corpus) == (True, True, True)
+    assert _caches(corpus) == ("fresh", "fresh", "fresh")
 
 
-def test_a_double_blind_agreement_and_an_arbitration_drop_them_too(corpus):
+def test_a_double_blind_agreement_and_an_arbitration_move_them_too(corpus):
     c = _client()
     vote = lambda doc, status, code: c.post(  # noqa: E731
         f"/user-scenarios/{SID}/double-blind/decision", headers=KEY,
         json={"article_id": doc, "status": status, "reviewer_code": code})
     assert vote(1, "excluded", R1).status_code == 200
-    assert _caches(corpus) == (True, True, True)          # one vote decides nothing
+    assert _caches(corpus) == ("fresh", "fresh", "fresh")          # one vote decides nothing
     vote(1, "excluded", R2)
-    assert _caches(corpus) == (False, False, False)
+    assert _caches(corpus) == ("stale", "gone", "stale")
     _fill_caches()
     vote(2, "included", R1)
     vote(2, "excluded", R2)                               # a conflict: still pending
-    assert _caches(corpus) == (True, True, True)
+    assert _caches(corpus) == ("fresh", "fresh", "fresh")
     r = c.post(f"/user-scenarios/{SID}/double-blind/resolve?article_id=2&final_status=excluded",
                headers=KEY)
     assert r.status_code == 200, r.text
-    assert _caches(corpus) == (False, False, False)
+    assert _caches(corpus) == ("stale", "gone", "stale")
 
 
 class _SyncThread:
@@ -144,7 +172,7 @@ class _SyncThread:
         self.target(*self.args, **self.kwargs)
 
 
-def test_a_corpus_rebuild_drops_them(corpus, monkeypatch):
+def test_a_corpus_rebuild_moves_them(corpus, monkeypatch):
     """Even when the scoring that follows changes nothing: the membership itself moved."""
     import threading
     monkeypatch.setattr(threading, "Thread", _SyncThread)
@@ -158,14 +186,14 @@ def test_a_corpus_rebuild_drops_them(corpus, monkeypatch):
     patch_app(monkeypatch, "_run_cross_encoder_rerank", lambda *a, **k: {"scored": 0})
     out = main.rebuild_corpus(SID)
     assert out["status"] == "started"
-    assert _caches(corpus) == (False, False, False)
+    assert _caches(corpus) == ("stale", "gone", "stale")
     assert main._RERANK_JOBS[SID]["status"] == "done"
 
 
 def test_moving_the_threshold_also_forgets_the_clustering_held_in_memory(corpus):
     r = _client().patch(f"/scenarios/{SID}/settings", json={"similarity_threshold": 0.5}, headers=KEY)
     assert r.status_code == 200, r.text
-    assert _caches(corpus) == (False, False, False) and SID not in main._clustering_jobs
+    assert _caches(corpus) == ("stale", "gone", "stale") and SID not in main._clustering_jobs
 
 
 def test_a_cleared_cache_is_not_resurrected_from_memory(corpus, monkeypatch):

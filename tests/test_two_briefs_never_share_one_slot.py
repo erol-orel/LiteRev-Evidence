@@ -40,7 +40,7 @@ from api.evidence import (  # noqa: E402
     stored_llm_brief,
     store_evidence_brief,
 )
-from api.scenario_store import CORPUS_DERIVED_CACHE_RESET  # noqa: E402
+from api.scenario_store import FREE_CACHE_RESET  # noqa: E402
 
 SID = "usr-two-briefs"
 IDS = (9901, 9902, 9903)
@@ -161,8 +161,8 @@ def test_a_corpus_change_keeps_the_report_and_drops_the_portrait():
     """What invalidation is for. The portrait is SQL and rebuilds itself, so dropping it
     costs nothing. The report costs a model call, and dropping it left the page blank with
     nothing allowed to refill it."""
-    assert "evidence_brief_json = NULL" in CORPUS_DERIVED_CACHE_RESET
-    assert "evidence_brief_llm_json" not in CORPUS_DERIVED_CACHE_RESET
+    assert "evidence_brief_json = NULL" in FREE_CACHE_RESET
+    assert "evidence_brief_llm_json" not in FREE_CACHE_RESET
 
 
 def test_the_settings_endpoint_does_not_ship_the_report_on_every_page(scenario):

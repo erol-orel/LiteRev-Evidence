@@ -252,7 +252,7 @@ def _settings(conn, scenario_id: str) -> dict[str, Any]:
         cols.append(f"jsonb_typeof({o['column']}) = 'object' AS has_{o['key']}")
         cols.append(f"{o['stamp']} AS at_{o['key']}")
     rows = _rows(conn, f"""
-        SELECT {', '.join(cols)}, similarity_threshold_set_at
+        SELECT {', '.join(cols)}, similarity_threshold_set_at, corpus_moved_at
         FROM scenario_settings WHERE scenario_id = :sid
     """, scenario_id, 0.0)
     return dict(rows[0]) if rows else {}
@@ -339,8 +339,12 @@ def scenario_outputs(scenario_id: str, lang: str = "en",
                 else:
                     settings = got
 
+    # `corpus_moved_at` est la seule de ces dates qui bouge quand une passe de scoring
+    # écrit un score : ni le lien, ni la décision, ni le seuil ne changent alors, et un
+    # résultat payé construit avant serait annoncé « à jour ».
     touched = max([t for t in (_naive(counts.get("last_arrival")),
                                _naive(counts.get("last_decision")),
+                               _naive(settings.get("corpus_moved_at")),
                                _naive(settings.get("similarity_threshold_set_at"))) if t],
                   default=None)
     rows = []

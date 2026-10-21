@@ -21,16 +21,19 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 from api import evidence as E  # noqa: E402
 from api import pipeline as P  # noqa: E402
-from api.scenario_store import CORPUS_DERIVED_CACHE_RESET  # noqa: E402
+from api.scenario_store import FREE_CACHE_RESET  # noqa: E402
 
 SID = "usr-brief-cache-test"
 
 
-def test_the_cache_is_cleared_with_everything_else_derived_from_the_corpus():
+def test_the_cache_is_cleared_because_the_portrait_costs_nothing():
     """If it were not in that list, a threshold change would serve the PREVIOUS corpus's
-    figures under the new one, which is worse than a slow tab."""
-    assert "evidence_brief_json = NULL" in CORPUS_DERIVED_CACHE_RESET
-    assert "evidence_brief_at = NULL" in CORPUS_DERIVED_CACHE_RESET
+    figures under the new one, which is worse than a slow tab. It is in the FREE list
+    rather than kept and dated because it is SQL: the tab recomputes it on finding it
+    absent, so dropping it is how it refreshes. The narrative report beside it, which
+    costs a model call, is in neither list and dates itself."""
+    assert "evidence_brief_json = NULL" in FREE_CACHE_RESET
+    assert "evidence_brief_at = NULL" in FREE_CACHE_RESET
 
 
 def test_the_endpoint_serves_the_cache_and_can_be_forced():
@@ -98,7 +101,7 @@ def test_what_is_stored_comes_back(scenario):
     # And clearing the corpus-derived caches clears it with the others.
     with main.engine.begin() as conn:
         from sqlalchemy import text as _t
-        conn.execute(_t(f"UPDATE scenario_settings SET {CORPUS_DERIVED_CACHE_RESET} "
+        conn.execute(_t(f"UPDATE scenario_settings SET {FREE_CACHE_RESET} "
                         f"WHERE scenario_id = :sid"), {"sid": SID})
     assert E.cached_evidence_brief(SID) is None
 

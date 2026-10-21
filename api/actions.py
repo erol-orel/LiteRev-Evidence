@@ -162,10 +162,11 @@ def _maybe_generate_actions(scenario_id: str, lang: str | None = None) -> bool:
     # n'avait rien produit. Deux conséquences, toutes deux vues en production :
     #   - un appel au modèle qui échoue une fois (quota, délai, JSON malformé) laissait
     #     la carte vide, sans erreur, pour toute la durée de vie du processus ;
-    #   - bouger le seuil vide `recommended_actions_json` par CORPUS_DERIVED_CACHE_RESET,
-    #     mais le verrou reste « fait » : la carte restait blanche jusqu'au prochain
-    #     redémarrage de l'API, et un changement de langue l'effaçait définitivement pour
-    #     l'autre langue.
+    #   - bouger le seuil vidait `recommended_actions_json` alors que le verrou restait
+    #     « fait » : la carte restait blanche jusqu'au prochain redémarrage de l'API, et
+    #     un changement de langue l'effaçait définitivement pour l'autre langue. Le seuil
+    #     ne vide plus rien ici (il DATE, cf. `mark_corpus_moved`), mais le verrou doit
+    #     rester un verrou : la colonne est la vérité.
     # La colonne est la vérité ; le verrou n'empêche qu'une génération concurrente.
     _prev = _ACTIONS_JOBS.get(_job_key, {})
     if _prev.get("status") == "running":
@@ -212,13 +213,20 @@ def get_recommended_actions(scenario_id: str, lang: str | None = Query(None)) ->
     _lang_norm = _norm_lang(lang) or "fr"
     with engine.connect() as conn:
         row = conn.execute(text(
-            "SELECT recommended_actions_json, recommended_actions_lang, actions_generated_at FROM scenario_settings WHERE scenario_id = :sid"
+            "SELECT recommended_actions_json, recommended_actions_lang, actions_generated_at, "
+            "corpus_moved_at FROM scenario_settings WHERE scenario_id = :sid"
         ), {"sid": scenario_id}).mappings().first()
     _cached = _actions_by_lang(row["recommended_actions_json"] if row else None,
                                row["recommended_actions_lang"] if row else None)
     if _cached.get(_lang_norm):
+        # Les actions ne sont plus effacées quand le corpus bouge : elles coûtent un
+        # appel. Elles sont servies DATÉES, et la carte dit quand le corpus a bougé
+        # depuis, sinon elle présenterait le corpus précédent comme l'actuel.
+        from .scenario_store import is_stale
         return {"status": "ready", "actions": _cached[_lang_norm],
-                "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None}
+                "generated_at": row["actions_generated_at"].isoformat() if row["actions_generated_at"] else None,
+                "stale": is_stale(row["actions_generated_at"], row["corpus_moved_at"]),
+                "corpus_moved_at": row["corpus_moved_at"].isoformat() if row["corpus_moved_at"] else None}
     started = _maybe_generate_actions(scenario_id, lang=lang)
     job = _ACTIONS_JOBS.get(f"{scenario_id}:{_lang_norm}", {})
     if job.get("status") == "error":

@@ -613,15 +613,37 @@ def test_applying_needs_the_write_key(seeded):
     assert _client().post(f"/user-scenarios/{SID}/subset/undo").status_code in (401, 403)
 
 
-def test_applying_drops_the_caches_computed_on_the_old_corpus(seeded):
+def test_applying_dates_the_caches_computed_on_the_old_corpus(seeded):
     """The clustering on screen described a corpus that no longer exists. Serving it after
     the narrowing would present the previous corpus as the current one, which is the exact
-    failure the threshold slider had."""
+    failure the threshold slider had.
+
+    It is no longer destroyed for that: each of its groups carries a summary written by
+    the model, and a dozen calls were being thrown away by a single article changing
+    sides. The narrowing DATES it instead, and the three places that could mislead are
+    each closed: the tab shows the two dates, the readiness panel reads it as older than
+    the corpus, and a selection by cluster number refuses outright (the test above),
+    because group 0 of the previous projection is not group 0 of this one."""
+    # Les trois sont là AVANT : le clustering vient du fixture, les deux autres non, et
+    # l'ancienne version de ce test lisait leur NULL d'origine comme une destruction.
+    with seeded.cursor() as cur:
+        cur.execute("UPDATE scenario_settings SET concept_graph_json = %s::jsonb, "
+                    "recommended_actions_json = %s::jsonb WHERE scenario_id = %s",
+                    (json.dumps({"nodes": []}), json.dumps({"en": ["Watch the markets."]}), SID))
     _client().post(f"/user-scenarios/{SID}/subset/apply", json={"clusters": [0]}, headers=HDR)
     with seeded.cursor() as cur:
-        cur.execute("SELECT clustering_json, concept_graph_json, recommended_actions_json "
-                    "FROM scenario_settings WHERE scenario_id = %s", (SID,))
-        assert cur.fetchone() == (None, None, None)
+        cur.execute("SELECT clustering_json, concept_graph_json, recommended_actions_json, "
+                    "corpus_moved_at FROM scenario_settings WHERE scenario_id = %s", (SID,))
+        clustering, concepts, actions, moved = cur.fetchone()
+    assert moved is not None, "the narrowing was not recorded, so nothing can read as old"
+    for paid in (clustering, concepts, actions):
+        assert paid is not None, "a paid artefact was destroyed by a narrowing"
+
+    # And it is served as what it is: old, with both dates.
+    from api.clustering import _load_viz_cache
+
+    got = _load_viz_cache(SID, "clustering")
+    assert got and got["stale"] is True and got["built_at"] and got["corpus_moved_at"]
 
 
 # ── narrowing by study design and by evidence level ──────────────────────────
