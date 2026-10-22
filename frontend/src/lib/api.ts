@@ -5038,12 +5038,31 @@ export interface SearchStrategy {
 /** What each database will receive of a query, before any search runs: whole, in the
  *  request body, split into parts whose union is the query, reduced (the only form that
  *  drops terms), or keywords for an API that reads no boolean. */
+export interface SourcePlanRow {
+  source: string;
+  how: "whole" | "body" | "parts" | "reduced" | "keywords";
+  /** The EXACT string, or strings, that database receives, in its own syntax: one entry
+   *  normally, one per part when the query is split, the keyword bag when the API cannot
+   *  express the boolean. What a reviewer pastes into that database's own site. */
+  sent: string[];
+  encoded?: number;
+  limit?: string | null;
+  limit_value?: number;
+  parts?: number | null;
+  operators?: number;
+  note?: string;
+}
+
 export interface SourceQueryPlan {
   scenario_id?: string;
   query_chars: number;
-  plan: Array<{ source: string; how: "whole" | "body" | "parts" | "reduced" | "keywords";
-                encoded?: number; limit?: string | null; limit_value?: number;
-                parts?: number | null; operators?: number; note?: string }>;
+  /** The text that was planned: the strategy the federation sends, not necessarily the
+   *  question that was typed. */
+  query?: string;
+  /** `strategy` when the stored boolean was planned, `query` when it fell back. */
+  planned_from?: "strategy" | "query";
+  pubmed_query?: string;
+  plan: SourcePlanRow[];
   whole: string[];
   body: string[];
   parts: Record<string, number | null>;
@@ -5051,9 +5070,50 @@ export interface SourceQueryPlan {
   keywords: string[];
 }
 
+/** What `PUT .../search-strategy` answers: the plan of the saved strategy, plus whether a
+ *  real imbalance was found (saved as typed, with a correction PROPOSED). */
+export interface SavedSearchStrategy extends SourceQueryPlan {
+  saved: boolean;
+  corpus_stale: boolean;
+  forgotten_source_answers: number;
+  issues: Array<{ kind: string; count: number }>;
+  fixed: string | null;
+}
+
 export async function fetchSourceQueryPlan(scenarioId: string): Promise<SourceQueryPlan> {
   const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/source-query-plan`,
                             { headers: authHeaders() });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
+}
+
+/** Replace a scenario's search strategy with the one the reviewer wrote. Saved AS TYPED:
+ *  a real imbalance comes back as `issues` with a PROPOSED `fixed`, never applied. Saving
+ *  does not move the corpus (`corpus_stale`), only running the search again does. */
+export async function putSearchStrategy(scenarioId: string, general: string,
+                                        pubmed?: string): Promise<SavedSearchStrategy> {
+  const r = await safeFetch(`${scenarioBase(scenarioId)}/${scenarioId}/search-strategy`, {
+    method: 'PUT',
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(pubmed ? { general, pubmed } : { general }),
+  });
+  if (!r.ok) throw new Error(await apiError(r));
+  return r.json();
+}
+
+/** Query ONE database again, and only that one: the rest of the federation is replayed
+ *  from the cached answers. `resume` keeps the position a cut source stopped at. */
+export async function rerunScenarioSource(
+  scenarioId: string, source: string, opts?: { resume?: boolean; lang?: string },
+): Promise<{ status: string; source: string; forgot_cached_answer: boolean;
+             replayed_from_cache: string[]; message: string }> {
+  const qs = new URLSearchParams();
+  if (opts?.resume === false) qs.set("resume", "false");
+  if (opts?.lang) qs.set("lang", opts.lang);
+  const r = await safeFetch(
+    `${scenarioBase(scenarioId)}/${scenarioId}/sources/${encodeURIComponent(source)}/rerun`
+    + (qs.toString() ? `?${qs}` : ""),
+    { method: 'POST', headers: authHeaders() });
   if (!r.ok) throw new Error(await apiError(r));
   return r.json();
 }

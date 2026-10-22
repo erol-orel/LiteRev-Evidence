@@ -6,6 +6,7 @@ import { ReadinessStrip } from "./ReadinessStrip";
 import { StaleNote } from "./StaleNote";
 import { ConceptAnnotationStatus } from "./ConceptAnnotationStatus";
 import { SourcePlanPanel } from "./SourcePlanPanel";
+import { SourceQueryTable } from "./SourceQueryTable";
 import { formatEpiInterval, formatEpiNumber } from "../lib/epiFormat";
 import { levelBadge, levelText } from "../lib/gradeLevels";
 import { useI18n } from "../i18n/LanguageProvider";
@@ -188,7 +189,10 @@ import {
   type ScenarioQuestionsPage,
   type RerankJob,
   fetchSourceQueryPlan,
+  putSearchStrategy,
+  rerunScenarioSource,
   type SourceQueryPlan,
+  type SavedSearchStrategy,
 } from "../lib/api";
 import { pollJob, type PollHandle } from "../lib/poll";
 import {
@@ -302,6 +306,17 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
   // lisait qu'après, dans les notes du PRISMA, et seulement pour les sources réduites ou
   // découpées. Une source qui refusait la requête n'apparaissait que « en échec ».
   const [plan, setPlan] = useState<SourceQueryPlan | null>(null);
+  // La stratégie, modifiable : une requête qu'on peut lire mais pas corriger n'est qu'un
+  // constat. Enregistrée TELLE QUE SAISIE, avec une correction PROPOSÉE si elle est
+  // déséquilibrée, et le corpus ne bouge qu'à la prochaine recherche.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<SavedSearchStrategy | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Une base interrogée de nouveau, seule : les autres sont rejouées depuis le cache.
+  const [rerunning, setRerunning] = useState<string | null>(null);
+  const [rerunNote, setRerunNote] = useState<string | null>(null);
   const [liveData, setLiveData] = useState<LiveSearchResponse | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -341,6 +356,35 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
   // nulle part la requête booléenne réellement envoyée aux bases, alors qu'elle est
   // générée et enregistrée pendant la recherche (user_scenarios.search_strategy).
   useEffect(() => { loadStrategy(); }, [loadStrategy]);
+
+  const saveStrategy = useCallback(() => {
+    const next = draft.trim();
+    if (!next) return;
+    setSaving(true);
+    setSaveError(null);
+    putSearchStrategy(scenarioId, next)
+      .then(res => {
+        setSaved(res);
+        setPlan(res);
+        setEditing(false);
+        // Ce que l'écran doit désormais montrer, c'est la stratégie enregistrée.
+        setStrategy(s => (s ? { ...s, general: next, pubmed: res.pubmed_query || next } : s));
+      })
+      .catch(e => setSaveError(e.message))
+      .finally(() => setSaving(false));
+  }, [draft, scenarioId]);
+
+  const rerunSource = useCallback((source: string) => {
+    setRerunning(source);
+    setRerunNote(null);
+    rerunScenarioSource(scenarioId, source)
+      .then(res => setRerunNote(
+        t("scenarioDetail.queries.sourceQueryRerunStarted")
+          .replace("{source}", res.source)
+          .replace("{others}", String(res.replayed_from_cache.length))))
+      .catch(e => setRerunNote(e.message))
+      .finally(() => setRerunning(null));
+  }, [scenarioId, t]);
 
   function runLiveSearch() {
     if (!isUserScenario(scenarioId)) return;
@@ -386,6 +430,15 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
                            bg-white/[0.03] p-2 font-mono text-[11px] leading-5 text-white/75">
             {detail.combined_query || detail.query}
           </code>
+          {/* La requête du scénario et la stratégie fédérée peuvent différer : une question
+              en langage naturel a été traduite, ou la stratégie a été modifiée depuis. Sans
+              cette ligne, deux requêtes s'affichent l'une au-dessus de l'autre sans dire
+              laquelle les bases reçoivent. */}
+          {plan?.query && plan.query !== (detail.combined_query || detail.query || "") && (
+            <p className="text-[11px] text-white/45 leading-5">
+              {t("scenarioDetail.queries.strategyIsWhatIsSent")}
+            </p>
+          )}
         </div>
       )}
       {/* Recherche multi-facettes : les facettes DANS L'ORDRE avec l'opérateur
@@ -522,8 +575,18 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
       {/* AI Search Strategy (user scenarios only) */}
       {isUserScenario(scenarioId) && (
         <div>
-          {/* Ce que chaque base recevra, dit AVANT d'interroger quoi que ce soit. */}
+          {/* Ce que chaque base recevra, dit AVANT d'interroger quoi que ce soit : d'abord
+              les sources adaptées d'un coup d'œil, puis base par base la requête EXACTE,
+              copiable, avec le bouton qui n'interroge que celle-là. */}
           {plan && <SourcePlanPanel plan={plan} className="mb-3" />}
+          {plan && (
+            <SourceQueryTable plan={plan} onRerun={rerunSource} running={rerunning}
+              className="mb-3" />
+          )}
+          {rerunNote && (
+            <p className="mb-3 rounded-xl border border-sky-500/20 bg-sky-500/5 px-3 py-2
+                          text-[11px] text-sky-200/85 leading-5">{rerunNote}</p>
+          )}
           <div className="flex items-center gap-2 mb-3">
             <Brain size={12} className="text-violet-400" />
             <span className="text-xs font-semibold text-violet-300 uppercase tracking-wider">
@@ -551,8 +614,82 @@ function QueriesSection({ detail, scenarioId }: { detail: ScenarioDetail; scenar
           {strategy && (
             <div className="space-y-3">
               <div className="rounded-xl border border-violet-500/15 bg-violet-500/5 p-3">
-                <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider mb-1">{t("scenarioDetail.queries.generalQuery")}</p>
-                <code className="text-xs text-violet-200 font-mono break-all leading-5">{strategy.general}</code>
+                <div className="mb-1 flex items-center gap-2">
+                  <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider">{t("scenarioDetail.queries.generalQuery")}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditing(e => !e);
+                      setDraft(strategy.general || "");
+                      setSaveError(null);
+                    }}
+                    className="ml-auto rounded-lg border border-violet-500/30 bg-violet-500/10 px-2 py-0.5
+                               text-[10px] text-violet-300 hover:bg-violet-500/20 transition"
+                  >
+                    {editing ? t("scenarioDetail.queries.strategyCancel") : t("scenarioDetail.queries.strategyEdit")}
+                  </button>
+                </div>
+                {!editing && (
+                  <code className="text-xs text-violet-200 font-mono break-all leading-5">{strategy.general}</code>
+                )}
+                {editing && (
+                  <div className="space-y-2">
+                    <textarea
+                      value={draft}
+                      onChange={e => setDraft(e.target.value)}
+                      rows={8}
+                      spellCheck={false}
+                      className="w-full rounded-lg border border-violet-500/25 bg-[rgb(var(--surface))] p-2
+                                 font-mono text-[11px] leading-5 text-violet-100 outline-none
+                                 focus:border-violet-400/50"
+                    />
+                    <p className="text-[11px] text-white/45 leading-5">
+                      {t("scenarioDetail.queries.strategyEditHint")}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={saveStrategy}
+                        disabled={saving || !draft.trim() || draft.trim() === (strategy.general || "")}
+                        className="rounded-xl border border-violet-500/30 bg-violet-500/15 px-3 py-1
+                                   text-[11px] text-violet-200 hover:bg-violet-500/25 transition
+                                   disabled:opacity-40"
+                      >
+                        {saving ? <Loader2 size={10} className="animate-spin inline" />
+                                : t("scenarioDetail.queries.strategySave")}
+                      </button>
+                      <span className="text-[10px] text-white/35">
+                        {t("scenarioDetail.queries.queryChars").replace("{chars}", draft.length.toLocaleString())}
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {saveError && <p className="mt-1 text-[11px] text-rose-400">{saveError}</p>}
+                {saved && (
+                  <div className="mt-2 space-y-1">
+                    <p className="text-[11px] text-gold-300/90 leading-5">
+                      {t("scenarioDetail.queries.strategySavedCorpusStale")}
+                    </p>
+                    {saved.issues?.length > 0 && saved.fixed && (
+                      <div className="rounded-lg border border-gold-500/20 bg-gold-500/5 p-2">
+                        <p className="text-[10px] text-gold-200/90 leading-5">
+                          {t("scenarioDetail.queries.strategyProposed")
+                            .replace("{issues}", saved.issues.map(i => `${i.kind} (${i.count})`).join(", "))}
+                        </p>
+                        <code className="mt-1 block max-h-28 overflow-auto whitespace-pre-wrap break-words
+                                         font-mono text-[10px] leading-5 text-gold-100">{saved.fixed}</code>
+                        <button
+                          type="button"
+                          onClick={() => { setEditing(true); setDraft(saved.fixed || ""); }}
+                          className="mt-1 rounded border border-gold-500/30 bg-gold-500/10 px-2 py-0.5
+                                     text-[10px] text-gold-200 hover:bg-gold-500/20 transition"
+                        >
+                          {t("scenarioDetail.queries.strategyUseProposed")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="rounded-xl border border-blue-500/15 bg-blue-500/5 p-3">
                 <div className="flex items-center justify-between mb-1">

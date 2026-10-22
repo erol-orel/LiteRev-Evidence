@@ -1382,9 +1382,8 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
     `retryable` says whether the cache is still warm, so the screen can say "only these
     will be queried again" rather than promise a short run that would be a whole search."""
     _get_user_scenario_or_404(scenario_id)
-    from .pipeline import (SOURCE_CACHE_TTL_S, _load_source_cache,  # lazy: pipeline is loaded after this module
-                           _source_query_hash)
-    from .search import _load_prisma_identification, _source_label
+    from .pipeline import SOURCE_CACHE_TTL_S, _load_source_cache  # lazy: pipeline is loaded after this module
+    from .search import _load_prisma_identification, _source_label, scenario_source_hash
     figures = _load_prisma_identification(scenario_id) or {}
     outcomes = {str(k): str(v) for k, v in (figures.get("source_outcomes") or {}).items()}
     failed = sorted(name for name, outcome in outcomes.items() if outcome in ("error", "cut_by_budget"))
@@ -1392,8 +1391,8 @@ def get_user_scenario_failed_sources(scenario_id: str) -> dict[str, Any]:
                if str(k) in failed}
     row = _get_user_scenario_or_404(scenario_id)
     cached: dict[str, dict] = {}
+    _hash = scenario_source_hash(scenario_id, row)
     try:
-        _hash = _source_query_hash(row["query"], row.get("filters") or {}, LIVE_MAX_PER_SOURCE, "exhaustive")
         cached = _load_source_cache(_hash)
     except Exception as _e:                                  # noqa: BLE001 - an answer, never fatal
         logger.warning(f"failed-sources cache {scenario_id}: {_e}")
@@ -1468,6 +1467,70 @@ def retry_user_scenario_failed_sources(
         "replayed_from_cache": state["replayed_from_cache"],
         "message": "Les sources en échec sont interrogées de nouveau ; les autres sont rejouées "
                    "depuis le cache des réponses. Suivre /user-scenarios/{id}/populate/status.",
+    }
+
+
+@app.post("/user-scenarios/{scenario_id}/sources/{source}/rerun")
+def rerun_user_scenario_source(
+    scenario_id: str,
+    source: str,
+    lang: str | None = Query(None),
+    resume: bool = True,
+    auto_pipeline: bool = False,
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    """Query ONE database again, and only that one.
+
+    `retry-failed` covers the sources that did not answer; this covers the ones that did.
+    A reviewer who sees that Semantic Scholar received eight keywords instead of the
+    strategy, or that OpenAlex reported a tenth of what its own site reports, had no way to
+    ask for that database alone: the only button was a whole search, thirteen sources and
+    three quarters of an hour.
+
+    The mechanism is the source cache itself. A search replays from the database whatever
+    answer is still fresh (`_load_source_cache`), so forgetting ONE source's row is exactly
+    "query that one again, replay the rest". Nothing leaves the corpus: a federation keeps
+    the links the corpus already had, and whatever this source brings is added.
+
+    `resume` keeps the position a cut source stopped at, so a database that was cut by the
+    time budget continues instead of rereading from the start; `resume=false` forgets it and
+    rereads the source whole. `auto_pipeline` is false by default: this fills the corpus, it
+    does not re-extract."""
+    from .search import FEDERATION_SOURCES, _source_label
+    row = _get_user_scenario_or_404(scenario_id)
+    name = _source_label((source or "").strip().lower())
+    if name not in FEDERATION_SOURCES:
+        raise HTTPException(status_code=404,
+                            detail=f"Source inconnue : {source!r} "
+                                   f"(attendu : {', '.join(FEDERATION_SOURCES)})")
+    job = _user_scenario_populate_jobs.get(scenario_id) or {}
+    if job.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Une recherche est déjà en cours pour ce scénario.")
+    from .pipeline import (_clear_fetch_cursor, _clear_source_cache,  # lazy: a later module
+                           _load_source_cache)
+    from .search import scenario_source_hash
+    fetcher = f"_fetch_{name}"
+    _hash = scenario_source_hash(scenario_id, row)
+    forgotten = _clear_source_cache(_hash, fetcher)
+    if not resume:
+        _clear_fetch_cursor(scenario_id, fetcher=fetcher, query_hash=_hash)
+    replayed = sorted({_source_label(f) for f in _load_source_cache(_hash)})
+    status = _launch_populate_job(scenario_id, row["query"], row.get("filters") or {}, LIVE_MAX_PER_SOURCE,
+                                  include_live=True, lang=_norm_lang(lang), force_live=False,
+                                  auto_pipeline=auto_pipeline)
+    if status == "already_running":
+        raise HTTPException(status_code=409, detail="Une recherche est déjà en cours pour ce scénario.")
+    return {
+        "scenario_id": scenario_id,
+        "status": "started",
+        "source": name,
+        # True when that source had a cached answer that this call forgot. False means it
+        # had none (it failed, or its answer had already expired), and it is queried anyway.
+        "forgot_cached_answer": bool(forgotten),
+        "resume": bool(resume),
+        "replayed_from_cache": replayed,
+        "message": f"{name} est interrogée de nouveau ; les autres sources sont rejouées depuis "
+                   "le cache des réponses. Suivre /user-scenarios/{id}/populate/status.",
     }
 
 

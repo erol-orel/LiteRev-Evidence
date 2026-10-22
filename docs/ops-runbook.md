@@ -434,3 +434,34 @@ are only compass words, and the built-in English names (Bavaria, Lombardy) stay 
 Production: `NUTS_AT_2024.csv` loaded on 13 October 2026 (1,932 regions in 39 countries:
 123 at NUTS 1, 326 at NUTS 2, 1,483 at NUTS 3). NUTS 2024 has no United Kingdom: its papers
 keep their country.
+
+## 12. One database interrogated again, and the key its answer is filed under
+
+A search federates thirteen sources under a time budget of 2,700 seconds. Whatever answers
+is kept in `source_query_cache` for `SOURCE_CACHE_TTL_S` and replayed from the database on
+the next search with no network call, which is what makes a retry cheap:
+
+- **the sources that failed**: `POST /user-scenarios/{id}/sources/retry-failed`. Only the
+  ones whose outcome was `error` or `cut_by_budget` are queried; a failed source is never
+  cached, so nothing has to be forgotten first. `GET .../sources/failed` says which they
+  are, what will be replayed, and, for a source cut by the budget, how far it had read.
+- **one named database, failed or not**: `POST .../sources/{source}/rerun`. It forgets that
+  one source's cached answer and launches an ordinary search, so every other source is
+  replayed. `resume=false` also forgets the position a cut source stopped at, which makes
+  it reread from the beginning instead of continuing.
+
+Both read the key the LAST SEARCH filed its answers under, which that search records in
+`prisma_identification.source_query_hash`. The key covers the query, the filters, the
+per-source cap, the mode and the BOOLEAN that was actually federated, and that last part
+matters: a natural-language question is translated before it is sent, and an OR facet
+widens the boolean, so two scenarios can carry the same question and federate different
+queries. Three did on production. Deriving the key outside the search would mean
+translating the question again, so the readers read the recorded one and fall back to
+deriving it only for a scenario searched before the key was recorded (for a pasted boolean
+strategy, which is every partner review, that derivation is the same key).
+
+What to check when a retry seems to query more than it should: `GET .../sources/failed`.
+An empty `replayed_from_cache` on a scenario that was searched means nothing is cached
+under the key, so the next search is a full one. Either the answers expired, or the
+strategy was edited (`PUT .../search-strategy` forgets them on purpose, since the corpus
+must be rebuilt on the new boolean and the old answers belong to the old one).

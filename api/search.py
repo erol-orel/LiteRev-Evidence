@@ -10,7 +10,7 @@ import os
 import re
 from typing import Any
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text, bindparam
 
@@ -1590,6 +1590,7 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
                                    title_abstract_sources: list | None = None,
                                    unranked_sources: list | None = None,
                                    split_queries: dict | None = None,
+                                   source_query_hash: str | None = None,
                                    preprints_excluded: bool = False,
                                    removed_preprints: int = 0,
                                    preprints_excluded_at_source: list | None = None,
@@ -1834,6 +1835,9 @@ def _prisma_identification_figures(records_by_source: dict, unique_records: int,
         "unranked_sources": sorted({_source_label(s) for s in (unranked_sources or [])}),
         "split_queries": {_source_label(k): [str(q) for q in v]
                           for k, v in (split_queries or {}).items() if v},
+        # The key this search wrote the source cache under, so a screen that wants to
+        # replay or re-query one source reads it instead of deriving it again.
+        "source_query_hash": (str(source_query_hash) if source_query_hash else None),
         "year_slices": {_source_label(k): [str(y) for y in v]
                         for k, v in (year_slices or {}).items() if v},
         "year_slices_capped": {_source_label(k): {str(y): int(n) for y, n in (v or {}).items()}
@@ -2147,14 +2151,15 @@ def get_search_strategy(scenario_id: str, lang: str | None = Query(None, max_len
     return strategy if isinstance(strategy, dict) else {}
 
 
-def _source_plan_payload(query: str) -> dict[str, Any]:
+def _source_plan_payload(query: str, pubmed: str | None = None) -> dict[str, Any]:
     """The plan of a query, with the shortcuts a screen reads at a glance.
 
     One shape for both callers: the search page, which has a query and no scenario yet,
     and the scenario's strategy tab, which has a scenario."""
-    plan = source_query_plan(query)
+    plan = source_query_plan(query, pubmed=pubmed)
     return {
         "query_chars": len(query),
+        "query": query,
         "plan": plan,
         # What a reader wants at a glance: nothing to worry about, or which sources are
         # adapted. `reduced` is the only one that loses terms; `parts` and `body` do not.
@@ -2166,17 +2171,65 @@ def _source_plan_payload(query: str) -> dict[str, Any]:
     }
 
 
+def _federated_boolean(row: dict) -> tuple[str, str, str]:
+    """(general, pubmed, where it came from) for a scenario row: the boolean the federation
+    ACTUALLY sends, not the question that was typed.
+
+    `_run_user_scenario_populate` federates `search_strategy.general` and gives PubMed
+    `search_strategy.pubmed`; it falls back to the raw query only when the stored strategy
+    is absent or degraded, which is exactly `_strategy_is_degraded`. The plan read the raw
+    query instead, so a scenario created from a natural-language question was told that
+    every database would get keywords when in truth they all got the generated boolean.
+    PURE: reads the row it is handed, nothing else."""
+    query = (row.get("query") or "").strip()
+    strategy = row.get("search_strategy")
+    if isinstance(strategy, dict) and not _strategy_is_degraded(strategy, query):
+        general = str(strategy.get("general") or query)
+        return general, str(strategy.get("pubmed") or general), "strategy"
+    return query, query, "query"
+
+
+def scenario_source_hash(scenario_id: str, row: dict | None = None) -> str:
+    """The key the last search wrote this scenario's source cache under.
+
+    Read from the PRISMA figures when the search recorded it there, because deriving it
+    again outside the job would mean re-translating a natural-language question with the
+    model and re-widening the OR facets: a key derived slightly differently reads as "no
+    answer is cached", and asking for one database again would then query all thirteen.
+
+    Derived from the row for a scenario searched before the key was recorded. For a pasted
+    strategy, which is every partner review, that derivation is byte for byte the old key,
+    so those caches stay readable."""
+    try:
+        stored = (_load_prisma_identification(scenario_id) or {}).get("source_query_hash")
+        if isinstance(stored, str) and stored:
+            return stored
+    except Exception as _e:                                  # noqa: BLE001 - fall back below
+        logger.warning(f"scenario_source_hash {scenario_id}: {_e}")
+    row = row or _get_user_scenario_or_404(scenario_id)
+    general, _pubmed, _src = _federated_boolean(row)
+    from .pipeline import _source_query_hash                  # lazy: a later module
+    return _source_query_hash(row.get("query") or "", row.get("filters") or {},
+                              LIVE_MAX_PER_SOURCE, "exhaustive", boolean=general)
+
+
 @app.get("/user-scenarios/{scenario_id}/source-query-plan")
 def get_source_query_plan(scenario_id: str) -> dict[str, Any]:
-    """What each database will receive of this scenario's query, BEFORE a search runs.
+    """What each database will receive of this scenario's strategy, BEFORE a search runs.
 
     Until now a reviewer learned this afterwards, from the PRISMA notes, and only for the
     sources that were reduced or split: a source that refused the query outright simply
-    appeared as failed. The plan is computed from the stored query with the same renderers
-    and the same limits the search uses, so it costs a few milliseconds and no network."""
+    appeared as failed. The plan is computed with the same renderers and the same limits
+    the search uses, so it costs a few milliseconds and no network, and every row now
+    carries `sent`: the exact string that database receives, to paste into its own site and
+    check the count LiteRev reports against the count the database reports."""
     row = _get_user_scenario_or_404(scenario_id)
-    out = _source_plan_payload(row.get("query") or "")
+    general, pubmed, source = _federated_boolean(row)
+    out = _source_plan_payload(general, pubmed=pubmed)
     out["scenario_id"] = scenario_id
+    # Which text was planned, so a screen never implies the typed question was federated.
+    out["planned_from"] = source
+    out["pubmed_query"] = pubmed
     return out
 
 
@@ -2673,6 +2726,68 @@ def post_source_query_plan(payload: SourcePlanIn) -> dict[str, Any]:
     return _source_plan_payload(payload.query)
 
 
+class SearchStrategyIn(BaseModel):
+    """An edited strategy: the boolean the federation sends, and optionally PubMed's own."""
+    general: str = Field(..., min_length=1, max_length=SEARCH_STRATEGY_MAX_CHARS)
+    #: PubMed's variant, the only one that may carry field tags. Absent means "same as
+    #: general", which is what a reviewer who writes one boolean expects.
+    pubmed: str | None = Field(default=None, max_length=SEARCH_STRATEGY_MAX_CHARS)
+
+
+@app.put("/user-scenarios/{scenario_id}/search-strategy")
+def put_search_strategy(scenario_id: str, payload: SearchStrategyIn,
+                        _: None = Depends(require_api_key)) -> dict[str, Any]:
+    """Replace this scenario's search strategy with the one a reviewer wrote.
+
+    Saved AS TYPED, never rewritten: a real imbalance comes back as `issues` and a PROPOSED
+    `fixed`, which the screen offers and the reviewer accepts or ignores. The explanation
+    and the synonyms of the previous strategy are kept, and `edited_at` marks the strategy
+    as a reviewer's, so nothing later mistakes it for a generated one.
+
+    Saving does NOT move the corpus: the corpus still answers the boolean of the last
+    search, and only running the search again redefines it. The answer says so
+    (`corpus_stale`), and returns the plan of the new strategy so the reviewer sees at once
+    what each database would receive.
+
+    One trap handled here: the source cache is keyed by the scenario's QUERY, not by its
+    strategy (`_source_query_hash`). Left alone, the next search would replay every source's
+    answer to the OLD boolean and report it under the new one. So an edit forgets the whole
+    cache of this scenario, and the cut positions with it: the next search really queries
+    every database with what this endpoint just stored."""
+    row = _get_user_scenario_or_404(scenario_id)
+    general = payload.general.strip()
+    pubmed = (payload.pubmed or general).strip()
+    if not general:
+        raise HTTPException(status_code=422, detail="La stratégie ne peut pas être vide.")
+    previous = row.get("search_strategy") if isinstance(row.get("search_strategy"), dict) else {}
+    stored = {k: v for k, v in previous.items() if k in ("explanation", "synonyms")}
+    from datetime import datetime as _datetime
+    stored.update(general=general, pubmed=pubmed,
+                  edited_at=_datetime.utcnow().isoformat(timespec="seconds"))
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE user_scenarios SET search_strategy = CAST(:s AS jsonb), "
+                          "updated_at = NOW() WHERE id = :id"),
+                     {"s": json.dumps(stored), "id": scenario_id})
+    forgotten = 0
+    try:
+        from .pipeline import _clear_fetch_cursor, _clear_source_cache  # lazy: a later module
+        # The key the LAST SEARCH wrote under. The new strategy will usually hash to a
+        # different key on its own, since the federated boolean is part of it; clearing
+        # the old one covers the case where an edit lands back on the previous key.
+        _hash = scenario_source_hash(scenario_id, row)
+        forgotten = _clear_source_cache(_hash)
+        _clear_fetch_cursor(scenario_id, query_hash=_hash)
+    except Exception as _e:                                  # noqa: BLE001 - the save stands
+        logger.warning(f"put_search_strategy cache {scenario_id}: {_e}")
+    check = _boolean_syntax_check(general)
+    out = _source_plan_payload(general, pubmed=pubmed)
+    out.update(scenario_id=scenario_id, planned_from="strategy", pubmed_query=pubmed,
+               saved=True, forgotten_source_answers=forgotten,
+               # The corpus answers the PREVIOUS boolean until a search runs again.
+               corpus_stale=True, issues=check.get("issues") or [], fixed=check.get("fixed"))
+    return out
+
+
 class FacetPreviewIn(BaseModel):
     sub_queries: list[dict[str, Any]] | None = None
     combinator: str = Field(default="union")
@@ -2748,59 +2863,116 @@ SOURCE_QUERY_CARRIAGE = (
     ("crossref", "keywords", None),           # free text only, never a boolean
 )
 
+#: Every source the federation queries, by its public name: the ten above, which receive
+#: the boolean, plus Europe PMC's preprint facet, which receives the same boolean
+#: restricted to the preprint servers and so has no query of its own to show. A fetcher is
+#: `_fetch_<name>`, which is what the source cache and the cursors are keyed by.
+FEDERATION_SOURCES = tuple(name for name, _c, _l in SOURCE_QUERY_CARRIAGE) + ("preprints",)
 
-def source_query_plan(boolean: str) -> list[dict]:
+
+#: The renderer each URL-carried source compiles the boolean with, and the measure its
+#: limit is expressed in. Read by the plan AND by nothing else: the search holds the same
+#: pairing inline, and `test_every_database_shows_its_own_query` pins the two together, so
+#: a source cannot be shown a query it will not receive.
+def _url_source_render(name: str):
+    """(render, measure, cap) for a source whose query travels in the URL: the compiler the
+    search SPLITS with, the measure its limit is expressed in, and that limit. The three
+    generic sources are split with `_boolean_to_generic`, the syntax `_clean_boolean`
+    already writes, so their whole form and their parts speak the same language; Semantic
+    Scholar and arXiv have their own compilers for both."""
+    if name == "semantic_scholar":
+        return _boolean_to_s2, _url_encoded_len, S2_MAX_QUERY_ENCODED
+    if name == "arxiv":
+        return _boolean_to_arxiv, _url_encoded_len, URL_QUERY_MAX_ENCODED
+    if name == "doaj":
+        return _boolean_to_generic, len, DOAJ_MAX_QUERY_CHARS
+    return _boolean_to_generic, _url_encoded_len, URL_QUERY_MAX_ENCODED
+
+
+def source_query_plan(boolean: str, pubmed: str | None = None) -> list[dict]:
     """For each source, what it will receive of `boolean`, and why.
 
     `how` is one of: `whole` (the query as written), `body` (whole, in the request body, so
     no length applies), `parts` (split into queries whose union is the query), `reduced`
     (the same tree with each OR block cut to its first terms, exclusions dropped) or
-    `keywords` (free text, this source takes no boolean). PURE: no network, no database."""
+    `keywords` (free text, this source takes no boolean).
+
+    `sent` is the thing a reviewer actually asked for: the EXACT string, or strings, that
+    database receives, in its own syntax, ready to paste into its own site. Saying
+    "openalex: 4 parts" told a reader that something was split but not what was sent, and
+    PRISMA-S asks for the strategy as submitted to each database. One entry normally, one
+    per part when the query is split, and the keyword bag when a source cannot express the
+    boolean at all. `pubmed` is the strategy's own PubMed variant, the only one that keeps
+    its field tags (eutils reads them; every other API matches them as text).
+
+    PURE: no network, no database, no model."""
     from .sources import EPMC_POST_ABOVE_ENCODED, epmc_query
     out: list[dict] = []
     portable = " ".join(_strip_field_tags(boolean or "").split())
     real = bool(portable) and _looks_boolean(portable)
     clean = _clean_boolean(portable) if real else ""
+    # The keyword bag, rendered once: up to six sources can fall back to it.
+    plain = _plain_keywords(boolean or "") or (boolean or "").strip()
     for name, carriage, limit_name in SOURCE_QUERY_CARRIAGE:
         row: dict = {"source": name, "limit": limit_name, "carriage": carriage}
         if not real:
-            row.update(how="keywords", note="no boolean query: every source gets keywords")
+            row.update(how="keywords", note="no boolean query: every source gets keywords",
+                       sent=[plain])
             out.append(row)
             continue
         if carriage == "keywords":
-            row.update(how="keywords", note="this API reads free text, never a boolean")
+            row.update(how="keywords", note="this API reads free text, never a boolean",
+                       sent=[plain])
         elif carriage == "body":
-            row.update(how="body", encoded=_url_encoded_len(clean or portable))
+            # PubMed is the one source that keeps the field tags, and it takes the
+            # strategy's own PubMed variant when there is one. Its year bounds and the
+            # preprint exclusion are appended per slice at search time.
+            sent = (pubmed or boolean or "").strip() if name == "pubmed" else (clean or portable)
+            row.update(how="body", encoded=_url_encoded_len(sent), sent=[sent])
         elif carriage == "body_above":
-            enc = _url_encoded_len(epmc_query(boolean))
+            sent = epmc_query(boolean)
+            enc = _url_encoded_len(sent)
             row.update(how="body" if enc > EPMC_POST_ABOVE_ENCODED else "whole",
-                       encoded=enc, limit_value=EPMC_POST_ABOVE_ENCODED)
+                       encoded=enc, limit_value=EPMC_POST_ABOVE_ENCODED, sent=[sent])
         elif carriage == "operators":
+            # OpenAIRE's query is ALWAYS compiled by `_shorten_boolean`, which also drops
+            # the exclusions, or replaced by the split when one exists: the search never
+            # hands it the clean boolean. So the plan compares the two forms instead of
+            # guessing from the operator count. It guessed before, and on a strategy whose
+            # parts fit in four operators but not in the URL it announced parts where the
+            # search sent a reduction, and the whole boolean where the search dropped a NOT.
             n = _count_operators(clean)
             cap = OPENAIRE_MAX_OPERATORS
-            parts = _split_boolean(portable, 10 ** 6, max_operators=cap) if n > cap else []
-            row.update(how="parts" if parts else ("whole" if n <= cap else "reduced"),
-                       operators=n, limit_value=cap, parts=len(parts) or None)
+            parts = _split_boolean(portable, URL_QUERY_MAX_ENCODED, measure=_url_encoded_len,
+                                   max_operators=cap)
+            short = _shorten_boolean(portable, URL_QUERY_MAX_ENCODED, max_operators=cap,
+                                     measure=_url_encoded_len)
+            row.update(how=("parts" if parts else ("whole" if short and short == clean
+                                                   else "reduced")),
+                       operators=n, limit_value=cap, parts=len(parts) or None,
+                       sent=parts or [short or plain])
         else:                                   # url
-            if name == "semantic_scholar":
-                rendered, cap = (_boolean_to_s2(_parse_boolean_ast(_tokenize_boolean(portable)))
-                                 or ""), S2_MAX_QUERY_ENCODED
-            elif name == "arxiv":
-                rendered, cap = (_boolean_to_arxiv(_parse_boolean_ast(_tokenize_boolean(portable)))
-                                 or ""), URL_QUERY_MAX_ENCODED
-            elif name == "doaj":
-                rendered, cap = clean, DOAJ_MAX_QUERY_CHARS
+            render, measure, cap = _url_source_render(name)
+            if name in ("semantic_scholar", "arxiv"):
+                try:
+                    rendered = render(_parse_boolean_ast(_tokenize_boolean(portable))) or ""
+                except Exception:                        # noqa: BLE001 - a plan, never fatal
+                    rendered = ""
             else:
-                rendered, cap = clean, URL_QUERY_MAX_ENCODED
-            measure = len if name == "doaj" else _url_encoded_len
+                rendered = clean       # OpenAlex, ClinicalTrials.gov, DOAJ: the clean boolean
             if not rendered:
                 row.update(how="keywords", note="this API cannot express the query (a NOT it "
-                                                "has no syntax for)")
+                                                "has no syntax for)", sent=[plain])
             elif measure(rendered) <= cap:
-                row.update(how="whole", encoded=measure(rendered), limit_value=cap)
+                row.update(how="whole", encoded=measure(rendered), limit_value=cap,
+                           sent=[rendered])
             else:
-                parts = _split_boolean(portable, cap, measure=measure)
+                parts = _split_boolean(portable, cap, render=render, measure=measure)
                 row.update(how="parts" if parts else "reduced", encoded=measure(rendered),
-                           limit_value=cap, parts=len(parts) or None)
+                           limit_value=cap, parts=len(parts) or None,
+                           sent=parts or [_shorten_boolean(portable, cap, render=render,
+                                                           measure=measure) or plain])
+        # Never a null and never a blank: a row always names what that database receives.
+        row["sent"] = [s for s in (row.get("sent") or []) if isinstance(s, str) and s.strip()]
         out.append(row)
     return out

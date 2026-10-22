@@ -937,16 +937,30 @@ def _clear_fetch_cursor(scenario_id: str, fetcher: str | None = None,
 
 
 def _source_query_hash(query: str, filters: dict | None, max_results: int,
-                       mode: str = "standard") -> str:
-    """Clé de cache : même requête, mêmes filtres, même plafond par source, même mode.
+                       mode: str = "standard", boolean: str | None = None) -> str:
+    """Clé de cache : même requête, mêmes filtres, même plafond par source, même mode, et
+    même BOOLÉEN fédéré.
 
     Le mode n'entre dans la clé que s'il n'est pas `standard`, celui des recherches d'avant
     le mode exhaustif : une recherche, désormais toujours exhaustive, ne rejoue jamais la
-    réponse plafonnée d'une recherche standard."""
+    réponse plafonnée d'une recherche standard.
+
+    Le booléen non plus n'y entre que s'il DIFFÈRE de la requête, de sorte que toute clé
+    déjà écrite pour une stratégie collée telle quelle (les revues des partenaires) reste
+    la même et garde son cache. Il y entre parce que la clé décrivait la requête SAISIE
+    quand le cache garde ce qu'une base a répondu au booléen RÉELLEMENT envoyé, et deux
+    choses changent celui-ci sans changer celle-là : la traduction d'une question en
+    langage naturel, et l'élargissement aux facettes OU. Mesuré en production : trois
+    scénarios portaient la même question de 62 caractères, l'un en intersection (le booléen
+    principal seul), l'autre en union (« (principal) OR (Machine learning) »), le troisième
+    sans facette. Même clé pour trois fédérations différentes : le premier à chercher
+    écrivait le cache, les autres rejouaient ses notices et les comptaient pour les leurs."""
     import hashlib
     _p = {"q": (query or "").strip(), "f": filters or {}, "m": int(max_results)}
     if mode and mode != "standard":
         _p["x"] = str(mode)
+    if boolean and boolean.strip() != (query or "").strip():
+        _p["b"] = boolean.strip()
     payload = json.dumps(_p, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:40]
 
@@ -991,6 +1005,29 @@ def _load_source_cache(query_hash: str, ttl_s: int | None = None) -> dict[str, d
     except Exception as _e:                                  # noqa: BLE001
         logger.warning(f"_load_source_cache: {_e}")
     return out
+
+
+def _clear_source_cache(query_hash: str, fetcher: str | None = None) -> int:
+    """Forget the cached answer of one source, or of every source, for this query.
+
+    A search replays from `source_query_cache` whatever is still fresh, which is what makes
+    retrying a failed source cheap. The other side of that coin: a source that ANSWERED
+    cannot be queried again while its row is fresh. Dropping its row is therefore the whole
+    mechanism of "search this database again", and dropping every row is what an edited
+    strategy needs, because the cache key is the scenario's query and not the strategy.
+
+    Returns how many rows were forgotten. Never raises: the caller is answering a reviewer."""
+    try:
+        sql = "DELETE FROM source_query_cache WHERE query_hash = :h"
+        params: dict = {"h": query_hash}
+        if fetcher:
+            sql += " AND fetcher = :f"
+            params["f"] = fetcher
+        with engine.begin() as _c:
+            return int(_c.execute(text(sql), params).rowcount or 0)
+    except Exception as _e:                                  # noqa: BLE001
+        logger.warning(f"_clear_source_cache {fetcher or 'all'}: {_e}")
+        return 0
 
 
 def _save_source_cache(fetcher: str, query_hash: str, query: str, links: list,
@@ -1455,6 +1492,11 @@ def _run_user_scenario_populate(
     # pas eu lieu, et alors le statut final relit le dict vivant, comme avant.
     _sources_snapshot: dict | None = None
     _plain_q = query
+    # Lié ICI, hors du try, pour la même raison que les suivants : la clé du cache des
+    # sources le lit, bien plus bas et dans un AUTRE bloc. Le try l'assigne aussitôt, mais
+    # un NameError y serait avalé et la recherche écrirait son cache sous une clé qui
+    # n'existe pas.
+    _boolean = query
     _fallback_q = query
     _openaire_q = query
     _fallback_queries: dict[str, str] = {}
@@ -2786,7 +2828,10 @@ def _run_user_scenario_populate(
     # incluait les échecs.
     _returned: dict[str, int] = {}
     _fetcher_outcome: dict[str, str] = {}
-    _qhash = _source_query_hash(query, filters, max_results, mode=_search_mode)
+    # Le booléen fédéré entre dans la clé : c'est lui que les bases ont reçu, pas la
+    # question saisie (cf. `_source_query_hash`). `_boolean` est ici celui d'après
+    # l'élargissement aux facettes OU, donc exactement ce qui part.
+    _qhash = _source_query_hash(query, filters, max_results, mode=_search_mode, boolean=_boolean)
     if include_live:
         _set_phase("federation")
         # Garde-temps : passé ce délai, les boucles de pagination des sources lentes
@@ -3169,6 +3214,14 @@ def _run_user_scenario_populate(
                 title_abstract_sources=(sorted(_title_abstract_sources) if include_live else []),
                 unranked_sources=(sorted(_unranked_sources) if include_live else []),
                 split_queries=(dict(_split_queries) if include_live else {}),
+                # La clé sous laquelle CETTE recherche a écrit le cache des sources. Les
+                # écrans qui veulent rejouer ou relancer une source la relisent au lieu de
+                # la recalculer : le booléen fédéré en fait partie, et le recalculer hors
+                # du job demanderait de retraduire la question (un appel au modèle) et de
+                # réélargir les facettes. Une clé recalculée de travers ferait croire
+                # qu'aucune réponse n'est en cache, et relancer une seule base relancerait
+                # les treize.
+                source_query_hash=_qhash,
                 # PubMed au-delà de 10 000 notices : ses tranches d'années, et celles d'une
                 # seule année encore au-delà (gardées à 10 000, leurs plus pertinentes).
                 year_slices=(_year_slices_snapshot if include_live else {}),
