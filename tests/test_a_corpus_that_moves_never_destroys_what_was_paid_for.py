@@ -236,3 +236,48 @@ def test_the_free_reset_lists_only_free_outputs():
         col = column.strip(",")
         if col in by_col:
             assert by_col[col]["cost"] == FREE, f"{col} is dropped but is not free"
+
+
+# ── Every path that moves a corpus dates it, the search included ────────────
+def test_the_search_dates_the_corpus_it_changed():
+    """The hole this rule had, found live by its own panel on the partners' data.
+
+    A search freezes the corpus with `_set_scenario_corpus` and, alone among the paths
+    that move it, did not date it. Measured on the COVID exposure review: the resume
+    carried the corpus from 86,716 to 112,182 links while `corpus_moved_at` still read the
+    previous day's scoring pass. An artefact rebuilt between that search and the next
+    scoring therefore reported itself current while describing a corpus 25,000 articles
+    smaller, which is precisely what the dating exists to prevent.
+
+    Read off the source rather than by running a federation: the assertion is that the
+    freeze and the dating sit together, which is the thing that was missing."""
+    import inspect
+
+    from api import pipeline as P
+
+    src = inspect.getsource(P._run_user_scenario_populate)
+    assert "_set_scenario_corpus(" in src, "the fixture reads the right function"
+    assert "mark_corpus_moved(" in src, (
+        "a search that changes the corpus must date it, like every other path that moves it")
+    # And it must be conditional: a replay that changes nothing dates nothing, or it would
+    # drop the free caches on every re-run for no reason.
+    assert "_previous_links" in src and "!= set(_previous_links)" in src, (
+        "the dating must compare the membership before and after, not fire unconditionally")
+
+
+def test_every_path_that_moves_a_corpus_goes_through_the_one_function():
+    """The list, so a path added tomorrow cannot date the corpus one way here and another
+    way there. Nine now: the search is the ninth."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    callers = {
+        p.name
+        for p in list(root.glob("api/*.py")) + [root / "living_review_scheduler.py"]
+        if p.exists() and "mark_corpus_moved(" in p.read_text(encoding="utf-8")
+        and p.name != "scenario_store.py"            # where it is defined
+    }
+    assert "pipeline.py" in callers, "the search is one of them"
+    for expected in ("relevance.py", "double_blind.py", "subsets.py",
+                     "living_review_scheduler.py"):
+        assert expected in callers, f"{expected} stopped dating the corpus"
