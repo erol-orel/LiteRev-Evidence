@@ -25,7 +25,8 @@ from .documents import (
     sanitize_db_text,
 )
 from .scenario_store import (_get_scenario_threshold, _get_user_scenario_or_404, has_abstract_sql,
-                             pipeline_enrich_scope, scenario_scope_sql, scenario_threshold_info)
+                             mark_corpus_moved, pipeline_enrich_scope, scenario_scope_sql,
+                             scenario_threshold_info)
 from .search import (
     DOAJ_MAX_QUERY_CHARS,
     EXHAUSTIVE_MAX_PER_SOURCE,
@@ -3089,6 +3090,32 @@ def _run_user_scenario_populate(
                     f"{'multi ' + '/'.join(_facet_ops(_sub_queries, _combinator)) if _sub_queries else 'mono'})"
                     + (f" ; fédération incomplète ({', '.join(_incomplete_sources) or 'budget'}) : "
                        f"les {len(_keep)} liens d'avant la recherche restent" if _keep is not None else ""))
+        # UNE RECHERCHE QUI CHANGE LE CORPUS LE DATE, comme les huit autres chemins qui le
+        # déplacent. Elle ne le faisait pas, et c'est le plus gros mouvement de tous :
+        # mesuré sur la revue exposition COVID, la reprise a porté le corpus de 86 716 à
+        # 112 182 liens sans que `corpus_moved_at` bouge (il portait encore la date du
+        # scoring de la veille). Un artefact reconstruit entre cette recherche et le
+        # prochain scoring se disait donc à jour en décrivant un corpus 25 000 articles
+        # plus petit : exactement ce que la datation existe pour empêcher. La comparaison
+        # porte sur l'ENSEMBLE des liens, pas sur leur nombre, parce qu'une recherche peut
+        # en échanger un contre un autre ; et un rejeu qui ne change rien ne date rien, de
+        # sorte qu'il n'efface pas les caches gratuits pour rien.
+        if _previous_links is not None:
+            try:
+                with engine.begin() as _mc:
+                    # L'appartenance TELLE QU'ELLE EST, relue après le gel : c'est
+                    # `_set_scenario_corpus` qui décide (il garde aussi les liens qu'un
+                    # relecteur a jugés), et une comparaison reconstruite ici dériverait
+                    # de ce qu'il fait. Une requête indexée sur une colonne de clé.
+                    _now_links = {int(x) for x in _mc.execute(text(
+                        "SELECT document_id FROM article_scenarios WHERE scenario_id = :sid"),
+                        {"sid": scenario_id}).scalars().all()}
+                    if _now_links != set(_previous_links):
+                        mark_corpus_moved(_mc, scenario_id)
+                        logger.info(f"Populate {scenario_id}: corpus daté comme déplacé "
+                                    f"({len(_previous_links)} → {len(_now_links)} liens)")
+            except Exception as _e_moved:                    # noqa: BLE001 - jamais bloquant
+                logger.warning(f"Populate {scenario_id}: corpus non daté ({_e_moved})")
     except Exception as _e_corpus:
         logger.warning(f"Rebuild corpus {scenario_id}: {_e_corpus}")
 
