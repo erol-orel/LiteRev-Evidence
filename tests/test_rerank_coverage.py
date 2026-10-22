@@ -519,3 +519,65 @@ def test_a_click_during_a_sweep_gets_its_progress(seeded, monkeypatch):
     got = R.trigger_rerank(SID, missing_only=True)
     assert got["status"] == "already_running"
     assert got["job"]["reranked"] == 300 and got["job"]["rerank_candidates"] == 15560
+
+
+# ── A pass that fails says what the provider answered ───────────────────────
+def test_a_failed_query_embedding_says_what_the_provider_answered():
+    """Measured on the COVID exposure review: a rescore left all 23,532 unscored articles
+    unscored, the relevant subset stayed the one of the smaller corpus, and the status said
+    only `query_embedding`. A quota, a timeout, a refused key and an unknown model all read
+    the same, so nobody could act: the server log was the one place that said which, and it
+    is not reachable from the interface.
+
+    The report already carried the text (`rep["error"]`); the status threw it away."""
+    from api.relevance import _cosine_entry
+
+    out = _cosine_entry({"unscored": 23532, "retryable": 23532, "partial": True,
+                         "partial_reason": "query_embedding",
+                         "error": "RateLimitError: 429 insufficient_quota"})
+    assert out["cosine_partial_reason"] == "query_embedding"
+    assert out["cosine_error"] == "RateLimitError: 429 insufficient_quota"
+    assert "insufficient_quota" in out["message"], "and the sentence a reviewer reads says it"
+
+
+def test_a_pass_that_succeeded_carries_no_error():
+    """The field must not cry wolf: a complete pass says nothing about a provider."""
+    from api.relevance import _cosine_entry
+
+    out = _cosine_entry({"unscored": 0, "retryable": 0, "partial": False,
+                         "newly_scored": 1200})
+    assert out["cosine_error"] is None
+    assert "message" not in out
+
+
+def test_a_provider_error_that_carries_a_key_is_redacted_before_it_is_served():
+    """A provider's error text can quote the URL it called, and an URL can carry a key. The
+    repository's rule is that no key value is ever printed, stored or served."""
+    import os
+
+    from api.core import URL_KEY_SETTINGS
+    from api.relevance import _cosine_entry
+
+    name = URL_KEY_SETTINGS[0]
+    before = os.environ.get(name)
+    os.environ[name] = "s3cr3t-value-long-enough"
+    try:
+        out = _cosine_entry({"unscored": 1, "retryable": 1, "partial": True,
+                             "partial_reason": "query_embedding",
+                             "error": "BadRequest: GET https://x/y?api_key=s3cr3t-value-long-enough"})
+        assert "s3cr3t-value-long-enough" not in out["cosine_error"]
+        assert "s3cr3t-value-long-enough" not in out["message"]
+    finally:
+        if before is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = before
+
+
+def test_the_served_error_is_bounded():
+    """A provider can answer with a wall of HTML; the status is read by a screen."""
+    from api.relevance import _cosine_entry
+
+    out = _cosine_entry({"unscored": 1, "retryable": 1, "partial": True,
+                         "partial_reason": "query_embedding", "error": "x" * 5000})
+    assert len(out["cosine_error"]) <= 300

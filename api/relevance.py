@@ -23,6 +23,7 @@ from .core import (
     app,
     engine,
     logger,
+    redact_keys,
     require_api_key,
 )
 from .documents import _truncate_to_tokens
@@ -934,11 +935,22 @@ def _cosine_entry(cos: dict | None) -> dict:
         "cosine_crossed_threshold": cos.get("crossed_threshold", 0),
         "cosine_partial": bool(cos.get("partial")),
         "cosine_partial_reason": cos.get("partial_reason"),
+        # CE QUE LE FOURNISSEUR A RÉPONDU, et pas seulement qu'il a dit non. Le compte rendu
+        # le portait déjà (`rep["error"]`) et le statut le jetait : un passage qui échoue sur
+        # le plongement de la requête n'annonçait que « query_embedding », et personne ne
+        # pouvait distinguer un quota d'un délai dépassé, d'une clé refusée ou d'un modèle
+        # inconnu. Mesuré sur la revue exposition COVID : 23 532 articles sont restés sans
+        # score, le sous-ensemble pertinent est resté celui du corpus d'avant, et le journal
+        # du serveur était le seul endroit à dire pourquoi. Redigé : une erreur de
+        # fournisseur peut porter une URL, donc une clé.
+        "cosine_error": (redact_keys(str(cos["error"]))[:300] if cos.get("error") else None),
         "retry_after_s": cos.get("retry_after_s"),
     }
     if _cosine_left_behind(cos):
         out["message"] = (f"{cos.get('unscored') or 0} article(s) sans score, "
-                          f"nouvel essai automatique ({cos.get('partial_reason')}).")
+                          f"nouvel essai automatique ({cos.get('partial_reason')})."
+                          + (f" Le fournisseur a répondu : {out['cosine_error']}"
+                             if out.get("cosine_error") else ""))
     return out
 
 
