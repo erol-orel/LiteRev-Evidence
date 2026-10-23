@@ -147,6 +147,13 @@ def test_the_costly_outputs_are_the_ones_that_read_every_paper():
     # each, a dozen or so. A button announced as free that spends a dozen calls is exactly
     # what this classification exists to prevent.
     assert {o["key"]: o for o in OUTPUTS}["clustering"]["cost"] == ONE_CALL
+    # Neither is the cross-encoder, for the same reason and found the same way: it is
+    # Cohere's, and Cohere bills the query and its documents in batches of about a hundred
+    # papers. The four partner reviews were short 9,772 of these scores, offered as a free
+    # rebuild, which is a hundred or so billed calls behind a button that said it cost
+    # nothing. `scores` above stays free: that one is pgvector, in the database.
+    assert {o["key"]: o for o in OUTPUTS}["rerank"]["cost"] == ONE_PASS
+    assert "rerank" not in free, "the cross-encoder bills, so it is never announced free"
 
 
 # ── Over the database ───────────────────────────────────────────────────────
