@@ -146,8 +146,14 @@ OUTPUTS: tuple[dict[str, Any], ...] = (
               "semantic_scoring", FREE,
               "Relevance scores", "Scores de pertinence",
               "POST /scenarios/{id}/rerank", "review"),
+    # Le cross-encoder est de COHERE, et Cohere facture la requête et ses documents, par
+    # lots d'une centaine d'articles : combler 9 772 scores manquants sur les quatre revues
+    # des partenaires, c'est une centaine d'appels facturés, pas rien. L'annoncer gratuit
+    # est exactement ce que le commentaire du clustering ci-dessus condamne, « le genre de
+    # bouton qui dépense sans prévenir », et c'est la même erreur que le clustering portait
+    # avant #394. ONE_PASS parce que le coût suit le nombre d'articles : il les lit tous.
     _coverage("rerank", "ars.rerank_score IS NOT NULL", OF_CORPUS,
-              "cross_encoder", FREE,
+              "cross_encoder", ONE_PASS,
               "Cross-encoder scores", "Scores du cross-encoder",
               "POST /scenarios/{id}/rerank?missing_only=true", "review"),
     _coverage("fulltext", "d.has_fulltext IS TRUE", OF_RELEVANT,
